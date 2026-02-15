@@ -1,0 +1,43 @@
+"""add_vibe_mode_fields_to_tasks
+
+Revision ID: 3713a331796f
+Revises: a47ef367a4f3
+Create Date: 2026-01-05 17:21:52.069669
+
+"""
+
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+
+# revision identifiers, used by Alembic.
+revision: str = "3713a331796f"
+down_revision: Union[str, None] = "253dd836197e"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # Add vibe_mode column to tasks table
+    op.add_column("tasks", sa.Column("vibe_mode", sa.String(length=20), nullable=True))
+
+    # Add process_description column to tasks table
+    op.add_column("tasks", sa.Column("process_description", sa.Text(), nullable=True))
+
+    # Add examples column to tasks table
+    op.add_column("tasks", sa.Column("examples", sa.JSON(), nullable=True))
+
+    # Update existing rows to have 'task' as default vibe_mode
+    op.execute("UPDATE tasks SET vibe_mode = 'task' WHERE vibe_mode IS NULL")
+
+
+def downgrade() -> None:
+    # Remove examples column
+    op.drop_column("tasks", "examples")
+
+    # Remove process_description column
+    op.drop_column("tasks", "process_description")
+
+    # Remove vibe_mode column
+    op.drop_column("tasks", "vibe_mode")

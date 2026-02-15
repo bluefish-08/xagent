@@ -1,0 +1,279 @@
+"""Website ingestion pipeline for knowledge base.
+
+Crawls a website and imports all discovered pages into the knowledge base.
+"""
+
+import asyncio
+import logging
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+from ..core.schemas import (
+    CrawlResult,
+    IngestionConfig,
+    IngestionResult,
+    WebCrawlConfig,
+    WebIngestionResult,
+)
+from ..web_crawler import WebCrawler
+from .document_ingestion import run_document_ingestion
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_ingestion_config(
+    config: Optional[IngestionConfig],
+) -> IngestionConfig:
+    """Normalize user-provided ingestion configuration into IngestionConfig."""
+    if config is None:
+        return IngestionConfig()
+    if isinstance(config, IngestionConfig):
+        return config
+    if not isinstance(config, dict):
+        raise TypeError(
+            "ingestion_config must be an IngestionConfig instance or a mapping."
+        )
+    return IngestionConfig.model_validate(config)
+
+
+async def run_web_ingestion(
+    collection: str,
+    crawl_config: WebCrawlConfig,
+    *,
+    ingestion_config: Optional[IngestionConfig] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> WebIngestionResult:
+    """Crawl a website and ingest all pages into the knowledge base.
+
+    This pipeline performs the following steps:
+    1. Crawl the website according to the provided configuration
+    2. For each crawled page, save as a temporary file and ingest
+    3. Aggregate statistics and return comprehensive results
+
+    Args:
+        collection: Target collection name for ingestion
+        crawl_config: Website crawling configuration
+        ingestion_config: Optional document ingestion configuration
+        progress_callback: Optional callback for progress updates
+            Args: (message, completed, total)
+        user_id: Optional user ID for ownership tracking
+        is_admin: Whether the user has admin privileges
+
+    Returns:
+        WebIngestionResult: Comprehensive result with statistics
+
+    Raises:
+        ValueError: If configuration is invalid
+        RuntimeError: If ingestion fails critically
+    """
+    start_time = datetime.utcnow()
+    warnings: list[str] = []
+    failed_urls: dict[str, str] = {}
+
+    # Normalize ingestion config
+    ing_cfg = _coerce_ingestion_config(ingestion_config)
+
+    logger.info(
+        f"Starting web ingestion: collection={collection}, "
+        f"start_url={crawl_config.start_url}"
+    )
+
+    # Step 1: Crawl the website
+    logger.info("Step 1: Crawling website")
+    crawler = WebCrawler(crawl_config, progress_callback)
+
+    try:
+        crawl_results: list[CrawlResult] = await crawler.crawl()
+    except Exception as e:
+        logger.exception("Website crawling failed")
+        elapsed_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        return WebIngestionResult(
+            status="error",
+            collection=collection,
+            total_urls_found=0,
+            pages_crawled=0,
+            pages_failed=0,
+            documents_created=0,
+            chunks_created=0,
+            embeddings_created=0,
+            crawled_urls=[],
+            failed_urls={},
+            message=f"Website crawling failed: {str(e)}",
+            warnings=[],
+            elapsed_time_ms=elapsed_ms,
+        )
+
+    pages_crawled = len([r for r in crawl_results if r.status == "success"])
+
+    # Collect failed URLs from crawler
+    for url, error in crawler.failed_urls.items():
+        failed_urls[url] = error
+
+    # Calculate pages_failed (will be updated as ingestion failures are tracked)
+    pages_failed = len(failed_urls)
+
+    logger.info(
+        f"Crawling completed: {pages_crawled} successful, {pages_failed} failed"
+    )
+
+    # Step 2: Ingest each crawled page
+    logger.info("Step 2: Ingesting crawled pages")
+
+    # Create temporary directory for markdown files
+    with tempfile.TemporaryDirectory(prefix="xagent_web_ingest_") as temp_dir:
+        documents_created = 0
+        total_chunks = 0
+        total_embeddings = 0
+
+        for i, crawl_result in enumerate(crawl_results):
+            if crawl_result.status != "success":
+                continue
+
+            # Progress callback
+            if progress_callback:
+                progress_callback(
+                    f"Ingesting page {i + 1}/{len(crawl_results)}: {crawl_result.url}",
+                    i + 1,
+                    len(crawl_results),
+                )
+
+            try:
+                # Save crawled content to temporary markdown file
+                filename = _sanitize_filename(crawl_result.title or f"page_{i + 1}")
+                temp_file = Path(temp_dir) / f"{filename}.md"
+
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    # Add metadata header
+                    f.write(f"# {crawl_result.title or 'Untitled'}\n\n")
+                    f.write(f"**Source:** {crawl_result.url}\n\n")
+                    f.write(f"**Crawled:** {crawl_result.timestamp.isoformat()}\n\n")
+                    f.write("---\n\n")
+                    f.write(crawl_result.content_markdown)
+
+                logger.debug(f"Saved {crawl_result.url} to {temp_file}")
+
+                # Ingest the temporary file
+                import concurrent.futures
+
+                def _ingest_file() -> IngestionResult:
+                    return run_document_ingestion(
+                        collection=collection,
+                        source_path=str(temp_file),
+                        ingestion_config=ing_cfg,
+                        user_id=user_id,
+                        is_admin=is_admin,
+                    )
+
+                # Run ingestion in thread pool to avoid event loop conflicts
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    ingest_result: IngestionResult = await loop.run_in_executor(
+                        executor, _ingest_file
+                    )
+
+                # Track statistics
+                if ingest_result.status == "success":
+                    documents_created += 1
+                    total_chunks += ingest_result.chunk_count
+                    total_embeddings += ingest_result.embedding_count
+                    logger.info(
+                        f"Ingested {crawl_result.url}: "
+                        f"{ingest_result.chunk_count} chunks, "
+                        f"{ingest_result.embedding_count} embeddings"
+                    )
+                else:
+                    failed_urls[crawl_result.url] = ingest_result.message
+                    msg = (
+                        f"Partial ingestion for {crawl_result.url}: "
+                        f"{ingest_result.message}"
+                    )
+                    warnings.append(msg)
+
+            except Exception as e:
+                logger.exception(f"Failed to ingest {crawl_result.url}")
+                failed_urls[crawl_result.url] = str(e)
+                warnings.append(f"Failed to ingest {crawl_result.url}: {str(e)}")
+
+    # Step 3: Compile results
+    elapsed_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+    # Recalculate pages_failed to include ingestion failures
+    # (pages_failed includes both crawl failures and ingestion failures)
+    pages_failed = len(failed_urls)
+
+    # Determine overall status
+    # Check if there were any ingestion failures
+    # (in failed_urls but not in crawler failed_urls)
+    has_ingestion_failures = any(
+        url in failed_urls and url not in crawler.failed_urls
+        for url in [r.url for r in crawl_results if r.status == "success"]
+    )
+
+    # Status determination:
+    # - "error": No docs created AND there were actual failures
+    # - "partial": Some docs created but some failures
+    # - "success": No failures (empty results are successful)
+    total_failures = pages_failed + (1 if has_ingestion_failures else 0)
+
+    if documents_created == 0 and total_failures > 0:
+        status = "error"
+    elif total_failures > 0:
+        status = "partial"
+    else:
+        status = "success"
+
+    crawled_urls_list = [r.url for r in crawl_results if r.status == "success"]
+
+    result = WebIngestionResult(
+        status=status,
+        collection=collection,
+        total_urls_found=crawler.total_urls_found,
+        pages_crawled=pages_crawled,
+        pages_failed=pages_failed,
+        documents_created=documents_created,
+        chunks_created=total_chunks,
+        embeddings_created=total_embeddings,
+        crawled_urls=crawled_urls_list,
+        failed_urls=failed_urls,
+        message=(
+            f"Web ingestion completed: {documents_created} documents, "
+            f"{total_chunks} chunks, {total_embeddings} embeddings"
+        ),
+        warnings=warnings,
+        elapsed_time_ms=elapsed_ms,
+    )
+
+    logger.info(
+        f"Web ingestion completed: {result.status}, "
+        f"{documents_created} documents, {elapsed_ms}ms"
+    )
+
+    return result
+
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a string for use as a filename.
+
+    Args:
+        name: Input string
+
+    Returns:
+        Sanitized filename-safe string
+    """
+    # Remove or replace invalid characters
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        name = name.replace(char, "_")
+
+    # Remove leading/trailing spaces and dots
+    name = name.strip(". ")
+
+    # Limit length
+    if len(name) > 200:
+        name = name[:200]
+
+    return name or "untitled"

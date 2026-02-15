@@ -1,0 +1,452 @@
+import { useState, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Send, Paperclip, X, File as FileIcon, Sparkles, Pause, Play } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { cn, getApiUrl } from "@/lib/utils";
+import { useI18n } from "@/contexts/i18n-context";
+import { ConfigDialog } from "@/components/config-dialog";
+import { apiRequest } from "@/lib/api-wrapper";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+interface ChatInputProps {
+  onSend: (message: string, config?: any) => void | Promise<void>;
+  isLoading?: boolean;
+  files?: File[];
+  onFilesChange?: (files: File[]) => void;
+  showModeToggle?: boolean;
+  mode?: "task" | "process";
+  onModeChange?: (mode: "task" | "process") => void;
+  inputValue?: string;
+  onInputChange?: (value: string) => void;
+  taskStatus?: "pending" | "running" | "completed" | "failed" | "paused";
+  onPause?: () => void;
+  onResume?: () => void;
+  taskConfig?: {
+    model?: string;
+    smallFastModel?: string;
+    visualModel?: string;
+    compactModel?: string;
+  };
+  hideConfig?: boolean;
+  readOnlyConfig?: boolean;
+}
+
+export function ChatInput({
+  onSend,
+  isLoading,
+  files = [],
+  onFilesChange,
+  inputValue,
+  onInputChange,
+  taskStatus,
+  onPause,
+  onResume,
+  taskConfig,
+  hideConfig = false,
+  readOnlyConfig = false
+}: ChatInputProps) {
+  const router = useRouter();
+  const [internalMessage, setInternalMessage] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+  const [showNoModelAlert, setShowNoModelAlert] = useState(false);
+
+  // Determine if controlled or uncontrolled
+  const isControlled = inputValue !== undefined;
+  const message = isControlled ? inputValue : internalMessage;
+
+  const handleMessageChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newValue = e.target.value;
+    if (isControlled) {
+      onInputChange?.(newValue);
+    } else {
+      setInternalMessage(newValue);
+    }
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef(false);
+  const { t } = useI18n();
+  const [agentConfig, setAgentConfig] = useState<{
+    model: string;
+    smallFastModel?: string;
+    visualModel?: string;
+    compactModel?: string;
+    memorySimilarityThreshold?: number;
+  }>({ model: "", memorySimilarityThreshold: 1.5 });
+
+  // Fetch default models on mount
+  useEffect(() => {
+    const fetchDefaultModels = async () => {
+      try {
+        const apiUrl = getApiUrl();
+        // Fetch user default models first
+        const defaultResponse = await apiRequest(`${apiUrl}/api/models/user-default`, {
+          headers: {}
+        });
+
+        let defaultModels: Record<string, any> = {};
+        if (defaultResponse.ok) {
+          const defaults = await defaultResponse.json();
+          if (Array.isArray(defaults)) {
+            defaults.forEach((defaultConfig: any) => {
+              if (defaultConfig && defaultConfig.config_type && defaultConfig.model) {
+                defaultModels[defaultConfig.config_type] = defaultConfig.model;
+              }
+            });
+          }
+        }
+
+        // Fetch all models to find default if no user preference
+        if (!defaultModels.general) {
+          const modelsResponse = await apiRequest(`${apiUrl}/api/models/?category=llm`, {
+            headers: {}
+          });
+          if (modelsResponse.ok) {
+            const data = await modelsResponse.json();
+            if (Array.isArray(data) && data.length > 0) {
+              const defaultModel = data.find((m: any) => m.is_default) || data[0];
+              if (defaultModel) {
+                defaultModels.general = { model_id: defaultModel.model_id };
+              }
+            }
+          }
+        }
+
+        setAgentConfig(prev => ({
+          ...prev,
+          model: prev.model || defaultModels.general?.model_id || "",
+          smallFastModel: prev.smallFastModel || defaultModels.small_fast?.model_id,
+          visualModel: prev.visualModel || defaultModels.visual?.model_id,
+          compactModel: prev.compactModel || defaultModels.compact?.model_id
+        }));
+      } catch (error) {
+        console.error('Failed to fetch default models:', error);
+      }
+    };
+
+    fetchDefaultModels();
+  }, []);
+
+  // Update config when taskConfig changes
+  useEffect(() => {
+    if (taskConfig) {
+      setAgentConfig(prev => ({
+        ...prev,
+        model: taskConfig.model || prev.model,
+        smallFastModel: taskConfig.smallFastModel || prev.smallFastModel,
+        visualModel: taskConfig.visualModel || prev.visualModel,
+        compactModel: taskConfig.compactModel || prev.compactModel
+      }));
+    }
+  }, [taskConfig]);
+
+  const handleConfigChange = (config: {
+    model: string;
+    smallFastModel?: string;
+    visualModel?: string;
+    compactModel?: string;
+    memorySimilarityThreshold?: number;
+  }) => {
+    setAgentConfig(config);
+  };
+
+  const canSubmit = () => {
+    const hasText = message.trim().length > 0;
+    const hasFiles = files.length > 0;
+    return (hasText || hasFiles) && !isLoading;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!canSubmit() || isSubmittingRef.current) return;
+
+    if (!agentConfig.model) {
+      setShowNoModelAlert(true);
+      return;
+    }
+
+    try {
+      isSubmittingRef.current = true;
+      const trimmed = message.trim();
+      const messageToSend = trimmed;
+
+      // Always send task mode config
+      const configToSend = { ...agentConfig, vibeMode: { mode: "task" } };
+
+      await onSend(messageToSend, configToSend);
+
+      if (isControlled) {
+        onInputChange?.("");
+      } else {
+        setInternalMessage("");
+      }
+    } finally {
+      // Small delay to prevent double submission
+      setTimeout(() => {
+        isSubmittingRef.current = false;
+      }, 500);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      // Prevent triggering submit when using IME (e.g., Chinese input method)
+      if (e.nativeEvent.isComposing) {
+        return;
+      }
+      e.preventDefault();
+      handleSubmit(e as any);
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items || []);
+    const fileItems = items.filter(item => item.kind === 'file');
+
+    if (fileItems.length > 0) {
+      e.preventDefault();
+      const pastedFiles: File[] = [];
+
+      fileItems.forEach(item => {
+        const file = item.getAsFile();
+        if (file) {
+          const hasName = typeof (file as any).name === 'string' && (file as any).name.length > 0;
+          if (hasName) {
+            pastedFiles.push(file);
+          } else {
+            const timestamp = Date.now();
+            const mime = item.type || file.type || 'application/octet-stream';
+            const ext = mime.split('/')[1] || 'bin';
+            const namedFile = new File([file], `pasted-file-${timestamp}.${ext}`, {
+              type: mime,
+              lastModified: Date.now(),
+            });
+            pastedFiles.push(namedFile);
+          }
+        }
+      });
+
+      if (pastedFiles.length > 0) {
+        onFilesChange?.([...files, ...pastedFiles]);
+      }
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(e.target.files || []);
+    onFilesChange?.([...files, ...selectedFiles]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const removeFile = (index: number) => {
+    onFilesChange?.(files.filter((_, i) => i !== index));
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* File list */}
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {files.map((file, index) => (
+            <div
+              key={index}
+              className="flex items-center gap-2 px-3 py-2 bg-secondary/80 rounded-xl text-sm animate-fade-in-scale border border-border/50 hover:border-primary/30 transition-colors"
+            >
+              <div className="w-6 h-6 rounded-lg bg-primary/10 flex items-center justify-center">
+                <FileIcon className="w-3.5 h-3.5 text-primary" />
+              </div>
+              <span className="truncate max-w-[120px] font-medium text-foreground/90">{file.name}</span>
+              <span className="text-xs text-muted-foreground">
+                {formatFileSize(file.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeFile(index)}
+                className="ml-1 text-muted-foreground hover:text-destructive transition-colors p-0.5 rounded-md hover:bg-destructive/10"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Input area */}
+      <form
+        onSubmit={handleSubmit}
+        className={cn(
+          "relative rounded-2xl bg-card overflow-hidden transition-all duration-300 border-2 shadow-lg",
+          isFocused
+            ? "border-primary/50 glow-sm shadow-xl"
+            : "border-border/50 hover:border-border"
+        )}
+      >
+        {/* Gradient accent line */}
+        <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r via-accent opacity-0 transition-opacity duration-300"
+          style={{ opacity: isFocused ? 1 : 0 }}
+        />
+
+        <Textarea
+          value={message}
+          onChange={handleMessageChange}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          placeholder={t("chatPage.input.placeholder")}
+          className="min-h-[130px] max-h-[300px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 pb-14 text-[15px] placeholder:text-muted-foreground/60"
+          disabled={isLoading}
+        />
+
+        {/* Bottom toolbar */}
+        <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-gradient-to-t from-card via-card to-transparent">
+          <div className="flex items-center gap-2">
+            {/* Settings button - left of upload */}
+            {!hideConfig && (
+              <>
+                {readOnlyConfig ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 px-3 text-muted-foreground rounded-xl gap-2 cursor-default"
+                    disabled={true}
+                    title={agentConfig.model || t("chatPage.input.noModel")}
+                  >
+                    <span className="text-xs font-normal max-w-[150px] truncate hidden sm:inline-block">
+                      {agentConfig.model || t("chatPage.input.noModel")}
+                    </span>
+                  </Button>
+                ) : (
+                  <ConfigDialog
+                    onConfigChange={handleConfigChange}
+                    currentConfig={agentConfig}
+                    trigger={
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-9 px-3 text-muted-foreground hover:text-foreground hover:bg-secondary/80 rounded-xl gap-2"
+                        disabled={isLoading}
+                        title={t('agent.input.actions.config')}
+                      >
+                        <span className="text-xs font-normal max-w-[150px] truncate hidden sm:inline-block">
+                          {agentConfig.model || t("chatPage.input.noModel")}
+                        </span>
+                      </Button>
+                    }
+                  />
+                )}
+              </>
+            )}
+            {/* Upload button - adjacent to bottom toolbar */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+              accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.webp"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9 px-3 text-muted-foreground hover:text-foreground hover:bg-secondary/80 rounded-xl gap-2"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isLoading}
+              title={t("chatPage.input.actions.upload")}
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground/70 hidden sm:inline">
+              {t("chatPage.input.hintEnter")}
+            </span>
+            {taskStatus === 'running' ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={onPause}
+                className="h-9 px-4 rounded-xl gap-2 font-medium transition-all duration-300 bg-yellow-500 hover:bg-yellow-600 text-white"
+              >
+                <Pause className="h-4 w-4" />
+                <span className="hidden sm:inline">{t("common.pause")}</span>
+              </Button>
+            ) : taskStatus === 'paused' ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={onResume}
+                className="h-9 px-4 rounded-xl gap-2 font-medium transition-all duration-300 bg-green-500 hover:bg-green-600 text-white"
+              >
+                <Play className="h-4 w-4" />
+                <span className="hidden sm:inline">{t("common.resume")}</span>
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                size="sm"
+                disabled={!canSubmit()}
+                className={cn(
+                  "h-9 px-4 rounded-xl gap-2 font-medium transition-all duration-300",
+                  canSubmit() ? "bg-gradient-to-r from-primary hover:opacity-90 glow-sm" : ""
+                )}
+              >
+                {isLoading ? (
+                  <>
+                    <Sparkles className="h-4 w-4 animate-pulse" />
+                    <span className="hidden sm:inline">{t("chatPage.input.processing")}</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-4 w-4" />
+                    <span className="hidden sm:inline">{t("common.send")}</span>
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+        </div>
+      </form>
+
+      <AlertDialog open={showNoModelAlert} onOpenChange={setShowNoModelAlert}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("common.notice")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("chatPage.input.noModelAlert")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => router.push("/models")}>
+              {t("common.confirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}

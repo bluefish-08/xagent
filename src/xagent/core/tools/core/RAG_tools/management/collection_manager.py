@@ -1,0 +1,645 @@
+"""Collection management with embedding binding and lazy initialization.
+
+This module provides collection management functionality for RAG (Retrieval-Augmented Generation)
+systems, including lazy initialization, embedding configuration, and statistics tracking.
+"""
+
+import asyncio
+import logging
+import os
+import threading
+from datetime import datetime, timezone
+from functools import wraps
+from typing import Any, Awaitable, Callable, Optional, TypeVar
+
+import pyarrow as pa  # type: ignore
+
+from ......providers.vector_store.lancedb import DBConnection, get_connection_from_env
+from ..core.parser_registry import get_supported_parsers, validate_parser_compatibility
+from ..core.schemas import CollectionInfo
+from ..utils.model_resolver import resolve_embedding_adapter
+from ..utils.string_utils import escape_lancedb_string
+
+T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+# In-memory locks for collection operations to prevent concurrent initialization conflicts
+_collection_locks: dict[str, asyncio.Lock] = {}
+_collection_locks_lock = threading.Lock()
+
+
+def _run_in_separate_loop(coro: Awaitable[T]) -> T:
+    """Safely run an async coroutine synchronously, even if an event loop is already running.
+
+    This function implements thread isolation to avoid "asyncio.run() cannot be called
+    from a running event loop" errors. It automatically detects the execution context
+    and chooses the appropriate execution strategy.
+
+    Args:
+        coro: The coroutine to execute
+
+    Returns:
+        The result of the coroutine execution
+
+    Raises:
+        Any exception raised by the coroutine
+    """
+    result: Optional[T] = None
+    exception: Optional[Exception] = None
+
+    def target() -> None:
+        """Thread target function that runs the coroutine in its own event loop."""
+        nonlocal result, exception
+        try:
+            # Create a fresh event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(coro)
+            loop.close()
+        except Exception as e:
+            exception = e
+
+    try:
+        # Check if we are already in a running event loop
+        asyncio.get_running_loop()
+        # If yes, we MUST offload to a thread to avoid "nested loop" error
+        logger.debug(
+            "Detected running event loop, using thread isolation for async execution"
+        )
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+    except RuntimeError:
+        # No running event loop, we can use asyncio.run() directly (lighter weight)
+        logger.debug("No running event loop detected, using direct asyncio.run()")
+        return asyncio.run(coro)  # type: ignore
+
+    # Handle results from thread execution
+    if exception:
+        raise exception
+    # Allow None as valid return for async void functions
+    return result  # type: ignore[return-value]
+
+
+def _sync_wrapper(async_func: Callable[..., Awaitable[T]]) -> Callable[..., T]:
+    """Decorator to create synchronous versions of async functions.
+
+    Args:
+        async_func: The async function to wrap
+
+    Returns:
+        Synchronous wrapper function
+    """
+
+    @wraps(async_func)
+    def sync_wrapper(*args: Any, **kwargs: Any) -> T:
+        # Import here to avoid circular imports and allow mocking in tests
+        coro: Awaitable[T] = async_func(*args, **kwargs)
+        return _run_in_separate_loop(coro)
+
+    return sync_wrapper
+
+
+def _get_collection_lock(collection_name: str) -> asyncio.Lock:
+    """Get or create a lock for collection operations with thread-safe double-checked locking.
+
+    This function implements double-checked locking to safely handle concurrent access
+    to the global collection locks dictionary without unnecessary lock contention.
+    """
+    # First check (lock-free) - for performance on hot path
+    if collection_name in _collection_locks:
+        return _collection_locks[collection_name]
+
+    # Second check (with lock) - for safety on cold path
+    with _collection_locks_lock:
+        if collection_name not in _collection_locks:
+            _collection_locks[collection_name] = asyncio.Lock()
+        return _collection_locks[collection_name]
+
+
+class CollectionManager:
+    """Manager for collection metadata operations with LanceDB storage.
+
+    This class handles collection lifecycle management including initialization,
+    statistics tracking, and persistence to LanceDB.
+    """
+
+    def __init__(self) -> None:
+        self._conn: Optional[DBConnection] = None
+
+    async def _get_connection(self) -> DBConnection:
+        """Lazy initialization of LanceDB connection.
+
+        Returns:
+            The LanceDB connection instance
+        """
+        if self._conn is None:
+            self._conn = get_connection_from_env()
+        return self._conn
+
+    async def get_collection(self, collection_name: str) -> CollectionInfo:
+        """Get collection metadata from storage.
+
+        Args:
+            collection_name: Name of the collection
+
+        Returns:
+            CollectionInfo instance
+
+        Raises:
+            ValueError: If collection not found
+        """
+        conn = await self._get_connection()
+
+        try:
+            # Try to read from collection_metadata table
+            table = conn.open_table("collection_metadata")
+            # Use safe parameterized query to prevent SQL injection
+            safe_name = escape_lancedb_string(collection_name)
+            result = table.search().where(f"name = '{safe_name}'").to_pandas()
+
+            if result.empty:
+                raise ValueError(f"Collection '{collection_name}' not found")
+
+            # Convert to dict and deserialize
+            data = result.iloc[0].to_dict()
+            return CollectionInfo.from_storage(data)
+
+        except Exception as e:
+            # Table might not exist yet, or other LanceDB errors
+            logger.debug(f"Error reading collection {collection_name}: {e}")
+            raise ValueError(f"Collection '{collection_name}' not found")
+
+    async def save_collection(self, collection: CollectionInfo) -> None:
+        """Save collection metadata to storage with retry mechanism.
+
+        Args:
+            collection: CollectionInfo to save
+        """
+        lock = _get_collection_lock(collection.name)
+
+        async with lock:
+            await self._save_collection_with_retry(collection)
+
+    async def _save_collection_with_retry(
+        self, collection: CollectionInfo, max_retries: int = 3
+    ) -> None:
+        """Save collection with retry mechanism for concurrent updates.
+
+        Args:
+            collection: CollectionInfo to save
+            max_retries: Maximum number of retry attempts
+
+        Raises:
+            Exception: If all retry attempts fail
+        """
+        conn = await self._get_connection()
+
+        for attempt in range(max_retries):
+            try:
+                # Ensure collection_metadata table exists
+                await self._ensure_metadata_table()
+
+                # Prepare data for storage
+                data = collection.to_storage()
+                data["updated_at"] = datetime.now(timezone.utc).replace(
+                    tzinfo=None
+                )  # Fresh timestamp
+
+                # Upsert to LanceDB: delete existing then add new
+                table = conn.open_table("collection_metadata")
+                safe_name = escape_lancedb_string(collection.name)
+
+                # Check if collection already exists
+                existing = table.search().where(f"name = '{safe_name}'").to_pandas()
+                if not existing.empty:
+                    # Delete existing record
+                    table.delete(f"name = '{safe_name}'")
+
+                # Add new record
+                table.add([data])
+                return
+
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to save collection {collection.name} after {max_retries} attempts: {e}"
+                    )
+                    raise
+
+                # Exponential backoff
+                wait_time = 0.1 * (2**attempt)
+                logger.warning(
+                    f"Save attempt {attempt + 1} failed for {collection.name}, retrying in {wait_time}s: {e}"
+                )
+                await asyncio.sleep(wait_time)
+
+    async def _ensure_metadata_table(self) -> None:
+        """Ensure collection_metadata table exists in LanceDB.
+
+        Creates the table if it doesn't exist, otherwise does nothing.
+        """
+
+        conn = await self._get_connection()
+
+        schema = pa.schema(
+            [
+                ("name", pa.string()),
+                ("schema_version", pa.string()),
+                ("embedding_model_id", pa.string()),  # Nullable
+                ("embedding_dimension", pa.int32()),  # Nullable
+                ("documents", pa.int32()),
+                ("processed_documents", pa.int32()),
+                ("parses", pa.int32()),
+                ("chunks", pa.int32()),
+                ("embeddings", pa.int32()),
+                ("document_names", pa.string()),  # JSON string
+                ("collection_locked", pa.bool_()),
+                ("allow_mixed_parse_methods", pa.bool_()),
+                ("skip_config_validation", pa.bool_()),
+                ("created_at", pa.timestamp("us")),
+                ("updated_at", pa.timestamp("us")),
+                ("last_accessed_at", pa.timestamp("us")),
+                ("extra_metadata", pa.string()),  # JSON string
+            ]
+        )
+
+        # Check if table already exists
+        table_names_fn = getattr(conn, "table_names", None)
+        table_exists = False
+        if table_names_fn:
+            try:
+                existing_tables = table_names_fn()
+                table_exists = "collection_metadata" in existing_tables
+            except Exception as e:
+                logger.debug(f"Table names check failed: {e}")
+
+        if not table_exists:
+            try:
+                conn.create_table("collection_metadata", schema=schema)
+            except Exception as e:
+                logger.debug(f"Table creation failed (may already exist): {e}")
+                # Table might already exist, continue
+
+    async def initialize_collection_embedding(
+        self, collection_name: str, embedding_model_id: str
+    ) -> "CollectionInfo":
+        """Initialize collection with embedding configuration.
+
+        This implements the "First Document Wins" lazy initialization strategy.
+
+        Args:
+            collection_name: Name of the collection
+            embedding_model_id: Embedding model ID to use
+
+        Returns:
+            Initialized CollectionInfo
+
+        Raises:
+            ValueError: If collection already initialized with different model
+        """
+        lock = _get_collection_lock(collection_name)
+
+        async with lock:
+            # Get current state
+            try:
+                collection = await self.get_collection(collection_name)
+            except ValueError:
+                # Collection doesn't exist, create it
+                collection = CollectionInfo(name=collection_name)
+
+            # Check if already initialized
+            if collection.is_initialized:
+                if collection.embedding_model_id != embedding_model_id:
+                    raise ValueError(
+                        f"Collection '{collection_name}' already initialized with "
+                        f"model '{collection.embedding_model_id}'. Cannot change to '{embedding_model_id}'."
+                    )
+                # Already initialized with same model, return as-is
+                return collection
+
+            # Initialize embedding config
+            embedding_config, _ = resolve_embedding_adapter(embedding_model_id)
+
+            # Update collection
+            updated_collection = collection.model_copy(
+                update={
+                    "embedding_model_id": embedding_model_id,
+                    "embedding_dimension": embedding_config.dimension,
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                }
+            )
+
+            # Save to storage
+            await self._save_collection_with_retry(updated_collection)
+
+            logger.info(
+                f"Initialized collection '{collection_name}' with embedding model '{embedding_model_id}'"
+            )
+            return updated_collection
+
+    async def update_collection_stats(
+        self,
+        collection_name: str,
+        documents_delta: int = 0,
+        processed_documents_delta: int = 0,
+        parses_delta: int = 0,
+        chunks_delta: int = 0,
+        embeddings_delta: int = 0,
+        document_name: Optional[str] = None,
+    ) -> "CollectionInfo":
+        """Update collection statistics after document processing.
+
+        Args:
+            collection_name: Name of the collection
+            documents_delta: Change in total document count
+            processed_documents_delta: Change in successfully processed document count
+            parses_delta: Change in parse count
+            chunks_delta: Change in chunk count
+            embeddings_delta: Change in embedding count
+            document_name: Document name to add to document_names list
+
+        Returns:
+            Updated CollectionInfo
+        """
+        lock = _get_collection_lock(collection_name)
+
+        async with lock:
+            try:
+                collection = await self.get_collection(collection_name)
+            except ValueError:
+                # Auto-create collection if it doesn't exist
+                collection = CollectionInfo(name=collection_name)
+                # Save the newly created collection to storage
+                await self._save_collection_with_retry(collection)
+            # Update statistics
+            updated_data = {
+                "documents": collection.documents + documents_delta,
+                "processed_documents": collection.processed_documents
+                + processed_documents_delta,
+                "parses": collection.parses + parses_delta,
+                "chunks": collection.chunks + chunks_delta,
+                "embeddings": collection.embeddings + embeddings_delta,
+                "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                "last_accessed_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            }
+
+            # Update document names
+            if document_name:
+                new_document_names = collection.document_names.copy()
+                if document_name not in new_document_names:
+                    new_document_names.append(document_name)
+                updated_data["document_names"] = new_document_names
+
+            updated_collection = collection.model_copy(update=updated_data)
+            await self._save_collection_with_retry(updated_collection)
+
+            return updated_collection
+
+    async def validate_document_processing(
+        self,
+        collection_name: str,
+        file_path: str,
+        parsing_method: str,
+        chunking_method: str,
+    ) -> None:
+        """Validate document processing config against collection settings.
+
+        Args:
+            collection_name: Name of the collection
+            file_path: Path to the document file
+            parsing_method: Parsing method to use
+            chunking_method: Chunking method to use
+
+        Raises:
+            ValueError: If validation fails
+        """
+        try:
+            collection = await self.get_collection(collection_name)
+        except ValueError:
+            # Collection doesn't exist yet, skip validation (it will be initialized later)
+            return
+
+        # Skip validation if configured
+        if collection.skip_config_validation:
+            return
+
+        # Check collection lock
+        if collection.collection_locked:
+            # Strict validation - could add more rules here
+            pass
+
+        # Check parsing method compatibility
+        if not collection.allow_mixed_parse_methods and parsing_method != "default":
+            file_ext = os.path.splitext(file_path)[1]
+
+            if not validate_parser_compatibility(
+                file_ext, parsing_method, collection.allow_mixed_parse_methods
+            ):
+                supported = get_supported_parsers(file_ext)
+                raise ValueError(
+                    f"Parser method '{parsing_method}' not compatible with file type '{file_ext}'. "
+                    f"Supported methods: {supported}"
+                )
+
+    async def mark_collection_accessed(self, collection_name: str) -> None:
+        """Mark collection as accessed by updating last_accessed_at timestamp.
+
+        This is a lightweight operation that updates the access timestamp
+        without acquiring a lock for performance reasons.
+        """
+        # Simple update without lock for performance, timestamp accuracy is not critical
+        try:
+            collection = await self.get_collection(collection_name)
+            updated = collection.model_copy(
+                update={
+                    "last_accessed_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                }
+            )
+            await self._save_collection_with_retry(updated)
+        except Exception as e:
+            logger.debug(
+                f"Failed to update last_accessed_at for {collection_name}: {e}"
+            )
+
+
+# Global singleton instance
+collection_manager = CollectionManager()
+
+
+# Synchronous wrapper functions using decorator
+def get_collection_sync(collection_name: str) -> "CollectionInfo":
+    """Synchronous version of get_collection for non-async contexts.
+
+    Args:
+        collection_name: Name of the collection to retrieve
+
+    Returns:
+        CollectionInfo instance
+
+    Raises:
+        ValueError: If collection not found
+    """
+    return _sync_wrapper(collection_manager.get_collection)(collection_name)
+
+
+def initialize_collection_embedding_sync(
+    collection_name: str, embedding_model_id: str
+) -> "CollectionInfo":
+    """Synchronous version of initialize_collection_embedding.
+
+    Args:
+        collection_name: Name of the collection
+        embedding_model_id: Embedding model ID to use
+
+    Returns:
+        Initialized CollectionInfo
+
+    Raises:
+        ValueError: If collection already initialized with different model
+    """
+    return _sync_wrapper(collection_manager.initialize_collection_embedding)(
+        collection_name, embedding_model_id
+    )
+
+
+def validate_document_processing_sync(
+    collection_name: str, file_path: str, parsing_method: str, chunking_method: str
+) -> None:
+    """Synchronous version of validate_document_processing.
+
+    Args:
+        collection_name: Name of the collection
+        file_path: Path to the document file
+        parsing_method: Parsing method to use
+        chunking_method: Chunking method to use
+
+    Raises:
+        ValueError: If validation fails
+    """
+    _sync_wrapper(collection_manager.validate_document_processing)(
+        collection_name, file_path, parsing_method, chunking_method
+    )
+
+
+def update_collection_stats_sync(
+    collection_name: str,
+    documents_delta: int = 0,
+    processed_documents_delta: int = 0,
+    parses_delta: int = 0,
+    chunks_delta: int = 0,
+    embeddings_delta: int = 0,
+    document_name: Optional[str] = None,
+) -> "CollectionInfo":
+    """Synchronous version of update_collection_stats.
+
+    Args:
+        collection_name: Name of the collection
+        documents_delta: Change in total document count
+        processed_documents_delta: Change in successfully processed document count
+        parses_delta: Change in parse count
+        chunks_delta: Change in chunk count
+        embeddings_delta: Change in embedding count
+        document_name: Document name to add to document_names list
+
+    Returns:
+        Updated CollectionInfo
+    """
+    return _sync_wrapper(collection_manager.update_collection_stats)(
+        collection_name,
+        documents_delta,
+        processed_documents_delta,
+        parses_delta,
+        chunks_delta,
+        embeddings_delta,
+        document_name,
+    )
+
+
+def mark_collection_accessed_sync(collection_name: str) -> None:
+    """Synchronous version of mark_collection_accessed.
+
+    Args:
+        collection_name: Name of the collection to mark as accessed
+    """
+    _sync_wrapper(collection_manager.mark_collection_accessed)(collection_name)
+
+
+def rebuild_collection_metadata() -> None:
+    """Rebuild collection_metadata table from existing data.
+
+    This function reads all collections from documents/parses/chunks/embeddings tables
+    and creates corresponding entries in the collection_metadata table.
+
+    Use this to migrate existing data when collection_metadata table is missing or outdated.
+
+    This is a synchronous blocking operation.
+    """
+    from xagent.providers.vector_store.lancedb import get_connection_from_env
+
+    from . import collections
+
+    # Get all existing collections (use is_admin=True to bypass user filtering)
+    result = collections.list_collections(is_admin=True)
+
+    if result.status != "success":
+        logger.error(f"Failed to list collections: {result.message}")
+        return
+
+    if not result.collections:
+        return
+
+    # Get connection and find embeddings tables
+    conn = get_connection_from_env()
+    table_names = conn.table_names()  # type: ignore[attr-defined]
+    embeddings_tables = [t for t in table_names if t.startswith("embeddings_")]
+
+    # Save each collection to metadata table
+    for collection in result.collections:
+        try:
+            # Infer embedding_model_id from embeddings tables
+            embedding_model_id = None
+            embedding_dimension = None
+
+            if collection.embeddings > 0:
+                # Find which embeddings table has data for this collection
+                for table_name in embeddings_tables:
+                    table = conn.open_table(table_name)
+                    count = table.count_rows(
+                        f"collection = '{escape_lancedb_string(collection.name)}'"
+                    )
+                    if count > 0:
+                        # Extract model name from table name
+                        # Table names use underscores (e.g., embeddings_text_embedding_v4)
+                        # Model IDs use hyphens (e.g., text-embedding-v4)
+                        embedding_model_id = table_name.replace(
+                            "embeddings_", ""
+                        ).replace("_", "-")
+
+                        # Get vector dimension from schema
+                        schema = table.schema
+                        vector_field = schema.field("vector")
+                        if hasattr(vector_field, "type"):
+                            vector_type = vector_field.type
+                            if hasattr(vector_type, "list_size"):
+                                embedding_dimension = vector_type.list_size
+                            else:
+                                # Variable length list, get first row to infer dimension
+                                sample = table.search().limit(1).to_pandas()
+                                if not sample.empty and "vector" in sample.columns:
+                                    embedding_dimension = len(sample.iloc[0]["vector"])
+                        break
+
+            # Update collection with embedding info
+            updated_collection = collection.model_copy(
+                update={
+                    "embedding_model_id": embedding_model_id,
+                    "embedding_dimension": embedding_dimension,
+                }
+            )
+
+            # Use the async save_collection method through sync wrapper
+            _sync_wrapper(collection_manager.save_collection)(updated_collection)
+        except Exception as e:
+            logger.error(f"Failed to rebuild collection '{collection.name}': {e}")

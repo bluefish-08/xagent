@@ -1,0 +1,854 @@
+"""Vector storage operations for RAG tools.
+
+This module provides functions for:
+1. Reading chunks from database for embedding computation
+2. Writing embedding vectors to database with idempotency
+3. Vector validation and consistency checking
+
+This module handles pure vector data management and does not perform
+any text-to-vector conversion (that's handled by AgentOS embedding nodes).
+"""
+
+from __future__ import annotations
+
+import logging
+import numbers
+import os
+import time
+from typing import Any, Dict, List, Optional, cast
+
+import pandas as pd
+
+from ......providers.vector_store.lancedb import get_connection_from_env
+from ..core.config import IndexPolicy
+from ..core.exceptions import (
+    ConfigurationError,
+    DatabaseOperationError,
+    DocumentValidationError,
+    VectorValidationError,
+)
+from ..core.schemas import (
+    ChunkEmbeddingData,
+    ChunkForEmbedding,
+    EmbeddingReadResponse,
+    EmbeddingWriteResponse,
+)
+from ..LanceDB.model_tag_utils import to_model_tag
+from ..LanceDB.schema_manager import ensure_chunks_table, ensure_embeddings_table
+from ..utils.lancedb_query_utils import query_to_list
+from ..utils.metadata_utils import deserialize_metadata, serialize_metadata
+from ..utils.string_utils import build_lancedb_filter_expression
+from ..utils.user_permissions import UserPermissions
+from .index_manager import get_index_manager
+
+logger = logging.getLogger(__name__)
+
+
+def _should_reindex(
+    table: Any,
+    table_name: str,
+    total_upserted: int,
+    policy: IndexPolicy,
+) -> bool:
+    """Determine if reindex should be triggered.
+
+    Args:
+        table: LanceDB table instance
+        table_name: Table name for tracking
+        total_upserted: Number of rows upserted in this operation
+        policy: Index policy configuration
+
+    Returns:
+        True if reindex should be triggered
+    """
+    # Immediate reindex if enabled
+    if policy.enable_immediate_reindex and total_upserted > 0:
+        return True
+
+    # Batch size threshold
+    if total_upserted >= policy.reindex_batch_size:
+        return True
+
+    # Smart reindex: check unindexed ratio
+    if policy.enable_smart_reindex:
+        try:
+            stats = table.index_stats("vector_idx")
+            if stats.num_indexed_rows > 0:
+                unindexed_ratio = stats.num_unindexed_rows / stats.num_indexed_rows
+                if unindexed_ratio > policy.reindex_unindexed_ratio_threshold:
+                    return True
+
+            # Absolute threshold for unindexed rows
+            if stats.num_unindexed_rows > 10000:
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not get index stats for %s: %s", table_name, e)
+
+    return False
+
+
+def _trigger_reindex(table: Any, table_name: str) -> bool:
+    """Trigger reindex operation on the table."""
+    try:
+        logger.info("Triggering reindex for %s", table_name)
+        table.optimize()
+        logger.info("Reindex completed for %s", table_name)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Reindex failed for %s: %s", table_name, e)
+        return False
+
+
+def validate_query_vector(
+    query_vector: List[float],
+    model_tag: Optional[str] = None,
+    conn: Any = None,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> None:
+    """Validate query vector format and content.
+
+    Args:
+        query_vector: Query vector to validate
+        model_tag: Optional model tag for dimension validation
+        conn: Optional LanceDB connection for validation
+        user_id: Optional user ID for filtering (for multi-tenancy)
+        is_admin: Whether user has admin privileges
+    """
+    if not isinstance(query_vector, list):
+        raise VectorValidationError("query_vector must be a list")
+
+    if len(query_vector) == 0:
+        raise VectorValidationError("query_vector cannot be empty")
+
+    # Use numbers.Number to support numpy scalar types (np.int32, np.float64, etc.)
+    if not all(isinstance(x, numbers.Number) for x in query_vector):
+        raise VectorValidationError("query_vector must contain only numbers")
+
+    # Check for invalid values (NaN or infinity)
+    # Convert to float first to handle numpy scalar types
+    for x in query_vector:
+        if not isinstance(x, numbers.Real):
+            continue  # Skip non-real numbers (e.g., complex numbers)
+        float_val = float(x)
+        if float_val != float_val or abs(float_val) == float("inf"):
+            raise VectorValidationError(
+                "query_vector contains invalid values (NaN or infinity)"
+            )
+
+    if model_tag and conn:
+        # First validate model_tag format and table existence
+        normalized_model_tag = to_model_tag(model_tag)
+        validate_embed_model(conn, normalized_model_tag)
+
+        table_name = f"embeddings_{normalized_model_tag}"
+        try:
+            table = conn.open_table(table_name)
+            expected_dim = None
+
+            # Method 1: Try to get dimension from schema (for fixed-size vector columns)
+            try:
+                vector_field = table.schema.field("vector")
+                # Safely check if list_size attribute exists (fixed-size list)
+                list_size = getattr(vector_field.type, "list_size", None)
+                if list_size is not None:
+                    expected_dim = list_size
+            except (AttributeError, KeyError) as e:
+                logger.debug(
+                    "Could not get vector dimension from schema for %s: %s. Will try to infer from data.",
+                    table_name,
+                    e,
+                )
+
+            # Method 2: If schema doesn't have fixed dimension, infer from actual data
+            if expected_dim is None:
+                expected_dim = get_stored_vector_dimension(
+                    conn, model_tag, user_id, is_admin
+                )
+
+            # Perform dimension validation if we got a dimension
+            if expected_dim is not None:
+                if len(query_vector) != expected_dim:
+                    raise VectorValidationError(
+                        f"Query vector dimension {len(query_vector)} does not match stored dimension {expected_dim} for model '{model_tag}'"
+                    )
+            else:
+                logger.warning(
+                    "Could not determine expected vector dimension for %s "
+                    "(table may be empty or schema is variable-length). "
+                    "Skipping dimension consistency check.",
+                    table_name,
+                )
+        except VectorValidationError:
+            # Re-raise validation errors (don't catch them)
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Failed to perform dimension validation for %s: %s. Skipping dimension consistency check.",
+                table_name,
+                e,
+            )
+
+
+def validate_embed_model(conn: Any, model_tag: str) -> None:
+    """Validate embed model exists and is accessible."""
+    import re
+
+    # Validate model_tag format (cannot contain characters that affect table name)
+    if not re.match(r"^[a-zA-Z0-9_-]+$", model_tag):
+        raise VectorValidationError(
+            f"Invalid model_tag format: {model_tag}. Only alphanumeric, underscore, and hyphen allowed."
+        )
+
+    # Validate that the corresponding table exists
+    table_name = f"embeddings_{model_tag}"
+    try:
+        conn.open_table(table_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Embeddings table %s for model %s not found or inaccessible: %s",
+            table_name,
+            model_tag,
+            e,
+        )
+        raise VectorValidationError(
+            f"Embeddings table for model '{model_tag}' does not exist or is inaccessible: {str(e)}"
+        ) from e
+
+
+def get_stored_vector_dimension(
+    conn: Any,
+    model_tag: str,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> Optional[int]:
+    """Get the vector dimension for a model from database.
+
+    Args:
+        conn: LanceDB connection
+        model_tag: Model tag to look up
+        user_id: Optional user ID for filtering (for multi-tenancy)
+        is_admin: Whether user has admin privileges
+
+    Returns:
+        Vector dimension if found, None otherwise
+    """
+    try:
+        normalized_model_tag = to_model_tag(model_tag)
+        table_name = f"embeddings_{normalized_model_tag}"
+        table = conn.open_table(table_name)
+
+        # Apply user filter for multi-tenancy
+        user_filter_expr = UserPermissions.get_user_filter(user_id, is_admin)
+
+        # Query one record to get dimension, with optional user filtering
+        # OPTIMIZATION: Use unified query_to_list() with three-tier fallback
+        if user_filter_expr:
+            sample_list = query_to_list(table.search().where(user_filter_expr).limit(1))
+        else:
+            sample_list = query_to_list(table.head(1))
+
+        if sample_list:
+            vector_dim = sample_list[0].get("vector_dimension")
+            if vector_dim is not None:
+                return int(vector_dim)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "Could not get stored vector dimension for %s: %s. This is expected if the table is new or empty.",
+            model_tag,
+            e,
+        )
+        pass
+    return None
+
+
+def read_chunks_for_embedding(
+    collection: str,
+    doc_id: str,
+    parse_hash: str,
+    model: str,
+    filters: Optional[Dict[str, Any]] = None,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> EmbeddingReadResponse:
+    """Read chunks from database for embedding computation."""
+    try:
+        # Validate inputs
+        if not collection or not doc_id or not parse_hash or not model:
+            raise DocumentValidationError(
+                "Collection, doc_id, parse_hash, and model are required"
+            )
+
+        logger.info(
+            "Reading chunks for embedding: collection=%s, doc_id=%s, parse_hash=%s..., model=%s",
+            collection,
+            doc_id,
+            parse_hash[:8],
+            model,
+        )
+
+        # Get database connection
+        conn = get_connection_from_env()
+
+        ensure_chunks_table(conn)
+
+        # Build query filters
+        query_filters: Dict[str, Any] = {
+            "collection": collection,
+            "doc_id": doc_id,
+            "parse_hash": parse_hash,
+        }
+
+        # Add additional filters if provided
+        if filters:
+            query_filters.update(filters)
+
+        # Read chunks from database
+        chunks_table = conn.open_table("chunks")
+
+        # Build combined filter expression with user permissions
+        base_filter_expr = build_lancedb_filter_expression(query_filters)
+        user_filter_expr = UserPermissions.get_user_filter(user_id, is_admin)
+
+        if user_filter_expr and base_filter_expr:
+            filter_expr = f"({base_filter_expr}) and ({user_filter_expr})"
+        elif user_filter_expr:
+            filter_expr = user_filter_expr
+        else:
+            filter_expr = base_filter_expr
+
+        try:
+            # OPTIMIZATION: Use count_rows() for memory-efficient counting
+            total_count = chunks_table.count_rows(filter_expr)
+            if total_count == 0:
+                logger.info("No chunks found for the given criteria")
+                return EmbeddingReadResponse(chunks=[], total_count=0, pending_count=0)
+
+            # OPTIMIZATION: Use unified query_to_list() with three-tier fallback
+            chunks_data = query_to_list(chunks_table.search().where(filter_expr))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to read chunks for embedding: %s", e)
+            raise DatabaseOperationError(
+                f"Failed to read chunks for embedding: {e}"
+            ) from e
+
+        # Check which chunks already have embeddings
+        embedded_chunk_ids = set()
+        model_tag = to_model_tag(model)
+        embeddings_table_name = f"embeddings_{model_tag}"
+
+        try:
+            # Get vector dimension from collection metadata or model config
+            vector_dim = None
+            try:
+                from ..management.collection_manager import get_collection_sync
+
+                coll_info = get_collection_sync(collection)
+                vector_dim = coll_info.embedding_dimension
+            except Exception:
+                # Fallback to resolving the model config
+                from ..utils.model_resolver import resolve_embedding_adapter
+
+                embedding_config, _ = resolve_embedding_adapter(model)
+                vector_dim = embedding_config.dimension
+
+            ensure_embeddings_table(conn, model_tag, vector_dim=vector_dim)
+            embeddings_table = conn.open_table(embeddings_table_name)
+
+            # Get existing embeddings for these chunks
+            # Only select chunk_id column to avoid loading unnecessary vector data
+            embedding_filters = {
+                "collection": collection,
+                "doc_id": doc_id,
+                "parse_hash": parse_hash,
+                "model": model,
+            }
+            base_embedding_filter_expr = build_lancedb_filter_expression(
+                embedding_filters
+            )
+
+            # Add user permission filter for multi-tenancy
+            user_filter_expr = UserPermissions.get_user_filter(user_id, is_admin)
+
+            # Combine filters
+            if user_filter_expr and base_embedding_filter_expr:
+                embedding_filter_expr = (
+                    f"({base_embedding_filter_expr}) and ({user_filter_expr})"
+                )
+            elif user_filter_expr:
+                embedding_filter_expr = user_filter_expr
+            else:
+                embedding_filter_expr = base_embedding_filter_expr
+
+            # OPTIMIZATION: Use unified query_to_list() with three-tier fallback
+            embeddings_data = query_to_list(
+                embeddings_table.search()
+                .where(embedding_filter_expr)
+                .select(["chunk_id"])
+            )
+            # Filter out None values (from NaN normalization)
+            embedded_chunk_ids = {
+                item["chunk_id"]
+                for item in embeddings_data
+                if item.get("chunk_id") is not None
+            }
+
+        except Exception as e:  # noqa: BLE001
+            # If embeddings table doesn't exist or query fails, assume no embeddings exist
+            logger.warning(
+                "Failed to query existing embeddings for model %s (assuming none exist): %s",
+                model,
+                e,
+            )
+            embedded_chunk_ids = set()
+
+        # OPTIMIZATION: Filter and construct ChunkForEmbedding objects in one pass
+        pending_chunks = []
+        for chunk_dict in chunks_data:
+            chunk_id = chunk_dict["chunk_id"]
+            if chunk_id not in embedded_chunk_ids:
+                # Deserialize metadata from JSON string to dictionary
+                metadata = deserialize_metadata(chunk_dict.get("metadata"))
+
+                # Arrow/to_list() returns None instead of NaN, so direct None check is sufficient
+                index_value = chunk_dict.get("index")
+                index = int(index_value) if index_value is not None else 0
+
+                page_number_value = chunk_dict.get("page_number")
+                # Convert to int only if valid and > 0 (schema requires gt=0)
+                if page_number_value is not None:
+                    page_num = int(page_number_value)
+                    page_number = page_num if page_num > 0 else None
+                else:
+                    page_number = None
+
+                # Normalize optional string fields: Arrow/to_list() returns None, not NaN
+                section = chunk_dict.get("section")
+                anchor = chunk_dict.get("anchor")
+                json_path = chunk_dict.get("json_path")
+
+                chunk = ChunkForEmbedding(
+                    doc_id=chunk_dict["doc_id"],
+                    chunk_id=chunk_id,
+                    parse_hash=chunk_dict["parse_hash"],
+                    index=index,
+                    text=chunk_dict["text"],
+                    chunk_hash=chunk_dict["chunk_hash"],
+                    page_number=page_number,
+                    section=section,
+                    anchor=anchor,
+                    json_path=json_path,
+                    metadata=metadata,
+                )
+                pending_chunks.append(chunk)
+
+        pending_count = len(pending_chunks)
+
+        logger.info(
+            "Found %d total chunks, %d need embedding for model %s",
+            total_count,
+            pending_count,
+            model,
+        )
+
+        return EmbeddingReadResponse(
+            chunks=pending_chunks, total_count=total_count, pending_count=pending_count
+        )
+
+    except Exception as e:
+        if isinstance(
+            e,
+            (
+                DocumentValidationError,
+                DatabaseOperationError,
+                ConfigurationError,
+                VectorValidationError,
+            ),
+        ):
+            raise
+        logger.error("Failed to read chunks for embedding: %s", e)
+        raise DatabaseOperationError(f"Failed to read chunks for embedding: {e}") from e
+
+
+def write_vectors_to_db(
+    collection: str,
+    embeddings: List[ChunkEmbeddingData],
+    create_index: bool = True,
+    user_id: Optional[int] = None,
+) -> EmbeddingWriteResponse:
+    """Write embedding vectors to database with idempotency."""
+    if not embeddings:
+        return EmbeddingWriteResponse(
+            upsert_count=0, deleted_stale_count=0, index_status="skipped"
+        )
+
+    try:
+        # Validate inputs
+        if not collection:
+            raise DocumentValidationError("Collection name is required")
+
+        # Group embeddings by model for batch processing
+        embeddings_by_model: Dict[str, List[ChunkEmbeddingData]] = {}
+        for embedding in embeddings:
+            model = embedding.model
+            if model not in embeddings_by_model:
+                embeddings_by_model[model] = []
+            embeddings_by_model[model].append(embedding)
+
+        total_upserted = 0
+        index_statuses = []
+
+        # Get database connection
+        conn = get_connection_from_env()
+
+        # Process each model separately
+        for model, model_embeddings in embeddings_by_model.items():
+            model_tag = to_model_tag(model)
+            table_name = f"embeddings_{model_tag}"
+
+            # Get vector dimension from first embedding for validation and logging
+            first_embedding = model_embeddings[0]
+            vector_dim = len(first_embedding.vector)
+
+            vector_dimensions = [len(item.vector) for item in model_embeddings]
+            unique_dims = set(vector_dimensions)
+            if len(unique_dims) > 1:
+                logger.error(
+                    "Multiple vector dimensions found in batch for model %s: %s",
+                    model,
+                    unique_dims,
+                )
+                raise VectorValidationError(
+                    f"Multiple vector dimensions found for model {model}: {unique_dims}"
+                )
+            logger.info(
+                "Vector dimension consistency check passed: all vectors have dimension %d",
+                vector_dim,
+            )
+
+            logger.info(
+                "Writing %d embeddings for model %s to table %s (vector_dim: %d)",
+                len(model_embeddings),
+                model,
+                table_name,
+                vector_dim,
+            )
+
+            # Ensure schema compatibility before writing
+            conn_any = cast(Any, conn)
+            try:
+                existing_tables: List[str] = []
+                if hasattr(conn_any, "table_names"):
+                    existing_tables = list(conn_any.table_names())
+                if table_name in existing_tables:
+                    existing_table = conn.open_table(table_name)
+                    vector_field = existing_table.schema.field("vector")
+                    if hasattr(vector_field.type, "list_size"):
+                        existing_dim = vector_field.type.list_size
+                        if existing_dim != vector_dim:
+                            logger.warning(
+                                "Dropping table %s due to vector dimension mismatch: existing=%s, new=%s",
+                                table_name,
+                                existing_dim,
+                                vector_dim,
+                            )
+                            drop_fn = getattr(conn_any, "drop_table", None)
+                            if callable(drop_fn):
+                                drop_fn(table_name)
+                    else:
+                        logger.warning(
+                            "Dropping table %s due to incompatible vector field type",
+                            table_name,
+                        )
+                        drop_fn = getattr(conn_any, "drop_table", None)
+                        if callable(drop_fn):
+                            drop_fn(table_name)
+            except Exception as schema_check_error:  # noqa: BLE001
+                logger.warning("Error checking table schema: %s", schema_check_error)
+                try:
+                    drop_fn = getattr(conn_any, "drop_table", None)
+                    if callable(drop_fn):
+                        drop_fn(table_name)
+                except Exception as drop_error:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to drop table %s: %s", table_name, drop_error
+                    )
+                    pass
+
+            # Ensure embeddings table exists with the correct schema
+            ensure_embeddings_table(conn, model_tag, vector_dim=vector_dim)
+            embeddings_table = conn.open_table(table_name)
+
+            # Process embeddings in batches to prevent memory issues and LanceDB spills
+            batch_size = int(os.getenv("LANCEDB_BATCH_SIZE", "1000"))
+            total_batches = (len(model_embeddings) + batch_size - 1) // batch_size
+            logger.info(
+                "Processing %d embeddings in %d batches of size %d",
+                len(model_embeddings),
+                total_batches,
+                batch_size,
+            )
+
+            # OPTIMIZATION: Batch validate vector dimensions using list comprehension
+            vector_dims = [len(emb.vector) for emb in model_embeddings]
+            if not all(dim == vector_dim for dim in vector_dims):
+                # Find the first inconsistent dimension for error reporting
+                for i, dim in enumerate(vector_dims):
+                    if dim != vector_dim:
+                        raise VectorValidationError(
+                            f"Inconsistent vector dimensions in batch for model {model}: "
+                            f"expected {vector_dim}, got {dim} at index {i}"
+                        )
+
+            # OPTIMIZATION: Use single timestamp for entire batch
+            batch_timestamp = pd.Timestamp.now(tz="UTC")
+
+            upserted_count = 0
+            failed_batches = 0
+
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, len(model_embeddings))
+                batch_embeddings = model_embeddings[start_idx:end_idx]
+
+                # OPTIMIZATION: Prepare records for this batch using list comprehension
+                records_to_merge = [
+                    {
+                        "collection": collection,
+                        "doc_id": embedding.doc_id,
+                        "chunk_id": embedding.chunk_id,
+                        "parse_hash": embedding.parse_hash,
+                        "model": model,
+                        "vector": embedding.vector,
+                        "text": embedding.text,
+                        "chunk_hash": embedding.chunk_hash,
+                        "created_at": batch_timestamp,
+                        "vector_dimension": vector_dim,
+                        "metadata": serialize_metadata(embedding.metadata),
+                        "user_id": user_id,  # Add user_id for multi-tenancy
+                    }
+                    for embedding in batch_embeddings
+                ]
+
+                try:
+                    # Try merge_insert first (preferred method for upserts)
+                    embeddings_table.merge_insert(
+                        ["collection", "doc_id", "chunk_id", "parse_hash", "model"]
+                    ).when_matched_update_all().when_not_matched_insert_all().execute(
+                        records_to_merge
+                    )
+                    method_used = "merge_insert"
+                except Exception as merge_error:  # noqa: BLE001
+                    error_str = str(merge_error).lower()
+                    error_type = type(merge_error).__name__
+
+                    # Identify non-recoverable errors that should not fallback to add
+                    # These indicate serious issues like schema mismatches or data corruption
+                    non_recoverable_keywords = [
+                        "schema",
+                        "type mismatch",
+                        "type error",
+                        "validation",
+                        "invalid",
+                        "corrupt",
+                        "malformed",
+                        "dimension",
+                        "field",
+                        "column",
+                        "attributeerror",
+                    ]
+
+                    is_recoverable = not any(
+                        keyword in error_str for keyword in non_recoverable_keywords
+                    )
+
+                    if not is_recoverable:
+                        # Log critical error and re-raise without fallback
+                        logger.error(
+                            "merge_insert failed with non-recoverable error for batch %d/%d "
+                            "(error_type=%s): %s. This may indicate schema mismatch or data corruption. "
+                            "Not attempting fallback to add() method.",
+                            batch_idx + 1,
+                            total_batches,
+                            error_type,
+                            merge_error,
+                        )
+                        raise
+
+                    # For recoverable errors (e.g., temporary issues, network errors), attempt fallback
+                    logger.warning(
+                        "merge_insert failed for batch %d/%d (error_type=%s): %s; "
+                        "attempting fallback to add() method",
+                        batch_idx + 1,
+                        total_batches,
+                        error_type,
+                        merge_error,
+                    )
+                    try:
+                        embeddings_table.add(pd.DataFrame(records_to_merge))
+                        method_used = "add"
+                        logger.info(
+                            "Successfully used add() fallback for batch %d/%d after merge_insert failure",
+                            batch_idx + 1,
+                            total_batches,
+                        )
+                    except Exception as add_error:  # noqa: BLE001
+                        logger.error(
+                            "Fallback add() also failed for batch %d/%d: %s. "
+                            "Both merge_insert and add() methods failed.",
+                            batch_idx + 1,
+                            total_batches,
+                            add_error,
+                        )
+                        raise
+
+                    batch_upserted = len(records_to_merge)
+                    upserted_count += batch_upserted
+                    logger.info(
+                        "Successfully processed batch %d/%d (%d embeddings) for model %s using %s",
+                        batch_idx + 1,
+                        total_batches,
+                        batch_upserted,
+                        model,
+                        method_used,
+                    )
+
+                    # Add a small delay between batches to allow I/O operations to complete
+                    if batch_idx < total_batches - 1:  # No delay after the last batch
+                        time.sleep(0.1)
+
+                except Exception as batch_error:  # noqa: BLE001
+                    failed_batches += 1
+                    logger.error(
+                        "Failed to process batch %d/%d: %s",
+                        batch_idx + 1,
+                        total_batches,
+                        batch_error,
+                    )
+                    logger.error(
+                        "Batch details: start_idx=%d, end_idx=%d, batch_size=%d, model=%s",
+                        start_idx,
+                        end_idx,
+                        len(records_to_merge),
+                        model,
+                    )
+
+                    # For critical LanceDB errors, consider reducing batch size
+                    if "Spill has sent an error" in str(batch_error):
+                        logger.error(
+                            "Critical LanceDB spill error detected. "
+                            "Consider reducing batch size by setting LANCEDB_BATCH_SIZE environment variable."
+                        )
+                        if batch_size > 50:  # Reduce to even smaller size
+                            new_batch_size = max(50, batch_size // 2)
+                            logger.info(
+                                "Reducing batch size from %d to %d",
+                                batch_size,
+                                new_batch_size,
+                            )
+                            batch_size = new_batch_size
+                            total_batches = (
+                                len(model_embeddings) + batch_size - 1
+                            ) // batch_size
+                    continue
+
+            # Log final batch processing summary
+            if failed_batches > 0:
+                logger.warning(
+                    "Batch processing completed with %d failed batches out of %d total batches for model %s",
+                    failed_batches,
+                    total_batches,
+                    model,
+                )
+                if model_embeddings:
+                    logger.warning(
+                        "Successfully processed %d out of %d embeddings (%.1f%% success rate)",
+                        upserted_count,
+                        len(model_embeddings),
+                        upserted_count / len(model_embeddings) * 100,
+                    )
+            logger.info(
+                "Successfully merged %d embeddings for model %s", upserted_count, model
+            )
+
+            logger.info(
+                "Processed model %s: upserted %d embeddings", model, upserted_count
+            )
+
+            if upserted_count == 0 and model_embeddings:
+                upserted_count = len(model_embeddings)
+                logger.debug(
+                    "No batches reported upserts; defaulting upsert_count to input size %d",
+                    upserted_count,
+                )
+
+            total_upserted += upserted_count
+
+            # Handle index creation and reindexing if requested
+            if create_index:
+                try:
+                    # Use index manager for index creation
+                    index_manager = get_index_manager()
+                    index_status, index_advice = index_manager.check_and_create_index(
+                        embeddings_table, table_name, readonly=False
+                    )
+                    index_statuses.append(index_status)
+
+                    # Trigger reindex if needed
+                    policy = IndexPolicy()
+                    if _should_reindex(
+                        embeddings_table, table_name, upserted_count, policy
+                    ):
+                        reindex_success = _trigger_reindex(embeddings_table, table_name)
+                        if reindex_success:
+                            logger.info("Reindex triggered for %s", table_name)
+                        else:
+                            logger.warning("Reindex failed for %s", table_name)
+
+                except Exception as index_error:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to create index for %s: %s", table_name, index_error
+                    )
+                    index_statuses.append("failed")
+            else:
+                index_statuses.append("skipped")
+
+        # Determine overall index status
+        if "index_building" in index_statuses:
+            overall_index_status = "created"
+        elif "index_ready" in index_statuses:
+            overall_index_status = "ready"
+        elif "failed" in index_statuses or "index_corrupted" in index_statuses:
+            overall_index_status = "failed"
+        elif "below_threshold" in index_statuses:
+            overall_index_status = "skipped_threshold"
+        else:
+            overall_index_status = "skipped"
+
+        logger.info(
+            "Embedding write completed: %d upserted, index status: %s",
+            total_upserted,
+            overall_index_status,
+        )
+
+        return EmbeddingWriteResponse(
+            upsert_count=total_upserted,
+            deleted_stale_count=0,  # merge_insert handles updates automatically
+            index_status=overall_index_status,
+        )
+
+    except Exception as e:
+        if isinstance(
+            e,
+            (
+                DocumentValidationError,
+                DatabaseOperationError,
+                ConfigurationError,
+                VectorValidationError,
+            ),
+        ):
+            raise
+        logger.error("Failed to write embeddings to database: %s", e)
+        raise DatabaseOperationError(
+            f"Failed to write embeddings to database: {e}"
+        ) from e

@@ -1,0 +1,375 @@
+from unittest.mock import Mock
+
+import pytest
+from sqlalchemy.orm import Session
+
+from xagent.core.model import ChatModelConfig
+from xagent.web.models import Model, UserDefaultModel, UserModel
+from xagent.web.services.llm_utils import UserAwareModelStorage
+
+
+@pytest.fixture
+def mock_db():
+    return Mock(spec=Session)
+
+
+@pytest.fixture
+def mock_core_storage(monkeypatch):
+    core = Mock()
+    monkeypatch.setattr("xagent.web.services.llm_utils.CoreStorage", lambda *args: core)
+    return core
+
+
+@pytest.fixture
+def storage(mock_db, mock_core_storage):
+    return UserAwareModelStorage(mock_db)
+
+
+class TestGetLLMByNameWithAccess:
+    def test_returns_llm_when_model_exists_no_user(self, storage, mock_core_storage):
+        mock_llm = Mock()
+        mock_model = Mock(
+            spec=ChatModelConfig, id=1, model_id="test-model", model_name="test-model"
+        )  # Added model_name
+        mock_core_storage.load.return_value = ChatModelConfig(
+            id="model", model_name="model"
+        )
+        mock_core_storage.get_db_model.return_value = mock_model
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+
+        result = storage.get_llm_by_name_with_access("test-model")
+
+        assert result == mock_llm
+        mock_core_storage.load.assert_called_once_with("test-model")
+
+    def test_returns_llm_when_user_has_access(
+        self, storage, mock_db, mock_core_storage
+    ):
+        mock_llm = Mock()
+        mock_model = Mock(
+            spec=ChatModelConfig, id=1, model_id="test-model", model_name="test-model"
+        )  # Added model_name
+        mock_user_model = Mock(spec=UserModel)
+        mock_core_storage.load.return_value = ChatModelConfig(
+            id="model", model_name="model"
+        )
+
+        mock_core_storage.get_db_model.return_value = mock_model
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+        mock_db.query.return_value.filter.return_value.first.return_value = (
+            mock_user_model
+        )
+
+        result = storage.get_llm_by_name_with_access("test-model", user_id=1)
+
+        assert result == mock_llm
+
+    def test_returns_none_when_user_no_access(
+        self, storage, mock_db, mock_core_storage
+    ):
+        mock_model = Mock(
+            spec=ChatModelConfig, id=1, model_id="test-model", model_name="test-model"
+        )  # Added model_name
+        mock_core_storage.load.return_value = {"model": "config"}
+        mock_core_storage.get_db_model.return_value = mock_model
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        result = storage.get_llm_by_name_with_access("test-model", user_id=1)
+
+        assert result is None
+
+    def test_returns_none_when_invalid_model_provider(self, storage, mock_core_storage):
+        mock_model = Mock(
+            spec=Model, id=1, model_id="test-model", model_name="test-model"
+        )  # Wrong type
+        mock_core_storage.load.return_value = {"model": "config"}
+        mock_core_storage.get_db_model.return_value = mock_model
+
+        result = storage.get_llm_by_name_with_access("test-model")
+
+        assert result is None
+
+    def test_returns_none_when_model_config_is_not_chat_model(
+        self, storage, mock_core_storage, mock_db
+    ):
+        """Test that non-ChatModelConfig types are rejected"""
+        from xagent.core.model.model import EmbeddingModelConfig
+
+        # Setup: load returns an EmbeddingModelConfig instead of ChatModelConfig
+        mock_embedding_config = EmbeddingModelConfig(
+            id="embedding-model", model_name="text-embedding-ada-002"
+        )
+        mock_db_model = Mock(
+            id=1, model_id="embedding-model", model_name="embedding-model"
+        )
+
+        mock_core_storage.load.return_value = mock_embedding_config
+        mock_core_storage.get_db_model.return_value = mock_db_model
+
+        result = storage.get_llm_by_name_with_access("embedding-model")
+
+        assert result is None
+        mock_core_storage.create_llm_instance.assert_not_called()
+
+    def test_accepts_valid_chat_model_config(self, storage, mock_core_storage, mock_db):
+        """Test that valid ChatModelConfig is accepted (positive case)"""
+        mock_llm = Mock()
+        mock_chat_config = ChatModelConfig(id="gpt-4", model_name="gpt-4")
+        mock_db_model = Mock(id=1, model_id="gpt-4", model_name="gpt-4")
+
+        mock_core_storage.load.return_value = mock_chat_config
+        mock_core_storage.get_db_model.return_value = mock_db_model
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+
+        result = storage.get_llm_by_name_with_access("gpt-4")
+
+        assert result == mock_llm
+        mock_core_storage.create_llm_instance.assert_called_once_with(mock_chat_config)
+
+
+class TestGetConfiguredDefaults:
+    def test_returns_user_specific_defaults(self, storage, mock_db, mock_core_storage):
+        """Test that user-specific defaults are returned when available"""
+        mock_llm = Mock()
+        mock_model = Mock(model_id="model-1")
+        mock_config = Mock(spec=ChatModelConfig)
+
+        # Setup user defaults
+        mock_general = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="general"
+        )
+        mock_fast = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="small_fast"
+        )
+        mock_vision = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="visual"
+        )
+        mock_compact = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="compact"
+        )
+
+        # Mock query chain for each config type
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.first.side_effect = [
+            mock_general,
+            mock_fast,
+            mock_vision,
+            mock_compact,
+        ]
+
+        mock_core_storage.load.return_value = mock_config
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        assert result == (mock_llm, mock_llm, mock_llm, mock_llm)
+        assert mock_core_storage.load.call_count == 4
+        assert mock_core_storage.create_llm_instance.call_count == 4
+
+    def test_falls_back_to_admin_defaults(self, storage, mock_db, mock_core_storage):
+        """Test fallback to admin shared defaults when user defaults missing"""
+        mock_llm = Mock()
+        mock_model = Mock(model_id="admin-model")
+        mock_config = Mock(spec=ChatModelConfig)
+
+        # No user-specific defaults
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.first.side_effect = [None, None, None, None]
+
+        # Admin defaults available
+        mock_admin_general = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="general"
+        )
+        mock_admin_fast = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="small_fast"
+        )
+        mock_admin_vision = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="visual"
+        )
+        mock_admin_compact = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="compact"
+        )
+
+        mock_filter.all.return_value = [
+            mock_admin_general,
+            mock_admin_fast,
+            mock_admin_vision,
+            mock_admin_compact,
+        ]
+
+        mock_core_storage.load.return_value = mock_config
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        assert result == (mock_llm, mock_llm, mock_llm, mock_llm)
+        assert mock_core_storage.load.call_count == 4
+        assert mock_core_storage.create_llm_instance.call_count == 4
+
+    def test_partial_user_defaults_fills_from_admin(
+        self, storage, mock_db, mock_core_storage
+    ):
+        """Test that missing user defaults are filled from admin defaults"""
+        mock_user_llm = Mock()
+        mock_admin_llm = Mock()
+        mock_user_model = Mock(model_id="user-model")
+        mock_admin_model = Mock(model_id="admin-model")
+        mock_user_config = Mock(spec=ChatModelConfig)
+        mock_admin_config = Mock(spec=ChatModelConfig)
+
+        # User has only general and fast defaults
+        mock_general = Mock(
+            spec=UserDefaultModel, model=mock_user_model, config_type="general"
+        )
+        mock_fast = Mock(
+            spec=UserDefaultModel, model=mock_user_model, config_type="small_fast"
+        )
+
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.first.side_effect = [mock_general, mock_fast, None, None]
+
+        # Admin has vision and compact
+        mock_admin_vision = Mock(
+            spec=UserDefaultModel, model=mock_admin_model, config_type="visual"
+        )
+        mock_admin_compact = Mock(
+            spec=UserDefaultModel, model=mock_admin_model, config_type="compact"
+        )
+        mock_filter.all.return_value = [mock_admin_vision, mock_admin_compact]
+
+        def load_side_effect(model_id):
+            if model_id == "user-model":
+                return mock_user_config
+            return mock_admin_config
+
+        def create_instance_side_effect(config):
+            if config == mock_user_config:
+                return mock_user_llm
+            return mock_admin_llm
+
+        mock_core_storage.load.side_effect = load_side_effect
+        mock_core_storage.create_llm_instance.side_effect = create_instance_side_effect
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        assert result == (mock_user_llm, mock_user_llm, mock_admin_llm, mock_admin_llm)
+
+    def test_falls_back_to_env_when_no_models(
+        self, storage, mock_db, mock_core_storage, monkeypatch
+    ):
+        """Test fallback to environment variables when no models configured"""
+        mock_env_llm = Mock()
+
+        # No user defaults
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.first.side_effect = [None, None, None, None]
+
+        # No admin defaults
+        mock_filter.all.return_value = []
+
+        # Mock environment fallback
+        monkeypatch.setattr(
+            "xagent.web.services.llm_utils.create_llm_from_env", lambda: mock_env_llm
+        )
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        assert result == (mock_env_llm, mock_env_llm, mock_env_llm, mock_env_llm)
+
+    def test_uses_default_llm_for_missing_specialized(
+        self, storage, mock_db, mock_core_storage
+    ):
+        """Test that default LLM is used when specialized LLMs are missing"""
+        mock_default_llm = Mock()
+        mock_model = Mock(model_id="default-model")
+        mock_config = Mock(spec=ChatModelConfig)
+
+        # Only general default available
+        mock_general = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="general"
+        )
+
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.first.side_effect = [mock_general, None, None, None]
+
+        # No admin defaults
+        mock_filter.all.return_value = []
+
+        mock_core_storage.load.return_value = mock_config
+        mock_core_storage.create_llm_instance.return_value = mock_default_llm
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        # All should use the default LLM
+        assert result == (
+            mock_default_llm,
+            mock_default_llm,
+            mock_default_llm,
+            mock_default_llm,
+        )
+
+    def test_handles_exception_gracefully(
+        self, storage, mock_db, mock_core_storage, monkeypatch
+    ):
+        """Test that exceptions are handled and fallback to env is used"""
+        mock_env_llm = Mock()
+
+        # Simulate exception during query
+        mock_db.query.side_effect = Exception("Database error")
+
+        monkeypatch.setattr(
+            "xagent.web.services.llm_utils.create_llm_from_env", lambda: mock_env_llm
+        )
+
+        result = storage.get_configured_defaults(user_id=1)
+
+        assert result == (mock_env_llm, mock_env_llm, mock_env_llm, mock_env_llm)
+
+    def test_no_user_id_uses_admin_defaults(self, storage, mock_db, mock_core_storage):
+        """Test that when no user_id provided, only admin defaults are used"""
+        mock_llm = Mock()
+        mock_model = Mock(model_id="admin-model")
+        mock_config = Mock(spec=ChatModelConfig)
+
+        # Admin defaults
+        mock_admin_general = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="general"
+        )
+        mock_admin_fast = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="small_fast"
+        )
+        mock_admin_vision = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="visual"
+        )
+        mock_admin_compact = Mock(
+            spec=UserDefaultModel, model=mock_model, config_type="compact"
+        )
+
+        mock_query = mock_db.query.return_value
+        mock_join = mock_query.join.return_value
+        mock_filter = mock_join.filter.return_value
+        mock_filter.all.return_value = [
+            mock_admin_general,
+            mock_admin_fast,
+            mock_admin_vision,
+            mock_admin_compact,
+        ]
+
+        mock_core_storage.load.return_value = mock_config
+        mock_core_storage.create_llm_instance.return_value = mock_llm
+
+        result = storage.get_configured_defaults(user_id=None)
+
+        assert result == (mock_llm, mock_llm, mock_llm, mock_llm)
+        # Should not query for user-specific defaults
+        assert mock_filter.first.call_count == 0

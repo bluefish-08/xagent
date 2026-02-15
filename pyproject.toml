@@ -1,0 +1,199 @@
+[project]
+authors = [
+  { name = "Jicheng Shi", email = "rogershijicheng@gmail.com" },
+  { name = "Xuye Qin", email = "qinxuye@gmail.com" },
+]
+name = "xagent"
+dynamic = ["version"]
+description = "a powerful agent os with great compatibility"
+license = { text = "Xagent Source License" }
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+  "pydantic >= 2.11.7",
+  "langchain-openai >= 0.3.27",
+  "langchain >= 0.3.26",
+  "langchain-community >= 0.3.21",
+  "openai >= 1.50.0",
+  "anthropic >= 0.40.0",
+  "xinference-client >= 0.13.0",
+  "zai-sdk>=0.0.3.2",
+  "numexpr >= 2.11.0",
+  "aiohttp >= 3.12.14",
+  "beautifulsoup4 >= 4.12.3",
+  "html2text >= 2025.4.15",
+  "PyYAML >= 6.0.2",
+  "fastapi >= 0.35.0",
+  "uvicorn >= 0.35.0",
+  "httpx >= 0.27.2",
+  "rich >= 14.0.0",
+  "prompt_toolkit >= 3.0.0",
+  "langfuse >= 3.2.1",
+  "python-dotenv >= 1.0.1",
+  "mcp>=1.12.4",
+  "requests >= 2.32.0",
+  "pillow >= 10.0.0",
+  "lancedb>=0.13.0",
+  "pyarrow>=16.1.0",
+  # Document parsing libraries
+  "pypdf>=4.0.0",
+  "pdfplumber>=0.10.0",
+  "unstructured>=0.15.0",
+  "pymupdf>=1.23.0",
+  "python-docx>=1.1.0",
+  "openpyxl>=3.1.0",
+  "python-pptx>=0.6.0",
+  "docker>=7.1.0",
+  "pypdf2>=3.0.1",
+  "docling>=2.68.0",
+  # Database dependencies
+  "sqlalchemy>=2.0.0",
+  "alembic>=1.13.0",
+  "python-jose[cryptography]>=3.3.0",
+  "psycopg2-binary>=2.9.0",
+  "json-repair>=0.35.0",
+  "pre-commit>=4.3.0",
+  "jsonschema>=4.25.1",
+  "playwright>=1.40.0",
+  "beartype>=0.18.5",
+]
+
+[project.optional-dependencies]
+deepdoc = [
+  "deepdoc-lib @ git+https://github.com/xorbitsai/deepdoc-lib.git@cd4d0e13a89a3d9ea0716c696357396e84e81cf7",
+]
+dev = [
+  "pre-commit>=4.2.0",
+  "pytest>=8.0",
+  "pytest-mock>=3.14.1",
+  "pytest-cov>=6.2.1",
+  "pytest-asyncio>=0.24.0",
+  "pytest-xdist>=3.0",
+  "ruff>=0.12.3",
+  "flake8>=7.3.0",
+  "mypy>=1.16.1",
+  "chromadb",
+  "pytest-dotenv>=0.5.2",
+  "types-PyYAML>=6.0",
+  "types-requests>=2.0.0",
+  "types-openpyxl>=3.1.5",
+  "openpyxl>=3.1.5",
+  "pytest-timeout>=2.4.0",
+  "websockets>=15.0.1",
+  "types-setuptools>=69.0.0",
+  "pytest-socket>=0.7.0",
+  # Data science libraries for testing
+  "numpy>=1.21.0",
+  "pandas>=1.3.0",
+  "matplotlib>=3.5.0",
+  "types-docker>=7.1.0.20251009",
+  "copilotkit==0.1.69",
+]
+
+[project.scripts]
+xagent-web = "xagent.web.__main__:main"
+
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.pytest.ini_options]
+
+
+addopts = "-ra -q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "integration: marks tests as integration tests",
+  "slow: marks tests as slow running tests",
+]
+
+[tool.mypy]
+mypy_path = "src:stubs"
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = [
+    "src/xagent/web/uploads/",
+    "src/xagent/migrations/",
+]
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = true
+python_version = "3.11"
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+namespace_packages = true
+explicit_package_bases = true
+[[tool.mypy.overrides]]
+module = [
+  "docx",
+  "pptx",
+  "pptx.*",
+  "pdfplumber",
+  "unstructured.*",
+  "fitz",
+  "pandas",
+  "matplotlib",
+  "matplotlib.pyplot",
+  "deepdoc",
+  "deepdoc.*",
+  "json_repair",
+  "langchain_core.*",
+  "langchain.*",
+  "jose",
+  "alembic",
+  "alembic.*",
+  "xinference_client",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["core.tools.file_tool"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["xagent.core.tools.core.vision_tool"]
+disable_error_code = ["assignment"]
+
+[[tool.mypy.overrides]]
+module = [
+  "xagent.core.model.chat.basic.xinference",
+  "xagent.core.model.embedding.xinference",
+  "xagent.core.model.image.xinference",
+]
+disallow_any_unimported = false
+warn_unused_ignores = false
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xagent"]
+include = [
+  "src/xagent/skills/builtin/**",
+  "src/xagent/templates/built_in/**",
+  "src/xagent/web/README.md",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/xagent/skills/builtin/**",
+  "src/xagent/templates/built_in/**",
+  "src/xagent/web/README.md",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true

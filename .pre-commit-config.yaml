@@ -1,0 +1,86 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.12.3
+    hooks:
+      # Run the linter.
+      - id: ruff-check
+        types_or: [python, pyi]
+      # Run the formatter.
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: "v1.19.0"
+    hooks:
+      - id: mypy
+        args: ["--package", "xagent"]
+        exclude: ^src/xagent/migrations/
+        pass_filenames: false
+        additional_dependencies:
+          - "pydantic[mypy]"
+          - aiohttp
+          - types-PyYAML
+          - types-beautifulsoup4
+          - types-requests
+          - httpx
+          - fastapi
+          - uvicorn
+          - langchain
+          - langchain-core
+          - langchain-openai
+          - langchain-community
+          - numexpr
+          - numpy
+          - html2text
+          - rich
+          - prompt_toolkit
+          - langfuse
+          - python-dotenv
+          - chromadb
+          - openpyxl
+          - types-openpyxl
+          - mcp
+          - pandas-stubs
+          - matplotlib-stubs
+          - docker
+          - types-docker
+          - playwright
+          - nest-asyncio
+          - anthropic
+          - python-pptx
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: ^docs/
+      - id: trailing-whitespace
+
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        args: [--config, ".codespellrc"]
+
+  - repo: local
+    hooks:
+      - id: npm-lint
+        name: npm lint
+        entry: sh -c 'cd frontend && npm run lint'
+        language: system
+        pass_filenames: false
+        types_or: [javascript, jsx, ts, tsx, json]
+
+      - id: npm-type-check
+        name: npm type-check
+        entry: sh -c 'cd frontend && npm run type-check'
+        language: system
+        pass_filenames: false
+        types_or: [javascript, jsx, ts, tsx]
+        exclude: ^frontend/\.next/

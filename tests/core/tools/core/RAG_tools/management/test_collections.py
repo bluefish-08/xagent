@@ -1,0 +1,341 @@
+"""Tests for RAG management utilities."""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List
+
+import pytest
+
+from src.xagent.core.tools.core.RAG_tools.core.schemas import DocumentProcessingStatus
+from src.xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
+    embeddings_table_name,
+    to_model_tag,
+)
+from src.xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
+    ensure_chunks_table,
+    ensure_documents_table,
+    ensure_embeddings_table,
+    ensure_parses_table,
+)
+from src.xagent.core.tools.core.RAG_tools.management import (
+    cancel_collection,
+    cancel_document,
+)
+from src.xagent.core.tools.core.RAG_tools.management import (
+    collections as collections_module,
+)
+from src.xagent.core.tools.core.RAG_tools.management import (
+    delete_collection,
+    get_document_stats,
+    list_collections,
+    retry_document,
+)
+from src.xagent.core.tools.core.RAG_tools.management.status import load_ingestion_status
+from src.xagent.providers.vector_store.lancedb import get_connection_from_env
+
+
+@pytest.fixture()
+def temp_lancedb_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
+    """Isolate LANCE DB data directory per test."""
+
+    original = os.environ.get("LANCEDB_DIR")
+    monkeypatch.setenv("LANCEDB_DIR", str(tmp_path))
+    yield str(tmp_path)
+    if original is None:
+        monkeypatch.delenv("LANCEDB_DIR", raising=False)
+    else:
+        monkeypatch.setenv("LANCEDB_DIR", original)
+
+
+def _insert_documents(records: List[Dict[str, object]]) -> None:
+    conn = get_connection_from_env()
+    ensure_documents_table(conn)
+    table = conn.open_table("documents")
+
+    # Add user_id field to records if not present
+    for r in records:
+        if "user_id" not in r:
+            r["user_id"] = None  # Legacy data
+
+    table.add(records)
+
+    # Sync with metadata table
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        update_collection_stats_sync,
+    )
+
+    for r in records:
+        update_collection_stats_sync(
+            collection_name=str(r["collection"]),
+            documents_delta=1,
+            document_name=os.path.basename(str(r["source_path"])),
+        )
+
+
+def _insert_parses(records: List[Dict[str, object]]) -> None:
+    conn = get_connection_from_env()
+    ensure_parses_table(conn)
+    table = conn.open_table("parses")
+    table.add(records)
+
+    # Sync with metadata table
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        update_collection_stats_sync,
+    )
+
+    for r in records:
+        update_collection_stats_sync(
+            collection_name=str(r["collection"]),
+            parses_delta=1,
+        )
+
+
+def _insert_chunks(records: List[Dict[str, object]]) -> None:
+    conn = get_connection_from_env()
+    ensure_chunks_table(conn)
+    table = conn.open_table("chunks")
+    table.add(records)
+
+
+def _insert_embeddings(model_name: str, records: List[Dict[str, object]]) -> None:
+    conn = get_connection_from_env()
+    ensure_embeddings_table(conn, to_model_tag(model_name), vector_dim=3)
+    table = conn.open_table(embeddings_table_name(model_name))
+    table.add(records)
+
+    # Sync with metadata table
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        update_collection_stats_sync,
+    )
+
+    for r in records:
+        update_collection_stats_sync(
+            collection_name=str(r["collection"]),
+            embeddings_delta=1,
+        )
+
+
+def test_list_collections_empty(temp_lancedb_dir: str) -> None:
+    """When no data exists the result should be empty but successful."""
+
+    result = list_collections(user_id=None, is_admin=True)
+
+    assert result.status == "success"
+    assert result.total_count == 0
+    assert result.collections == []
+    assert result.warnings == []
+
+
+def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
+    """Aggregate statistics should include counts per collection and document names."""
+
+    collection = "demo_collection"
+    doc_id = "doc-1"
+    now = datetime.utcnow()
+
+    _insert_documents(
+        [
+            {
+                "collection": collection,
+                "doc_id": doc_id,
+                "source_path": "/path/sample.pdf",
+                "file_type": "pdf",
+                "content_hash": "hash-doc-1",
+                "uploaded_at": now,
+                "title": "Sample",
+                "language": "zh",
+            },
+            {
+                "collection": collection,
+                "doc_id": "doc-2",
+                "source_path": "/path/other.pdf",
+                "file_type": "pdf",
+                "content_hash": "hash-doc-2",
+                "uploaded_at": now,
+                "title": "Other",
+                "language": "en",
+            },
+        ]
+    )
+
+    _insert_parses(
+        [
+            {
+                "collection": collection,
+                "doc_id": doc_id,
+                "parse_hash": "parse-1",
+                "parser": "deepdoc",
+                "created_at": now,
+                "params_json": "{}",
+                "parsed_content": "content",
+            }
+        ]
+    )
+
+    _insert_embeddings(
+        "text-embedding-v3",
+        [
+            {
+                "collection": collection,
+                "doc_id": doc_id,
+                "chunk_id": "chunk-1",
+                "parse_hash": "parse-1",
+                "model": "text-embedding-v3",
+                "vector": [0.1, 0.2, 0.3],
+                "vector_dimension": 3,
+                "text": "chunk text 1",
+                "chunk_hash": "hash-chunk-1",
+                "created_at": now,
+            }
+        ],
+    )
+
+    result = list_collections(user_id=None, is_admin=True)
+
+    assert result.status == "success"
+    assert result.total_count == 1
+    collection_map = {info.name: info for info in result.collections}
+    assert collection in collection_map
+    collection_info = collection_map[collection]
+    assert collection_info.documents == 2
+    assert collection_info.processed_documents == 1
+    assert collection_info.embeddings == 1
+    # document_names now contains source_path values
+    assert sorted(collection_info.document_names) == sorted(["other.pdf", "sample.pdf"])
+    assert result.warnings == []
+
+
+def test_get_document_stats_missing_document(temp_lancedb_dir: str) -> None:
+    """Missing documents should yield zero counts but succeed."""
+
+    result = get_document_stats("demo", "missing-doc")
+
+    assert result.status == "success"
+    assert result.data is not None
+    assert result.data.document_exists is False
+    assert result.data.chunk_count == 0
+    assert result.data.embedding_count == 0
+    assert result.data.embedding_breakdown == {}
+    assert result.warnings == []
+
+
+def test_get_document_stats_with_embeddings(temp_lancedb_dir: str) -> None:
+    """Document statistics should aggregate parse, chunk, and embedding counts."""
+
+    collection = "demo_collection"
+    doc_id = "doc-embed"
+    now = datetime.utcnow()
+
+    _insert_documents(
+        [
+            {
+                "collection": collection,
+                "doc_id": doc_id,
+                "source_path": "/doc/embed.pdf",
+                "file_type": "pdf",
+                "content_hash": "hash",
+                "uploaded_at": now,
+                "title": "Embed",
+                "language": "zh",
+            }
+        ]
+    )
+
+    result = get_document_stats(collection, doc_id)
+
+    assert result.status == "success"
+    assert result.data is not None
+    assert result.data.document_exists is True
+    assert result.warnings == []
+
+
+def test_retry_and_cancel_document_update_status(temp_lancedb_dir: str) -> None:
+    """retry_document and cancel_document should record status updates."""
+
+    retry_result = retry_document("demo", "doc-9", user_id=1, is_admin=True)
+    assert retry_result.status == "success"
+    assert retry_result.new_status == DocumentProcessingStatus.PENDING
+
+    cancel_result = cancel_document(
+        "demo", "doc-9", user_id=1, is_admin=True, reason="User cancelled"
+    )
+    assert cancel_result.status == "success"
+    assert cancel_result.new_status == DocumentProcessingStatus.FAILED
+
+    status_entries = load_ingestion_status(
+        collection="demo", doc_id="doc-9", user_id=1, is_admin=True
+    )
+    assert status_entries[-1]["status"] == DocumentProcessingStatus.FAILED.value
+    assert status_entries[-1]["message"] == "User cancelled"
+
+
+def test_cancel_collection_updates_all_documents(temp_lancedb_dir: str) -> None:
+    """Collection-level cancel should update status for all discoverable documents."""
+
+    collection = "demo"
+    now = datetime.utcnow()
+
+    _insert_documents(
+        [
+            {
+                "collection": collection,
+                "doc_id": "doc-1",
+                "source_path": "/path/doc-1.pdf",
+                "file_type": "pdf",
+                "content_hash": "hash-1",
+                "uploaded_at": now,
+                "title": "First",
+                "language": "zh",
+            }
+        ]
+    )
+
+    reason = "Manual stop"
+    result = cancel_collection(collection, reason=reason, user_id=1, is_admin=True)
+
+    assert result.status == "success"
+    affected_ids = {detail.doc_id for detail in result.affected_documents}
+    assert "doc-1" in affected_ids
+
+
+def test_delete_collection_invokes_cleanup_all_documents(
+    monkeypatch: pytest.MonkeyPatch, temp_lancedb_dir: str
+) -> None:
+    """Collection delete should cascade cleanup for each document variant."""
+
+    collection = "demo"
+    now = datetime.utcnow()
+
+    _insert_documents(
+        [
+            {
+                "collection": collection,
+                "doc_id": "doc-1",
+                "source_path": "/path/doc-1.pdf",
+                "file_type": "pdf",
+                "content_hash": "hash-1",
+                "uploaded_at": now,
+                "title": "First",
+                "language": "zh",
+            }
+        ]
+    )
+
+    cleared_calls: List[tuple[str, str]] = []
+
+    def _fake_clear(collection: str, doc_id: str) -> None:
+        cleared_calls.append((collection, doc_id))
+
+    monkeypatch.setattr(
+        collections_module,
+        "clear_ingestion_status",
+        _fake_clear,
+    )
+
+    result = delete_collection(collection, user_id=1, is_admin=True)
+
+    assert result.status == "success"
+    assert "documents" in result.deleted_counts

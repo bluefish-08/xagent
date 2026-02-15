@@ -1,0 +1,359 @@
+"""Test cases for InMemory memory store implementation."""
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from xagent.core.memory.core import MemoryNote
+from xagent.core.memory.in_memory import InMemoryMemoryStore
+
+
+@pytest.fixture
+def memory_store():
+    """Create an InMemory memory store for testing."""
+    return InMemoryMemoryStore()
+
+
+@pytest.fixture
+def sample_memory_note():
+    """Create a sample memory note for testing."""
+    return MemoryNote(
+        id="test_123",
+        content="Test memory content",
+        keywords=["test", "sample"],
+        tags=["experiment"],
+        category="general",
+        metadata={"source": "test", "priority": 1},
+        timestamp=datetime.now(),
+        mime_type="text/plain",
+    )
+
+
+class TestInMemoryMemoryStoreBasic:
+    """Test cases for basic InMemory memory store operations."""
+
+    def test_add_and_get_memory(self, memory_store, sample_memory_note):
+        """Test successful memory addition and retrieval."""
+        # Add memory
+        result = memory_store.add(sample_memory_note)
+        assert result.success is True
+        assert result.memory_id == "test_123"
+
+        # Get memory
+        get_result = memory_store.get("test_123")
+        assert get_result.success is True
+        retrieved_note = get_result.content
+        assert isinstance(retrieved_note, MemoryNote)
+        assert retrieved_note.content == "Test memory content"
+        assert retrieved_note.keywords == ["test", "sample"]
+        assert retrieved_note.category == "general"
+
+    def test_get_memory_not_found(self, memory_store):
+        """Test memory retrieval for non-existent ID."""
+        result = memory_store.get("non_existent")
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
+    def test_update_memory(self, memory_store, sample_memory_note):
+        """Test successful memory update."""
+        # Add memory first
+        memory_store.add(sample_memory_note)
+
+        # Create updated memory
+        updated_note = MemoryNote(
+            id="test_123",
+            content="Updated content",
+            keywords=["updated"],
+            tags=["modified"],
+            category="general",
+            metadata={"source": "test", "priority": 2},
+            timestamp=sample_memory_note.timestamp,
+            mime_type="text/plain",
+        )
+
+        result = memory_store.update(updated_note)
+        assert result.success is True
+
+        # Verify update was applied
+        get_result = memory_store.get("test_123")
+        assert get_result.success is True
+        assert get_result.content.content == "Updated content"
+        assert get_result.content.keywords == ["updated"]
+
+    def test_update_memory_not_found(self, memory_store):
+        """Test memory update for non-existent ID."""
+        note = MemoryNote(id="non_existent", content="Test", category="general")
+
+        result = memory_store.update(note)
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
+    def test_delete_memory(self, memory_store, sample_memory_note):
+        """Test successful memory deletion."""
+        # Add memory first
+        memory_store.add(sample_memory_note)
+
+        # Delete memory
+        result = memory_store.delete("test_123")
+        assert result.success is True
+
+        # Verify deletion was applied
+        get_result = memory_store.get("test_123")
+        assert get_result.success is False
+
+    def test_delete_memory_not_found(self, memory_store):
+        """Test memory deletion for non-existent ID."""
+        result = memory_store.delete("non_existent")
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
+    def test_clear_all_memories(self, memory_store):
+        """Test clearing all memories."""
+        # Add test memories
+        memory_store.add(MemoryNote(content="Memory 1", category="general"))
+        memory_store.add(MemoryNote(content="Memory 2", category="system"))
+
+        # Clear all memories
+        memory_store.clear()
+
+        # Verify all memories are gone
+        search_results = memory_store.search("Memory", k=10)
+        assert len(search_results) == 0
+
+        list_results = memory_store.list_all()
+        assert len(list_results) == 0
+
+
+class TestInMemoryMemoryStoreListAll:
+    """Test cases for InMemory memory store list_all functionality."""
+
+    def test_list_all_memories(self, memory_store):
+        """Test listing all memories."""
+        # Add test memories
+        memories = [
+            MemoryNote(content="Memory 1", category="general"),
+            MemoryNote(content="Memory 2", category="system"),
+            MemoryNote(content="Memory 3", category="general"),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # List all memories
+        results = memory_store.list_all()
+        assert len(results) >= 3
+        assert all(isinstance(r, MemoryNote) for r in results)
+
+    def test_list_all_with_category_filter(self, memory_store):
+        """Test listing memories with category filter."""
+        # Add test memories
+        memories = [
+            MemoryNote(content="General memory 1", category="general"),
+            MemoryNote(content="General memory 2", category="general"),
+            MemoryNote(content="System memory", category="system"),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # Test category filter
+        general_results = memory_store.list_all(filters={"category": "general"})
+        assert len(general_results) >= 2
+        assert all(r.category == "general" for r in general_results)
+
+        system_results = memory_store.list_all(filters={"category": "system"})
+        assert len(system_results) >= 1
+        assert all(r.category == "system" for r in system_results)
+
+    def test_list_all_with_date_filters(self, memory_store):
+        """Test listing memories with date range filters."""
+        now = datetime.now()
+        old_time = now - timedelta(days=1)
+        future_time = now + timedelta(days=1)
+
+        # Add memories with different timestamps
+        memories = [
+            MemoryNote(content="Old memory", category="test", timestamp=old_time),
+            MemoryNote(content="Recent memory", category="test", timestamp=now),
+            MemoryNote(content="Future memory", category="test", timestamp=future_time),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # Test date_from filter
+        results = memory_store.list_all(filters={"date_from": now})
+        assert len(results) >= 2  # Recent and future
+        assert all(r.timestamp >= now for r in results)
+
+        # Test date_to filter
+        results = memory_store.list_all(filters={"date_to": now})
+        assert len(results) >= 2  # Old and recent
+        assert all(r.timestamp <= now for r in results)
+
+    def test_list_all_with_tag_filters(self, memory_store):
+        """Test listing memories with tag filters."""
+        # Add memories with different tags
+        memories = [
+            MemoryNote(
+                content="Memory with tag1", category="test", tags=["tag1", "common"]
+            ),
+            MemoryNote(
+                content="Memory with tag2", category="test", tags=["tag2", "common"]
+            ),
+            MemoryNote(
+                content="Memory with both tags",
+                category="test",
+                tags=["tag1", "tag2", "common"],
+            ),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # Test single tag filter
+        results = memory_store.list_all(filters={"tags": ["tag1"]})
+        assert len(results) >= 2
+        assert all("tag1" in r.tags for r in results)
+
+        # Test multiple tag filter (AND logic)
+        results = memory_store.list_all(filters={"tags": ["tag1", "tag2"]})
+        assert len(results) >= 1
+        assert all("tag1" in r.tags and "tag2" in r.tags for r in results)
+
+    def test_list_all_with_keyword_filters(self, memory_store):
+        """Test listing memories with keyword filters."""
+        # Add memories with different keywords
+        memories = [
+            MemoryNote(
+                content="Memory with keyword1",
+                category="test",
+                keywords=["keyword1", "common"],
+            ),
+            MemoryNote(
+                content="Memory with keyword2",
+                category="test",
+                keywords=["keyword2", "common"],
+            ),
+            MemoryNote(
+                content="Memory with both keywords",
+                category="test",
+                keywords=["keyword1", "keyword2", "common"],
+            ),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # Test single keyword filter
+        results = memory_store.list_all(filters={"keywords": ["keyword1"]})
+        assert len(results) >= 2
+        assert all("keyword1" in r.keywords for r in results)
+
+        # Test multiple keyword filter (AND logic)
+        results = memory_store.list_all(filters={"keywords": ["keyword1", "keyword2"]})
+        assert len(results) >= 1
+        assert all(
+            "keyword1" in r.keywords and "keyword2" in r.keywords for r in results
+        )
+
+
+class TestInMemoryMemoryStoreStats:
+    """Test cases for InMemory memory store statistics."""
+
+    def test_get_stats(self, memory_store):
+        """Test getting memory store statistics."""
+        # Add test memories
+        memories = [
+            MemoryNote(
+                content="General memory 1", category="general", tags=["important"]
+            ),
+            MemoryNote(content="General memory 2", category="general", tags=["normal"]),
+            MemoryNote(
+                content="System memory", category="system", tags=["system", "config"]
+            ),
+        ]
+
+        for memory in memories:
+            memory_store.add(memory)
+
+        # Get stats
+        stats = memory_store.get_stats()
+
+        assert stats["total_count"] >= 3
+        assert stats["category_counts"]["general"] >= 2
+        assert stats["category_counts"]["system"] >= 1
+        assert stats["tag_counts"]["important"] >= 1
+        assert stats["tag_counts"]["normal"] >= 1
+        assert stats["tag_counts"]["system"] >= 1
+        assert stats["tag_counts"]["config"] >= 1
+        assert stats["memory_store_type"] == "in_memory"
+
+    def test_get_stats_empty_store(self, memory_store):
+        """Test getting stats from empty store."""
+        stats = memory_store.get_stats()
+
+        assert stats["total_count"] == 0
+        assert stats["category_counts"] == {}
+        assert stats["tag_counts"] == {}
+        assert stats["memory_store_type"] == "in_memory"
+
+
+def test_add_and_get(memory_store):
+    """Test basic add and get functionality (legacy test)."""
+    note = MemoryNote(content="Test memory", metadata={"user": "alice"})
+    response = memory_store.add(note)
+    assert response.success
+    assert response.memory_id is not None
+
+    retrieved = memory_store.get(response.memory_id)
+    assert retrieved.success
+    assert isinstance(retrieved.content, MemoryNote)
+    assert retrieved.content.content == "Test memory"
+
+
+def test_update(memory_store):
+    """Test basic update functionality (legacy test)."""
+    note = MemoryNote(content="Original", metadata={"version": 1})
+    response = memory_store.add(note)
+
+    updated_note = MemoryNote(
+        id=response.memory_id, content="Updated", metadata={"version": 2}
+    )
+    update_response = memory_store.update(updated_note)
+    assert update_response.success
+
+    get_response = memory_store.get(response.memory_id)
+    assert isinstance(get_response.content, MemoryNote)
+    assert get_response.content.content == "Updated"
+    assert get_response.content.metadata["version"] == 2
+
+
+def test_delete(memory_store):
+    """Test basic delete functionality (legacy test)."""
+    note = MemoryNote(content="To be deleted")
+    response = memory_store.add(note)
+
+    delete_response = memory_store.delete(response.memory_id)
+    assert delete_response.success
+
+    get_response = memory_store.get(response.memory_id)
+    assert not get_response.success
+
+
+def test_search(memory_store):
+    """Test basic search functionality (legacy test)."""
+    memory_store.add(MemoryNote(content="cats are great"))
+    memory_store.add(MemoryNote(content="dogs are loyal"))
+
+    results = memory_store.search("cats")
+    assert any("cat" in note.content.lower() for note in results)
+
+
+def test_clear(memory_store):
+    """Test basic clear functionality (legacy test)."""
+    memory_store.add(MemoryNote(content="temporary note"))
+    memory_store.clear()
+
+    results = memory_store.search("temporary")
+    assert len(results) == 0

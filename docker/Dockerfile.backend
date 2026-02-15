@@ -1,0 +1,106 @@
+# syntax=docker/dockerfile:1.6
+ARG PYTHON_VERSION=3.11
+ARG NODE_VERSION=22
+
+############################
+# Backend build
+############################
+FROM python:${PYTHON_VERSION}-bookworm AS backend-build
+
+WORKDIR /opt/xagent
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    git \
+    pkg-config \
+    python3-dev \
+    curl \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Improve git reliability for large repos / HTTP2 issues
+RUN git config --global http.version HTTP/1.1 \
+    && git config --global http.postBuffer 524288000
+
+COPY .git .git
+COPY pyproject.toml README.md .
+COPY src ./src
+COPY alembic.ini .
+
+# Create venv and install build tools
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip
+
+# Install app + deepdoc + chromadb into venv
+# Patch deepdoc to use CPU onnxruntime on x86_64
+RUN /opt/venv/bin/pip install --no-cache-dir . \
+    && /opt/venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.9.1+cpu \
+    && git clone https://github.com/xorbitsai/deepdoc-lib /opt/xagent/deepdoc-lib \
+    && cd /opt/xagent/deepdoc-lib && git checkout cd4d0e13a89a3d9ea0716c696357396e84e81cf7 \
+    && sed -i "s/onnxruntime-gpu==1.19.2; sys_platform != 'darwin' and platform_machine == 'x86_64'/onnxruntime==1.19.2; sys_platform != 'darwin' and platform_machine == 'x86_64'/" /opt/xagent/deepdoc-lib/pyproject.toml \
+    && /opt/venv/bin/pip install --no-cache-dir /opt/xagent/deepdoc-lib \
+    && /opt/venv/bin/pip install --no-cache-dir chromadb \
+    && rm -rf /opt/xagent/deepdoc-lib
+
+############################
+# Runtime
+############################
+FROM python:${PYTHON_VERSION}-bookworm AS runtime
+
+ARG NODE_VERSION=22
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /opt/xagent
+
+# System deps + Node.js + LibreOffice
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
+    libreoffice \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION}.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy venv + app
+COPY --from=backend-build /opt/venv /opt/venv
+COPY --from=backend-build /opt/xagent /opt/xagent
+
+# Copy frontend package files for npm tasks (e.g., PPTX generation)
+COPY frontend/package.json frontend/package-lock.json /opt/xagent/frontend/
+RUN cd /opt/xagent/frontend && npm ci
+
+# Playwright browser + deps
+RUN python -m playwright install --with-deps chromium
+
+# Download NLTK data and tiktoken models
+RUN python -c "import nltk; nltk.download('punkt_tab')" \
+    && python -c "import tiktoken; tiktoken.encoding_for_model('gpt-4')"
+
+# Copy entrypoint script
+COPY docker/entrypoint.sh /opt/xagent/deploy/entrypoint.sh
+RUN chmod +x /opt/xagent/deploy/entrypoint.sh
+
+# Create directory for uploads and data
+RUN mkdir -p /opt/xagent/uploads \
+    && mkdir -p /home/xagent/.xagent
+
+EXPOSE 8000
+ENTRYPOINT ["/opt/xagent/deploy/entrypoint.sh"]

@@ -1,0 +1,641 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* XAgent 主题系统 - 支持动态主题切换 */
+:root {
+  /* 默认深色主题配色 - 保持向后兼容 */
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --card: 222.2 84% 4.9%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222.2 84% 4.9%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 217.2 91.2% 59.8%;
+  --primary-foreground: 222.2 84% 4.9%;
+  --secondary: 217.2 32.6% 17.5%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217.2 32.6% 17.5%;
+  --muted-foreground: 215 20.2% 65.1%;
+  --accent: 217.2 32.6% 17.5%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 17.5%;
+  --ring: 224.3 76.3% 94.1%;
+  --radius: 0.5rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* 主题覆盖规则 - 确保硬编码颜色被主题变量替换 */
+body .bg-\[\#0E1117\] {
+  background-color: hsl(var(--background)) !important;
+}
+
+body .text-\[\#E6EDF3\] {
+  color: hsl(var(--foreground)) !important;
+}
+
+body .bg-\[\#161B22\] {
+  background-color: hsl(var(--card)) !important;
+}
+
+body .border-\[rgba\(255\,255\,255\,0\.08\)\] {
+  border-color: hsl(var(--border)) !important;
+}
+
+body .text-\[\#8B949E\] {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+body .bg-\[\#1F2937\] {
+  background-color: hsl(var(--accent)) !important;
+}
+
+body .hover\:bg-\[\#1F2937\]:hover {
+  background-color: hsl(var(--accent)) !important;
+}
+
+body .hover\:text-\[\#E6EDF3\]:hover {
+  color: hsl(var(--accent-foreground)) !important;
+}
+
+/* 覆盖所有可能的硬编码颜色组合 */
+body [class*="bg-["][class*="#"] {
+  background-color: hsl(var(--background)) !important;
+}
+
+body [class*="text-["][class*="#"] {
+  color: hsl(var(--foreground)) !important;
+}
+
+body [class*="border-["][class*="#"] {
+  border-color: hsl(var(--border)) !important;
+}
+
+/* 保留特定的交互效果 */
+body .hover\\:bg-\\[\\#1F2937\\]:hover {
+  background-color: hsl(var(--accent)) !important;
+}
+
+body .hover\\:text-\\[\\#E6EDF3\\]:hover {
+  color: hsl(var(--accent-foreground)) !important;
+}
+/* React Flow 节点背景透明 */
+.react-flow__node {
+  background-color: transparent !important;
+  border: none !important;
+}
+
+.react-flow__node-default {
+  background-color: transparent !important;
+  border: none !important;
+}
+
+/* Markdown prose styles for dark theme */
+.prose {
+  color: var(--foreground);
+  max-width: none;
+}
+
+.prose h1 {
+  color: var(--foreground);
+  font-weight: 600;
+  font-size: 1.5em;
+  margin-top: 0;
+  margin-bottom: 0.5em;
+}
+
+.prose h2 {
+  color: var(--foreground);
+  font-weight: 600;
+  font-size: 1.25em;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose h3 {
+  color: var(--foreground);
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose p {
+  margin-top: 0;
+  margin-bottom: 1em;
+  line-height: 1.6;
+}
+
+.prose ul, .prose ol {
+  margin-top: 0;
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+
+.prose li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.prose code {
+  background-color: var(--muted);
+  color: var(--foreground);
+  padding: 0.125em 0.25em;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+
+.prose pre {
+  background-color: var(--muted);
+  color: var(--foreground);
+  padding: 1em;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.prose pre code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.prose blockquote {
+  border-left: 4px solid var(--border);
+  padding-left: 1em;
+  margin-top: 0;
+  margin-bottom: 1em;
+  color: var(--muted-foreground);
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.prose th, .prose td {
+  border: 1px solid var(--border);
+  padding: 0.5em;
+  text-align: left;
+}
+
+.prose th {
+  background-color: var(--muted);
+  font-weight: 600;
+}
+
+.prose a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.prose a:hover {
+  color: var(--primary-foreground);
+}
+
+.prose hr {
+  border-color: var(--border);
+  margin-top: 2em;
+  margin-bottom: 2em;
+}
+
+.prose-invert {
+  color: var(--foreground);
+}
+
+.prose-invert h1,
+.prose-invert h2,
+.prose-invert h3,
+.prose-invert h4,
+.prose-invert h5,
+.prose-invert h6 {
+  color: var(--foreground);
+}
+
+.prose-invert code {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+.prose-invert pre {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+.prose-invert th {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+/* React Flow Minimap SVG 半透明背景 */
+.react-flow__minimap-svg {
+  background-color: hsl(var(--background) / 0.8) !important;
+  backdrop-filter: blur(8px);
+}
+
+/* React Flow 控制按钮半透明背景 */
+.react-flow__controls-button {
+  background-color: hsl(var(--background) / 0.9) !important;
+  backdrop-filter: blur(8px);
+  border: 1px solid hsl(var(--border) / 0.5) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: hsl(var(--background)) !important;
+}
+
+/* 隐藏 React Flow 署名 */
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* 确保滚动区域正常工作 */
+[data-radix-scroll-area-viewport] {
+  scroll-behavior: smooth;
+}
+
+/* 修复滚动条样式 */
+[data-radix-scroll-area-scrollbar] {
+  transition: opacity 0.2s;
+}
+
+[data-radix-scroll-area-scrollbar]:hover {
+  opacity: 1 !important;
+}
+
+/* 确保Tabs内容区域高度正确 */
+[data-state="active"] {
+  min-height: 0;
+}
+
+/* 确保Tabs内容在活动状态下正确显示 */
+[data-state="active"].flex-1 {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 确保非活动状态下的Tabs内容正确隐藏 */
+[data-state="inactive"] {
+  display: none;
+}
+
+/* 确保ScrollArea在flex容器中正常工作 */
+.scrollarea-container {
+  min-height: 0;
+  flex: 1;
+}
+
+/* 确保flex容器中的滚动区域正常工作 */
+.flex-min-height-0 {
+  min-height: 0;
+}
+
+/* 修复消息容器中的代码块溢出问题 */
+.prose.prose-sm {
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.prose.prose-sm pre {
+  background-color: hsl(var(--muted) / 0.5);
+  color: hsl(var(--foreground));
+  padding: 0.75em;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  max-width: 100%;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.prose.prose-sm pre code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: 0.813rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+.prose.prose-sm code {
+  background-color: hsl(var(--muted) / 0.3);
+  color: hsl(var(--foreground));
+  padding: 0.125em 0.25em;
+  border-radius: 0.25rem;
+  font-size: 0.813rem;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+/* 确保消息容器不会溢出 */
+.message-content {
+  max-width: 100%;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  overflow-x: hidden;
+  word-break: break-word;
+}
+
+/* 用户消息中的长文件信息处理 */
+.user-message .message-content {
+  word-break: break-all;
+  hyphens: auto;
+  line-height: 1.4;
+}
+
+/* 修复长代码块导致的布局问题 */
+.prose.prose-sm pre::-webkit-scrollbar {
+  height: 6px;
+}
+
+.prose.prose-sm pre::-webkit-scrollbar-track {
+  background: hsl(var(--muted) / 0.2);
+  border-radius: 3px;
+}
+
+.prose.prose-sm pre::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 3px;
+}
+
+.prose.prose-sm pre::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* 确保flex容器中的子元素不会溢出 */
+.flex-overflow-hidden {
+  overflow: hidden;
+}
+
+/* 增强滚动区域样式 */
+.enhanced-scroll-area {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+/* 修复flex嵌套布局中的滚动问题 */
+.flex-scroll-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.flex-scroll-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 原生滚动条样式优化 */
+.overflow-y-auto {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground)) hsl(var(--muted));
+}
+
+.overflow-y-auto::-webkit-scrollbar {
+  width: 6px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+  border-radius: 3px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground));
+  border-radius: 3px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground));
+}
+
+/* 确保执行日志内容不溢出 */
+.execution-log-content {
+  max-width: 100%;
+  word-wrap: break-word;
+}
+
+.execution-log-content pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 确保Tabs组件正确显示 */
+[data-radix-collection-item] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 确保TabsTrigger按钮可见 */
+button[data-radix-collection-item] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s;
+  padding: 0.5rem 1rem;
+  border: 1px solid transparent;
+}
+
+/* 确保TabsList布局正确 */
+[data-radix-tabs-list] {
+  display: grid;
+  width: 100%;
+}
+
+/* 确保Tabs内容区域正确显示滚动条 */
+[data-radix-tabs-content] {
+  position: relative;
+  min-height: 0;
+}
+
+[data-radix-tabs-content] .h-full {
+  height: 100%;
+  min-height: 0;
+}
+
+/* Override React Flow default node width to fit custom content */
+.react-flow__node-input,
+.react-flow__node-default,
+.react-flow__node-output,
+.react-flow__node-group {
+  width: auto !important;
+}
+
+/* Orbit animation for planning loading state */
+@keyframes orbit {
+  0% {
+    transform: rotate(0deg) translateX(40px) rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg) translateX(40px) rotate(-360deg);
+  }
+}
+
+/* Delay utilities */
+.delay-1000 {
+  animation-delay: 1000ms;
+}
+
+.delay-500 {
+  animation-delay: 500ms;
+}
+
+/* 修复 dark theme 中 font-mono 元素的文字颜色问题 */
+.font-mono {
+  color: hsl(var(--foreground)) !important;
+}
+
+.gradient-text {
+  @apply bg-clip-text text-transparent bg-gradient-to-r;
+  background-image: linear-gradient(to right, hsl(var(--gradient-from)), hsl(var(--gradient-to)));
+}
+
+/* Reasoning UI utilities (aligned with /test components) */
+.text-reasoning-active {
+  color: hsl(var(--primary));
+}
+
+.text-reasoning-success {
+  color: hsl(142.1 76.2% 36.3%);
+}
+
+.bg-reasoning-active\/5 {
+  background-color: hsl(var(--primary) / 0.05);
+}
+
+.bg-reasoning-active\/20 {
+  background-color: hsl(var(--primary) / 0.2);
+}
+
+.border-reasoning-active\/40 {
+  border-color: hsl(var(--primary) / 0.4);
+}
+
+.shadow-reasoning-active\/5 {
+  box-shadow: 0 1px 2px 0 hsl(var(--primary) / 0.05);
+}
+
+.bg-reasoning-log {
+  background-color: hsl(var(--muted) / 0.5);
+}
+
+.text-reasoning-log-text {
+  color: hsl(var(--muted-foreground));
+}
+
+.text-reasoning-log-text\/60 {
+  color: hsl(var(--muted-foreground) / 0.6);
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.animate-blink {
+  animation: blink 1.2s ease-in-out infinite;
+}
+
+/* Cyber Theme Specific Styles */
+.theme-cyber {
+  /* Enhanced glow effects for cyber theme */
+  --cyber-glow: 0 0 10px hsl(180 100% 50% / 0.3);
+  --cyber-glow-strong: 0 0 20px hsl(180 100% 50% / 0.5);
+}
+
+.theme-cyber .bg-primary\/10 {
+  background-color: hsl(180 100% 50% / 0.1) !important;
+}
+
+.theme-cyber .border-primary\/20 {
+  border-color: hsl(180 100% 50% / 0.2) !important;
+}
+
+.theme-cyber .text-primary {
+  color: hsl(180 100% 50%) !important;
+}
+
+/* Cyber theme button hover effects */
+.theme-cyber button:hover,
+.theme-cyber .hover\:bg-accent:hover {
+  box-shadow: var(--cyber-glow);
+}
+
+/* Cyber theme focus effects */
+.theme-cyber input:focus,
+.theme-cyber textarea:focus,
+.theme-cyber select:focus {
+  box-shadow: 0 0 0 2px hsl(180 100% 50% / 0.2);
+}
+
+/* Status colors for cyber theme */
+.theme-cyber .status-done {
+  background-color: hsl(142 76% 36%);
+  box-shadow: 0 0 8px hsl(142 76% 36% / 0.4);
+}
+
+.theme-cyber .status-running {
+  background-color: hsl(217 91% 60%);
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  box-shadow: 0 0 8px hsl(217 91% 60% / 0.4);
+}
+
+.theme-cyber .status-action {
+  background-color: hsl(45 93% 47%);
+  box-shadow: 0 0 8px hsl(45 93% 47% / 0.4);
+}
+
+.theme-cyber .status-error {
+  background-color: hsl(0 84% 60%);
+  box-shadow: 0 0 8px hsl(0 84% 60% / 0.5);
+}
+
+/* Enhanced card hover for cyber theme */
+.theme-cyber .card-hover:hover {
+  background-color: hsl(var(--card-hover)) !important;
+  border-color: hsl(var(--border-highlight));
+  transform: translateY(-2px);
+  transition: all 0.3s ease;
+}
+
+/* File link styles for markdown renderer */
+.prose .file-link {
+  color: #3b82f6;
+  text-decoration: none;
+  border-bottom: 1px dashed #3b82f6;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.prose .file-link:hover {
+  color: #60a5fa;
+  border-bottom-style: solid;
+}
+
+.prose .file-link:active {
+  color: #2563eb;
+}

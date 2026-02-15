@@ -1,0 +1,174 @@
+"""Knowledge base search tools for Vibe agents."""
+
+import logging
+from typing import Any, Mapping, Optional, Type
+
+from pydantic import BaseModel
+
+from ...core.document_search import (
+    KnowledgeSearchArgs,
+    KnowledgeSearchResult,
+    ListKnowledgeBasesArgs,
+    ListKnowledgeBasesResult,
+    list_knowledge_bases,
+    search_knowledge_base,
+)
+from .base import AbstractBaseTool, ToolVisibility
+
+logger = logging.getLogger(__name__)
+
+
+class ListKnowledgeBasesTool(AbstractBaseTool):
+    """Tool to list all available knowledge bases."""
+
+    def __init__(
+        self,
+        allowed_collections: Optional[list[str]] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> None:
+        self._visibility = ToolVisibility.PUBLIC
+        self.allowed_collections = allowed_collections
+        self.user_id = user_id
+        self.is_admin = is_admin
+
+    @property
+    def name(self) -> str:
+        return "list_knowledge_bases"
+
+    @property
+    def description(self) -> str:
+        return """List all available knowledge bases with their statistics.
+        Use this tool to see what knowledge bases are available before searching.
+        Returns collection names, document counts, chunk counts, and embedding counts."""
+
+    @property
+    def tags(self) -> list[str]:
+        return ["knowledge", "list", "inventory"]
+
+    def args_type(self) -> Type[BaseModel]:
+        return ListKnowledgeBasesArgs
+
+    def return_type(self) -> Type[BaseModel]:
+        return ListKnowledgeBasesResult
+
+    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
+        raise NotImplementedError(
+            "ListKnowledgeBasesTool only supports async execution."
+        )
+
+    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
+        # Merge allowed_collections from tool init with args
+        if self.allowed_collections is not None:
+            args = dict(args)
+            args.setdefault("allowed_collections", self.allowed_collections)
+        tool_args = ListKnowledgeBasesArgs.model_validate(args)
+        return await list_knowledge_bases(
+            tool_args, user_id=self.user_id, is_admin=self.is_admin
+        )
+
+
+def get_list_knowledge_bases_tool(
+    allowed_collections: Optional[list[str]] = None,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> ListKnowledgeBasesTool:
+    """Create a tool to list all knowledge bases.
+
+    Args:
+        allowed_collections: Optional list of allowed collection names to filter.
+        user_id: Optional user ID for multi-tenancy filtering.
+        is_admin: Whether the user has admin privileges.
+
+    Returns:
+        ListKnowledgeBasesTool instance
+    """
+    return ListKnowledgeBasesTool(
+        allowed_collections=allowed_collections, user_id=user_id, is_admin=is_admin
+    )
+
+
+class KnowledgeSearchTool(AbstractBaseTool):
+    """Knowledge base search tool for Vibe agents."""
+
+    def __init__(
+        self,
+        embedding_model_id: str | None = None,
+        allowed_collections: Optional[list[str]] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> None:
+        self._visibility = ToolVisibility.PUBLIC
+        self.embedding_model_id = embedding_model_id
+        self.allowed_collections = allowed_collections
+        self.user_id = user_id
+        self.is_admin = is_admin
+
+    @property
+    def name(self) -> str:
+        return "knowledge_search"
+
+    @property
+    def description(self) -> str:
+        return """Search across knowledge bases for relevant documents.
+        Use this tool when you need to find information from uploaded documents,
+        knowledge bases, or document collections. Supports semantic search,
+        keyword search, and hybrid search. Returns relevant document chunks
+        with relevance scores. Can search all collections or specific ones by name."""
+
+    @property
+    def tags(self) -> list[str]:
+        return ["search", "knowledge", "documents", "rag"]
+
+    def args_type(self) -> Type[BaseModel]:
+        return KnowledgeSearchArgs
+
+    def return_type(self) -> Type[BaseModel]:
+        return KnowledgeSearchResult
+
+    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
+        raise NotImplementedError("KnowledgeSearchTool only supports async execution.")
+
+    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
+        # Merge tool-level settings with args
+        args = dict(args)
+        if self.embedding_model_id:
+            args.setdefault("embedding_model_id", self.embedding_model_id)
+        if self.allowed_collections is not None:
+            args.setdefault("allowed_collections", self.allowed_collections)
+
+        # Debug: Log tool-level allowed_collections
+        if self.allowed_collections is not None:
+            logger.info(
+                f"🔍 KnowledgeSearchTool allowed_collections: {self.allowed_collections}"
+            )
+
+        tool_args = KnowledgeSearchArgs.model_validate(args)
+        return await search_knowledge_base(
+            tool_args, user_id=self.user_id, is_admin=self.is_admin
+        )
+
+
+def get_knowledge_search_tool(
+    embedding_model_id: Optional[str] = None,
+    allowed_collections: Optional[list[str]] = None,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+) -> KnowledgeSearchTool:
+    """Create a knowledge base search tool for Vibe agents.
+
+    Args:
+        embedding_model_id: Optional embedding model ID to use for searches.
+        allowed_collections: Optional list of allowed collection names. Used as default when collections is not specified.
+        user_id: Optional user ID for multi-tenancy filtering.
+        is_admin: Whether the user has admin privileges.
+
+    Returns:
+        KnowledgeSearchTool instance
+    """
+    return KnowledgeSearchTool(
+        embedding_model_id=embedding_model_id,
+        allowed_collections=allowed_collections,
+        user_id=user_id,
+        is_admin=is_admin,
+    )

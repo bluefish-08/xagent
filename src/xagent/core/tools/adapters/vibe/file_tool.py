@@ -1,0 +1,114 @@
+"""
+Basic file tool module for xagent
+
+This module provides basic file operation functions, excluding workspace-related features.
+For workspace-related file operations, please use the workspace_file_tool.py module.
+"""
+
+from typing import Optional
+
+from ...core.file_tool import (
+    append_file,
+    create_directory,
+    delete_file,
+    edit_file,
+    file_exists,
+    find_and_replace,
+    get_file_info,
+    list_files,
+    read_csv_file,
+    read_file,
+    read_json_file,
+    write_csv_file,
+    write_file,
+    write_json_file,
+)
+from .function import FunctionTool
+
+# Create basic tool instances (these tools are unsafe, for internal use only)
+read_file_tool = FunctionTool(
+    read_file, name="read_file", description="Read file content"
+)
+write_file_tool = FunctionTool(
+    write_file, name="write_file", description="Write content to file"
+)
+append_file_tool = FunctionTool(
+    append_file, name="append_file", description="Append content to file"
+)
+delete_file_tool = FunctionTool(
+    delete_file, name="delete_file", description="Delete file"
+)
+list_files_tool = FunctionTool(
+    list_files, name="list_files", description="List files in directory"
+)
+create_directory_tool = FunctionTool(
+    create_directory, name="create_directory", description="Create directory"
+)
+file_exists_tool = FunctionTool(
+    file_exists, name="file_exists", description="Check if file exists"
+)
+get_file_info_tool = FunctionTool(
+    get_file_info, name="get_file_info", description="Get detailed file information"
+)
+read_json_file_tool = FunctionTool(
+    read_json_file, name="read_json_file", description="Read JSON file"
+)
+write_json_file_tool = FunctionTool(
+    write_json_file, name="write_json_file", description="Write JSON file"
+)
+read_csv_file_tool = FunctionTool(
+    read_csv_file, name="read_csv_file", description="Read CSV file"
+)
+write_csv_file_tool = FunctionTool(
+    write_csv_file, name="write_csv_file", description="Write CSV file"
+)
+edit_file_tool = FunctionTool(
+    edit_file,
+    name="edit_file",
+    description="Precisely edit file content, supporting various editing operations based on line numbers and pattern matching",
+)
+find_and_replace_tool = FunctionTool(
+    find_and_replace,
+    name="find_and_replace",
+    description="Convenient function to find and replace text content",
+)
+
+
+# Basic file tool list (unsafe, for special scenarios only)
+BASIC_FILE_TOOLS = [
+    read_file_tool,
+    write_file_tool,
+    append_file_tool,
+    delete_file_tool,
+    list_files_tool,
+    create_directory_tool,
+    file_exists_tool,
+    get_file_info_tool,
+    read_json_file_tool,
+    write_json_file_tool,
+    read_csv_file_tool,
+    write_csv_file_tool,
+    edit_file_tool,
+    find_and_replace_tool,
+]
+
+
+# Tool getter functions for auto-discovery mechanism
+def get_edit_file_tool(info: Optional[dict[str, str]] = None) -> FunctionTool:
+    """Get edit_file tool"""
+    return edit_file_tool
+
+
+def get_find_and_replace_tool(info: Optional[dict[str, str]] = None) -> FunctionTool:
+    """Get find_and_replace tool"""
+    return find_and_replace_tool
+
+
+# Safe tool list (includes basic tools only, should use workspace_file_tool in actual usage)
+SAFE_FILE_TOOLS = BASIC_FILE_TOOLS.copy()
+
+# FILE_TOOLS now points to basic tools (not recommended)
+FILE_TOOLS = BASIC_FILE_TOOLS
+
+# Note: Tools in this module are unsafe, mainly for backward compatibility
+# For safe file tools, please use the workspace_file_tool.py module

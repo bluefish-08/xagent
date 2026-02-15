@@ -1,0 +1,587 @@
+"use client"
+
+import { useState, useEffect, useRef } from "react"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
+import { getApiUrl } from "@/lib/utils"
+import { apiRequest } from "@/lib/api-wrapper"
+import { useI18n } from "@/contexts/i18n-context"
+import { StandaloneFilePreviewDialog } from "@/components/standalone-file-preview-dialog"
+import {
+  Upload,
+  FileText,
+  Image as ImageIcon,
+  Video,
+  Archive,
+  Search,
+  Download,
+  Trash2,
+  FileCode,
+  FileJson,
+  FileSpreadsheet,
+  Folder,
+  LayoutGrid,
+  Eye,
+  Bot
+} from "lucide-react"
+import { cn } from "@/lib/utils"
+
+interface FileItem {
+  filename: string
+  file_size: number
+  modified_time: number
+  file_type?: string
+  workspace_id?: string
+  relative_path?: string
+}
+
+interface Agent {
+  id: number
+  name: string
+  description?: string
+  status: string
+}
+
+export function FilesPage() {
+  const [files, setFiles] = useState<FileItem[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [searchQuery, setSearchQuery] = useState("")
+  const [selectedFiles, setSelectedFiles] = useState<string[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [selectedCategory, setSelectedCategory] = useState("all")
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const { t } = useI18n()
+
+  const formatRelativeTime = (timestamp: number): string => {
+    const now = Date.now()
+    const diff = now - timestamp * 1000 // timestamp is in seconds
+
+    const minute = 60 * 1000
+    const hour = 60 * minute
+    const day = 24 * hour
+    const month = 30 * day
+    const year = 365 * day
+
+    if (diff < minute) return t('files.time.justNow')
+    if (diff < hour) return t('files.time.minsAgo', { count: Math.floor(diff / minute) })
+    if (diff < day) return t('files.time.hoursAgo', { count: Math.floor(diff / hour) })
+    if (diff < month) return t('files.time.daysAgo', { count: Math.floor(diff / day) })
+    if (diff < year) return t('files.time.monthsAgo', { count: Math.floor(diff / month) })
+    return t('files.time.yearsAgo', { count: Math.floor(diff / year) })
+  }
+
+  // File preview state
+  const [previewFile, setPreviewFile] = useState<{ filePath: string; fileName: string } | null>(null)
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false)
+
+  const [displayAgents, setDisplayAgents] = useState<Agent[]>([])
+
+  useEffect(() => {
+    loadFiles()
+    loadAgents()
+  }, [])
+
+  // Derive displayAgents from loaded agents and files
+  useEffect(() => {
+    if (files.length === 0) {
+      setDisplayAgents(agents)
+      return
+    }
+
+    // Extract agent IDs from file paths
+    const inferredAgentIds = new Set<number>()
+    files.forEach(file => {
+      const match = file.relative_path?.match(/^web_task_(\d+)\//)
+      if (match) {
+        inferredAgentIds.add(parseInt(match[1]))
+      }
+    })
+
+    // Create a map of existing agents for easy lookup
+    const existingAgentMap = new Map(agents.map(a => [a.id, a]))
+
+    // Combine existing agents with inferred ones
+    const combinedAgents: Agent[] = [...agents]
+
+    inferredAgentIds.forEach(id => {
+      if (!existingAgentMap.has(id)) {
+        // Add placeholder for inferred agent
+        combinedAgents.push({
+          id,
+          name: `Agent ${id}`,
+          status: 'unknown',
+          description: 'Inferred from file path' // Internal description, maybe no need to translate? Or use t?
+        })
+      }
+    })
+
+    // Sort by ID descending (newest first)
+    combinedAgents.sort((a, b) => b.id - a.id)
+
+    setDisplayAgents(combinedAgents)
+  }, [agents, files])
+
+  const loadAgents = async () => {
+    try {
+      const response = await apiRequest(`${getApiUrl()}/api/agents`)
+      if (response.ok) {
+        const data = await response.json()
+        setAgents(data)
+      }
+    } catch (error) {
+      console.error('Failed to load agents:', error)
+    }
+  }
+
+  const loadFiles = async () => {
+    try {
+      const response = await apiRequest(`${getApiUrl()}/api/files/list`)
+      if (response.ok) {
+        const data = await response.json()
+        if (data && data.files) {
+          setFiles(data.files)
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load files:', error)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files
+    if (!files || files.length === 0) return
+
+    setUploading(true)
+
+    try {
+      const formData = new FormData()
+      Array.from(files).forEach(file => {
+        formData.append('files', file)
+      })
+      formData.append('task_type', 'general')
+      formData.append('message', '')
+
+      const response = await apiRequest(`${getApiUrl()}/api/files/upload-multiple`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (response.ok) {
+        await loadFiles()
+        if (fileInputRef.current) {
+          fileInputRef.current.value = ''
+        }
+      }
+    } catch (error) {
+      console.error('Upload failed:', error)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const deleteFile = async (file: FileItem, skipConfirm = false) => {
+    const displayName = file.relative_path || file.filename
+    if (!skipConfirm && !confirm(t('files.delete.confirmSingle', { name: displayName }))) return
+
+    try {
+      const pathToDelete = file.relative_path || file.filename
+      const response = await apiRequest(`${getApiUrl()}/api/files/${encodeURIComponent(pathToDelete)}`, {
+        method: 'DELETE'
+      })
+
+      if (response.ok) {
+        setFiles(prev => prev.filter(f => f.filename !== file.filename))
+        setSelectedFiles(prev => prev.filter(f => f !== file.filename))
+      }
+    } catch (error) {
+      console.error('Failed to delete file:', error)
+    }
+  }
+
+  const downloadFile = async (file: FileItem) => {
+    try {
+      const pathToDownload = file.relative_path || file.filename
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(pathToDownload)}`)
+
+      if (!response.ok) {
+        throw new Error(`Download failed: ${response.statusText}`)
+      }
+
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = file.filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Failed to download file:', error)
+    }
+  }
+
+  const handlePreviewFile = (file: FileItem) => {
+    const pathToPreview = file.relative_path || file.filename
+    setPreviewFile({
+      filePath: pathToPreview,
+      fileName: file.filename
+    })
+    setIsPreviewOpen(true)
+  }
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  }
+
+  const getFileIcon = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase() || ''
+
+    if (['py', 'js', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'go', 'rs'].includes(ext)) {
+      return <FileCode className="h-4 w-4 text-blue-500" />
+    }
+    if (['json', 'yaml', 'yml', 'xml'].includes(ext)) {
+      return <FileJson className="h-4 w-4 text-orange-500" />
+    }
+    if (['csv', 'xls', 'xlsx'].includes(ext)) {
+      return <FileSpreadsheet className="h-4 w-4 text-green-500" />
+    }
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+      return <ImageIcon className="h-4 w-4 text-purple-500" />
+    }
+    if (['mp4', 'avi', 'mov', 'mkv'].includes(ext)) {
+      return <Video className="h-4 w-4 text-red-500" />
+    }
+    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) {
+      return <Archive className="h-4 w-4 text-yellow-500" />
+    }
+    return <FileText className="h-4 w-4 text-slate-500" />
+  }
+
+  const filteredFiles = files.filter(file => {
+    // Search filter
+    const matchesSearch = file.filename.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (file.relative_path && file.relative_path.toLowerCase().includes(searchQuery.toLowerCase()))
+
+    if (!matchesSearch) return false
+
+    // Category filter
+    if (selectedCategory === 'all') return true
+
+    // Check if file belongs to an agent task (web_task_{id})
+    // Format: "web_task_13/output/hello.txt" -> Agent ID 13
+    const agentTaskMatch = file.relative_path?.match(/^web_task_(\d+)\//)
+    const fileAgentId = agentTaskMatch ? parseInt(agentTaskMatch[1]) : null
+
+    if (selectedCategory.startsWith('agent-')) {
+      const targetAgentId = parseInt(selectedCategory.split('-')[1])
+
+      // If we found an agent ID in the file path, compare it
+      if (fileAgentId !== null) {
+        return fileAgentId === targetAgentId
+      }
+
+      // Fallback: if no ID in path, check if path includes agent name (legacy/fallback behavior)
+      const agent = displayAgents.find(a => a.id === targetAgentId)
+      if (agent && file.relative_path) {
+         return file.relative_path.includes(agent.name)
+      }
+
+      return false
+    }
+
+    if (selectedCategory === 'uploads') {
+      // User uploads are files that DO NOT match the agent task pattern
+      return fileAgentId === null && !file.relative_path?.includes('web_task_')
+    }
+
+    return true
+  })
+
+  const toggleFileSelection = (filename: string) => {
+    setSelectedFiles(prev =>
+      prev.includes(filename)
+        ? prev.filter(f => f !== filename)
+        : [...prev, filename]
+    )
+  }
+
+  const deleteSelectedFiles = async () => {
+    if (selectedFiles.length === 0) return
+    if (!confirm(t('files.delete.confirmMultiple', { count: selectedFiles.length }))) return
+
+    for (const filename of selectedFiles) {
+      const fileToDelete = files.find(f => f.filename === filename)
+      if (fileToDelete) {
+        await deleteFile(fileToDelete, true)
+      }
+    }
+    setSelectedFiles([])
+  }
+
+  return (
+    <div className="flex flex-col h-screen bg-background">
+      {/* Header (Title + Actions) */}
+      <div className="border-b flex justify-between items-center p-8">
+        <div>
+          <h1 className="text-3xl font-bold mb-1">{t('files.header.title')}</h1>
+          <p className="text-muted-foreground">{t('files.header.description')}</p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="relative w-64">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder={t('files.search.placeholder')}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 h-9 bg-background"
+            />
+          </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+          <Button
+            size="sm"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            {uploading ? t('files.actions.uploading') : t('files.actions.upload')}
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Sidebar */}
+        <aside className="w-64 border-r bg-muted/10 flex-shrink-0 flex flex-col">
+          <div className="p-6">
+            <div className="space-y-6">
+              {/* Folders Section */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-3">
+                  {t('files.sidebar.folders')}
+                </h3>
+                <Button
+                  variant={selectedCategory === 'all' ? 'secondary' : 'ghost'}
+                  className={cn("w-full justify-start", selectedCategory === 'all' && "bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-300")}
+                  onClick={() => setSelectedCategory('all')}
+                >
+                  <LayoutGrid className="h-4 w-4 mr-2" />
+                  {t('files.sidebar.allFiles')}
+                </Button>
+              </div>
+
+              {/* Agents Section */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-3">
+                  {t('files.sidebar.agents')}
+                </h3>
+                <div className="space-y-1 max-h-[300px] overflow-y-auto pr-1">
+                  {displayAgents.length > 0 ? (
+                    displayAgents.map((agent) => (
+                      <Button
+                        key={agent.id}
+                        variant={selectedCategory === `agent-${agent.id}` ? 'secondary' : 'ghost'}
+                        className={cn(
+                          "w-full justify-start text-muted-foreground hover:text-foreground",
+                          selectedCategory === `agent-${agent.id}` && "bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-300"
+                        )}
+                        onClick={() => setSelectedCategory(`agent-${agent.id}`)}
+                      >
+                        <Bot className="h-4 w-4 mr-2" />
+                        {agent.name}
+                      </Button>
+                    ))
+                  ) : (
+                    <div className="px-3 text-xs text-muted-foreground">
+                      {t('files.sidebar.noAgents')}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* System Section */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-3">
+                  {t('files.sidebar.system')}
+                </h3>
+                <Button
+                  variant={selectedCategory === 'uploads' ? 'secondary' : 'ghost'}
+                  className={cn(
+                    "w-full justify-start text-muted-foreground hover:text-foreground",
+                    selectedCategory === 'uploads' && "bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-300"
+                  )}
+                  onClick={() => setSelectedCategory('uploads')}
+                >
+                  <Folder className="h-4 w-4 mr-2" />
+                  {t('files.sidebar.userUploads')}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-background">
+
+        {/* Breadcrumb / Title Bar */}
+        <div className="px-8 py-4 flex items-center justify-between text-sm text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-foreground">{t('files.breadcrumb.files')}</span>
+            <span>&gt;</span>
+            <span className="font-medium text-foreground">
+              {selectedCategory === 'all'
+                ? t('files.sidebar.allFiles')
+                : selectedCategory === 'uploads'
+                  ? t('files.sidebar.userUploads')
+                  : selectedCategory.startsWith('agent-')
+                    ? displayAgents.find(a => `agent-${a.id}` === selectedCategory)?.name || t('files.breadcrumb.unknownAgent')
+                    : t('files.breadcrumb.unknownCategory')}
+            </span>
+          </div>
+
+          {selectedFiles.length > 0 && (
+             <div className="flex items-center gap-2">
+                <Badge variant="secondary">
+                  {t('files.selection.selected', { count: selectedFiles.length })}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-destructive hover:text-destructive"
+                  onClick={deleteSelectedFiles}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  {t('files.actions.delete')}
+                </Button>
+             </div>
+          )}
+        </div>
+
+        {/* File List Table */}
+        <div className="flex-1 overflow-auto px-8 pb-8">
+          <div className="border rounded-lg bg-card shadow-sm">
+            {/* Table Header */}
+            <div className="grid grid-cols-12 gap-4 p-4 border-b text-xs font-medium text-muted-foreground uppercase tracking-wider bg-muted/30">
+              <div className="col-span-5 pl-2">{t('files.table.name')}</div>
+              <div className="col-span-2">{t('files.table.type')}</div>
+              <div className="col-span-2">{t('files.table.size')}</div>
+              <div className="col-span-3">{t('files.table.dateModified')}</div>
+            </div>
+
+            {/* Table Body */}
+            {isLoading ? (
+              <div className="p-12 text-center text-muted-foreground">
+                {t('files.table.empty.loading')}
+              </div>
+            ) : filteredFiles.length === 0 ? (
+              <div className="p-12 text-center text-muted-foreground">
+                {searchQuery ? t('files.table.empty.noMatch') : t('files.table.empty.noFiles')}
+              </div>
+            ) : (
+              <div className="divide-y">
+                {filteredFiles.map((file) => (
+                  <div
+                    key={file.filename}
+                    className="grid grid-cols-12 gap-4 p-4 hover:bg-muted/50 transition-colors items-center group text-sm"
+                  >
+                    <div className="col-span-5 flex items-center gap-3 min-w-0">
+                      {/* Checkbox only visible on hover or selected */}
+                      <div className="w-5 flex justify-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedFiles.includes(file.filename)}
+                          onChange={() => toggleFileSelection(file.filename)}
+                          className={cn(
+                            "rounded border-gray-300 text-primary focus:ring-primary accent-primary h-4 w-4 transition-opacity",
+                            selectedFiles.includes(file.filename) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                          )}
+                        />
+                      </div>
+
+                      <div className="flex-shrink-0">
+                        {getFileIcon(file.filename)}
+                      </div>
+                      <span className="font-medium truncate text-foreground select-text" title={file.filename}>
+                        {file.filename}
+                      </span>
+                    </div>
+
+                    <div className="col-span-2 text-muted-foreground uppercase text-xs">
+                      {file.filename.split('.').pop() || '-'}
+                    </div>
+
+                    <div className="col-span-2 text-muted-foreground text-xs">
+                      {formatFileSize(file.file_size)}
+                    </div>
+
+                    <div className="col-span-3 text-muted-foreground text-xs flex items-center justify-between">
+                      <span>{formatRelativeTime(file.modified_time)}</span>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity justify-end">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+                          onClick={() => handlePreviewFile(file)}
+                          title={t('files.actions.preview')}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+                          onClick={() => downloadFile(file)}
+                          title={t('files.actions.download')}
+                        >
+                          <Download className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
+                          onClick={() => deleteFile(file)}
+                          title={t('files.actions.delete')}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        </main>
+      </div>
+
+      {/* File Preview Dialog */}
+      {previewFile && (
+         <StandaloneFilePreviewDialog
+            open={isPreviewOpen}
+            onOpenChange={setIsPreviewOpen}
+            filePath={previewFile.filePath}
+            fileName={previewFile.fileName}
+         />
+      )}
+    </div>
+  )
+}

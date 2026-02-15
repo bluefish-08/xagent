@@ -1,0 +1,106 @@
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+
+from xagent.db import try_upgrade_db
+
+
+class TestTryUpgradeDb:
+    @patch("xagent.db.migration.command.upgrade")
+    @patch("xagent.db.migration.create_alembic_config")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_successful_upgrade(
+        self, mock_get_revision, mock_create_config, mock_upgrade
+    ):
+        engine = MagicMock()
+        mock_get_revision.return_value = "abc123"
+        mock_config = mock_create_config.return_value
+        mock_config.attributes = {}
+
+        # Mock connection context manager
+        connection = Mock()
+        engine.connect.return_value.__enter__.return_value = connection
+
+        try_upgrade_db(engine)
+
+        mock_create_config.assert_called_once_with(engine)
+        mock_upgrade.assert_called_once_with(mock_config, "head")
+        assert mock_config.attributes["connection"] == connection
+
+    @patch("xagent.db.migration.is_database_empty")
+    @patch("xagent.db.migration.command.stamp")
+    @patch("xagent.db.migration.create_alembic_config")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_stamps_when_new_database(
+        self, mock_get_revision, mock_create_config, mock_stamp, mock_is_empty
+    ):
+        engine = MagicMock()
+        mock_get_revision.return_value = None
+        mock_is_empty.return_value = True
+        mock_config = mock_create_config.return_value
+        mock_config.attributes = {}
+
+        connection = Mock()
+        engine.connect.return_value.__enter__.return_value = connection
+
+        try_upgrade_db(engine)
+
+        mock_create_config.assert_called_once_with(engine)
+        mock_stamp.assert_called_once_with(mock_config, "head")
+        assert mock_config.attributes["connection"] == connection
+
+    @patch("xagent.db.migration.is_database_empty")
+    @patch("xagent.db.migration.create_alembic_config")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_raises_when_existing_database_unversioned(
+        self, mock_get_revision, mock_create_config, mock_is_empty
+    ):
+        engine = Mock()
+        mock_get_revision.return_value = None
+        mock_is_empty.return_value = False  # Database has tables but no revision
+
+        with pytest.raises(
+            RuntimeError, match="Database exists without alembic revision"
+        ):
+            try_upgrade_db(engine)
+
+    @patch("xagent.db.migration.command.upgrade")
+    @patch("xagent.db.migration.create_alembic_config")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_raises_error_on_upgrade_failure(
+        self, mock_get_revision, mock_create_config, mock_upgrade
+    ):
+        engine = MagicMock()
+        mock_get_revision.return_value = "abc123"
+        mock_upgrade.side_effect = Exception("Upgrade failed")
+
+        with pytest.raises(Exception, match="Upgrade failed"):
+            try_upgrade_db(engine)
+
+    @patch("xagent.db.migration.logger")
+    @patch("xagent.db.migration.command.upgrade")
+    @patch("xagent.db.migration.create_alembic_config")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_logs_upgrade_process(
+        self, mock_get_revision, mock_create_config, mock_upgrade, mock_logger
+    ):
+        engine = MagicMock()
+        mock_get_revision.return_value = "abc123"
+        mock_config = mock_create_config.return_value
+        mock_config.attributes = {}
+
+        try_upgrade_db(engine)
+
+        mock_logger.info.assert_any_call("Starting database upgrade process")
+        mock_logger.info.assert_any_call("Current version: abc123, upgrading to head")
+
+    @patch("xagent.db.migration.logger")
+    @patch("xagent.db.migration.get_alembic_revision")
+    def test_logs_error_on_failure(self, mock_get_revision, mock_logger):
+        engine = Mock()
+        mock_get_revision.side_effect = Exception("DB error")
+
+        with pytest.raises(Exception):
+            try_upgrade_db(engine)
+
+        mock_logger.error.assert_called_once()

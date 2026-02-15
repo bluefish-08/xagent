@@ -1,0 +1,117 @@
+"""Chat API request and response models"""
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
+
+
+class ChatMessage(BaseModel):
+    """Chat message model"""
+
+    role: str  # "user", "ai", "system"
+    content: str
+    timestamp: datetime
+
+
+class ChatSendRequest(BaseModel):
+    """Send message request"""
+
+    message: str
+    task_id: Optional[int] = None
+    context: Optional[Dict[str, Any]] = None
+
+
+class ChatSendResponse(BaseModel):
+    """Send message response"""
+
+    task_id: int
+    message_id: int
+    status: str
+    ai_response: Optional[str] = None
+
+
+class ChatHistoryResponse(BaseModel):
+    """Chat history response"""
+
+    task_id: int
+    messages: List[ChatMessage]
+
+
+class ExampleItem(BaseModel):
+    """Input/output example for process mode"""
+
+    input: str
+    output: str
+
+
+class TaskCreateRequest(BaseModel):
+    """Create task request"""
+
+    title: str
+    description: Optional[str] = None
+    agent_id: Optional[int] = None  # Agent Builder agent ID
+    files: Optional[List[str]] = None  # List of filenames to associate with the task
+    llm_names: Optional[List[Optional[str]]] = (
+        None  # LLM names to use: exactly 4 elements in order [default, fast_small, vision, compact]
+    )
+    memory_similarity_threshold: Optional[float] = (
+        1.5  # Memory search similarity threshold
+    )
+    agent_type: Optional[str] = "standard"  # Agent type: "standard", "text2sql", etc.
+    agent_config: Optional[Dict[str, Any]] = None  # Agent-specific configuration
+
+    # VIBE mode fields
+    vibe_mode: Optional[str] = "task"  # "task" or "process"
+    process_description: Optional[str] = (
+        None  # Process mode: detailed process description
+    )
+    examples: Optional[List[ExampleItem]] = None  # Process mode: input/output examples
+
+
+class TaskCreateResponse(BaseModel):
+    """Create task response"""
+
+    task_id: int
+    title: str
+    status: str
+    created_at: str
+    model_name: Optional[str] = None
+    small_fast_model_name: Optional[str] = None
+    visual_model_name: Optional[str] = None
+    vibe_mode: Optional[str] = None
+
+
+class ExecutionStatus(BaseModel):
+    """Execution status model"""
+
+    task_id: int
+    status: str  # "pending", "running", "completed", "failed"
+    current_step: Optional[str] = None
+    progress: Optional[float] = None
+    steps: List[Dict[str, Any]] = []
+    logs: List[Dict[str, Any]] = []
+    # Step detailed information with associated logs
+    step_details: Optional[Dict[str, Dict[str, Any]]] = None
+    # Task information
+    task_title: Optional[str] = None
+    task_description: Optional[str] = None
+    # Final result from AI response
+    result: Optional[str] = None
+
+
+class InterventionRequest(BaseModel):
+    """Human intervention request"""
+
+    task_id: int
+    step_id: str
+    action: str  # "pause", "resume", "modify", "skip"
+    data: Optional[Dict[str, Any]] = None
+
+
+class InterventionResponse(BaseModel):
+    """Human intervention response"""
+
+    success: bool
+    message: str
+    updated_status: Optional[ExecutionStatus] = None
