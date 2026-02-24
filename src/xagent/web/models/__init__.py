@@ -7,6 +7,7 @@ from .task import DAGExecution, Task
 from .template_stats import TemplateStats
 from .text2sql import Text2SQLDatabase
 from .tool_config import ToolConfig, ToolUsage
+from .uploaded_file import UploadedFile
 from .user import User, UserDefaultModel, UserModel
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "ToolUsage",
     "SystemSetting",
     "Agent",
+    "UploadedFile",
 ]

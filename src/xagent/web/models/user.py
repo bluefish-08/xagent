@@ -48,6 +48,9 @@ class User(Base):  # type: ignore
     user_models = relationship(
         "UserModel", back_populates="user", cascade="all, delete-orphan"
     )
+    uploaded_files = relationship(
+        "UploadedFile", back_populates="user", cascade="all, delete-orphan"
+    )
     user_default_models = relationship(
         "UserDefaultModel", back_populates="user", cascade="all, delete-orphan"
     )
