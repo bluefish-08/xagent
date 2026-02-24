@@ -12,14 +12,14 @@ import { DocxPreviewRenderer } from "@/components/docx-preview-renderer"
 interface StandaloneFilePreviewDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  filePath: string
+  fileId: string
   fileName: string
 }
 
 export function StandaloneFilePreviewDialog({
   open,
   onOpenChange,
-  filePath,
+  fileId,
   fileName
 }: StandaloneFilePreviewDialogProps) {
   const [content, setContent] = useState("")
@@ -29,13 +29,13 @@ export function StandaloneFilePreviewDialog({
 
   // Load file content when dialog opens
   useEffect(() => {
-    if (open && filePath && !content && !error) {
+    if (open && fileId && !content && !error) {
       const loadFileContent = async () => {
         setIsLoading(true)
         setError(null)
 
         try {
-          const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(filePath)}`)
+          const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(fileId)}`)
 
           if (response.ok) {
             // For image files, use arrayBuffer to get binary data
@@ -80,23 +80,12 @@ export function StandaloneFilePreviewDialog({
 
       loadFileContent()
     }
-  }, [open, filePath, content, error, t])
+  }, [open, fileId, content, error, t])
 
-  // Convert relative paths in HTML to absolute paths
-  const processHtmlContent = (htmlContent: string, filePath: string) => {
-    if (!htmlContent || !filePath) return htmlContent
+  const processHtmlContent = (htmlContent: string, currentFileId: string) => {
+    if (!htmlContent || !currentFileId) return htmlContent
 
-    // Get the directory path of the HTML file
-    const dirPath = filePath.substring(0, filePath.lastIndexOf('/'))
     const apiUrl = getApiUrl()
-
-    // Extract task ID from file path for public preview endpoint
-    // Format: web_task_103/output/file.html
-    let taskId: string | null = null
-    const pathMatch = filePath.match(/web_task_(\d+)/)
-    if (pathMatch && pathMatch[1]) {
-      taskId = pathMatch[1]
-    }
 
     // Replace relative paths for images, scripts, links, etc.
     return htmlContent.replace(
@@ -107,15 +96,7 @@ export function StandaloneFilePreviewDialog({
           return match
         }
 
-        // Convert relative path to absolute path
-        const absolutePath = path.startsWith('/')
-          ? path.substring(1) // Remove leading slash
-          : `${dirPath}/${path}`
-
-        // Use public preview endpoint if task ID is available
-        const newUrl = taskId
-          ? `${apiUrl}/api/files/public/preview/${taskId}/${encodeURIComponent(absolutePath)}`
-          : `${apiUrl}/api/files/download/${encodeURIComponent(absolutePath)}`
+        const newUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(currentFileId)}?relative_path=${encodeURIComponent(path)}`
 
         return `${attr}="${newUrl}"`
       }
@@ -123,9 +104,9 @@ export function StandaloneFilePreviewDialog({
   }
 
   const handleDownload = async () => {
-    if (filePath) {
+    if (fileId) {
       try {
-        const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(filePath)}`)
+        const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(fileId)}`)
 
         if (!response.ok) {
           throw new Error(`Download failed: ${response.statusText}`)
@@ -219,7 +200,7 @@ export function StandaloneFilePreviewDialog({
                 <DocxPreviewRenderer base64Content={content || ''} />
               ) : fileName.endsWith('.html') || fileName.endsWith('.htm') ? (
                 <iframe
-                  srcDoc={processHtmlContent(content, filePath)}
+                  srcDoc={processHtmlContent(content, fileId)}
                   className="w-full h-full border-0"
                   sandbox="allow-same-origin allow-scripts"
                   title={fileName}
