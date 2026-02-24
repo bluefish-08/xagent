@@ -35,19 +35,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
 
           let url: string
           if (isPptxFile) {
-            // Extract task ID from file path for preview endpoint
-            // Format: web_task_103/output/file.pptx
-            const pathMatch = filePreview.filePath.match(/web_task_(\d+)/)
-            if (pathMatch && pathMatch[1]) {
-              const taskId = pathMatch[1]
-              const absolutePath = filePreview.filePath.startsWith('/')
-                ? filePreview.filePath.substring(1)
-                : filePreview.filePath
-              url = `${apiUrl}/api/files/preview/${taskId}/${encodeURIComponent(absolutePath)}`
-            } else {
-              // Fallback to download endpoint for files without task ID
-              url = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.filePath)}`
-            }
+            url = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.filePath)}`
           } else {
             url = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.filePath)}`
           }
@@ -121,24 +109,10 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
   }, [open, filePreview.filePath, filePreview.content, filePreview.error, filePreview.fileName, dispatch])
 
   // Convert relative paths in HTML to absolute paths
-  const processHtmlContent = (htmlContent: string, filePath: string) => {
-    if (!htmlContent || !filePath) return htmlContent
+  const processHtmlContent = (htmlContent: string, fileId: string) => {
+    if (!htmlContent || !fileId) return htmlContent
 
-    // Get the directory path of the HTML file
-    const dirPath = filePath.substring(0, filePath.lastIndexOf('/'))
     const apiUrl = getApiUrl()
-
-    // Extract task ID from file path for public preview endpoint
-    // Format: web_task_103/output/file.html
-    let taskId: string | null = null
-    const pathMatch = filePath.match(/web_task_(\d+)/)
-    if (pathMatch && pathMatch[1]) {
-      taskId = pathMatch[1]
-    }
-
-    // Debug log
-    console.log('[FilePreviewDialog processHtmlContent] filePath:', filePath)
-    console.log('[FilePreviewDialog processHtmlContent] taskId:', taskId)
 
     // Replace relative paths for images, scripts, links, etc.
     return htmlContent.replace(
@@ -149,17 +123,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
           return match
         }
 
-        // Convert relative path to absolute path
-        const absolutePath = path.startsWith('/')
-          ? path.substring(1) // Remove leading slash
-          : `${dirPath}/${path}`
-
-        // Use public preview endpoint if task ID is available
-        const newUrl = taskId
-          ? `${apiUrl}/api/files/public/preview/${taskId}/${encodeURIComponent(absolutePath)}`
-          : `${apiUrl}/api/files/download/${encodeURIComponent(absolutePath)}`
-
-        console.log(`[FilePreviewDialog] Replacing ${path} -> ${newUrl}`)
+        const newUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(fileId)}?relative_path=${encodeURIComponent(path)}`
 
         return `${attr}="${newUrl}"`
       }
@@ -198,36 +162,16 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
 
   const handleOpenInNewWindow = () => {
     if (filePreview.filePath) {
-      // Extract task ID from file path for public preview
-      let taskId: string | null = null
-      const pathMatch = filePreview.filePath.match(/web_task_(\d+)/)
-      if (pathMatch && pathMatch[1]) {
-        taskId = pathMatch[1]
-      }
-
       // Check if this is a PPTX file
       const isPptxFile = filePreview.fileName.toLowerCase().endsWith('.pptx') ||
                         filePreview.fileName.toLowerCase().endsWith('.ppt')
 
-      // Construct URL based on file type and task ID availability
       let fileUrl: string
-      if (taskId) {
-        const apiUrl = getApiUrl()
-        const absolutePath = filePreview.filePath.startsWith('/')
-          ? filePreview.filePath.substring(1)
-          : filePreview.filePath
-
-        if (isPptxFile) {
-          // Use preview endpoint for PPTX files (returns HTML)
-          fileUrl = `${apiUrl}/api/files/preview/${taskId}/${encodeURIComponent(absolutePath)}`
-        } else {
-          // Use public preview endpoint for other files
-          fileUrl = `${apiUrl}/api/files/public/preview/${taskId}/${encodeURIComponent(absolutePath)}`
-        }
+      const apiUrl = getApiUrl()
+      if (isPptxFile) {
+        fileUrl = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.filePath)}`
       } else {
-        // Fallback to download endpoint (requires authentication)
-        const apiUrl = getApiUrl()
-        fileUrl = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.filePath)}`
+        fileUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(filePreview.filePath)}`
       }
 
       // Open in new window/tab

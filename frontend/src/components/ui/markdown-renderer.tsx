@@ -53,18 +53,7 @@ export function MarkdownRenderer({ content, className = '', onFileClick }: Markd
             const filePath = href.replace(/^file:/, '')
             const apiUrl = getApiUrl()
 
-            // Extract task_id from filePath (e.g., "web_task_158/output/file.png" -> "158")
-            const taskIdMatch = filePath.match(/web_task_(\d+)/)
-            const taskId = taskIdMatch ? taskIdMatch[1] : null
-
-            let imageUrl: string
-            if (taskId) {
-              // Use public preview API (no auth required)
-              imageUrl = `${apiUrl}/api/files/public/preview/${taskId}/${encodeURIComponent(filePath)}`
-            } else {
-              // Fallback to download API (requires auth, won't work in img tag)
-              imageUrl = `${apiUrl}/api/files/download/${encodeURIComponent(filePath)}`
-            }
+            const imageUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(filePath)}`
 
             // Also add data-file-path for click preview
             return `<img src="${imageUrl}" alt="${text || ''}" title="${title || text || ''}" data-file-path="${filePath}" class="file-image cursor-pointer" />`
