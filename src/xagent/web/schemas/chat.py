@@ -51,7 +51,7 @@ class TaskCreateRequest(BaseModel):
     title: str
     description: Optional[str] = None
     agent_id: Optional[int] = None  # Agent Builder agent ID
-    files: Optional[List[str]] = None  # List of filenames to associate with the task
+    files: Optional[List[str]] = None
     llm_names: Optional[List[Optional[str]]] = (
         None  # LLM names to use: exactly 4 elements in order [default, fast_small, vision, compact]
     )
