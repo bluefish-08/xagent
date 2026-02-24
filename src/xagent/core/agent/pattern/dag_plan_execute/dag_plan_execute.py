@@ -17,7 +17,7 @@ import logging
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from ....memory import MemoryStore
 from ....memory.in_memory import InMemoryMemoryStore
@@ -1248,9 +1248,16 @@ class DAGPlanExecutePattern(AgentPattern):
                             if relative_path
                             else f"{workspace_name}/{filename}"
                         )
+                        file_id = str(
+                            uuid5(
+                                NAMESPACE_URL,
+                                f"xagent-output:{full_relative_path}",
+                            )
+                        )
 
                         file_outputs.append(
                             {
+                                "file_id": file_id,
                                 "filename": filename,
                                 "file_path": file_path,
                                 "relative_path": full_relative_path,

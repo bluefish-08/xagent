@@ -247,8 +247,8 @@ class ResultAnalyzer:
             file_outputs_section = "\n\nOutput Files:\n"
             for i, file_info in enumerate(file_outputs, 1):
                 filename = file_info.get("filename", "")
-                relative_path = file_info.get("relative_path", "")
-                file_outputs_section += f"  {i}. {filename} (path: {relative_path})\n"
+                file_id = file_info.get("file_id", "")
+                file_outputs_section += f"  {i}. {filename} (file_id: {file_id})\n"
             file_outputs_section += "\n"
 
         # Detect goal language
@@ -322,9 +322,9 @@ FINAL ANSWER GUIDELINES:
 - Provide clear reasoning for your success/failure determination
 - If failed, explain what went wrong and what could be done differently
 - When there are output files, you MUST include them using the EXACT format shown above:
-  - For images: `![description](file:path/to/file.png)`
-  - For other files: `[filename](file:path/to/file)`
-  - ALWAYS use the `file:` prefix followed by the exact relative path
+  - For images: `![description](file:file_id)`
+  - For other files: `[filename](file:file_id)`
+  - ALWAYS use the `file:` prefix followed by the exact file_id
 - Group related files together under a clear section heading
 - IMPORTANT: If you determine that the goal has NOT been achieved, you MUST start your final_answer with 'TASK FAILED: ' followed by a clear explanation (in the same language as the goal)
 
@@ -521,8 +521,8 @@ STORAGE THRESHOLD: Be extremely conservative. Default to should_store = false un
             "response with 'TASK FAILED: ' followed by a clear explanation of the failure (in the same language as the goal).\n\n"
             "FILE OUTPUT FORMATTING:\n"
             "When there are output files, you MUST include them in your response using Markdown link format:\n"
-            "- Use this EXACT format for each file: `[filename](file:path/to/file)`\n"
-            "- Example: `[report.html](file:web_task_123/output/report.html)`\n"
+            "- Use this EXACT format for each file: `[filename](file:file_id)`\n"
+            "- Example: `[report.html](file:550e8400-e29b-41d4-a716-446655440000)`\n"
             "- Group related files together under a clear section heading\n"
             "- Always include file links at the end of your response in a clear, organized manner\n"
             "- This allows users to click on the file links to preview them in the right panel"
