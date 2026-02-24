@@ -2256,7 +2256,7 @@ async def handle_build_preview_execution(
 
                         file_record = UploadedFile(
                             user_id=int(cast(Any, user.id)),
-                            task_id=preview_task_id,
+                            task_id=None,
                             filename=normalized_file_name,
                             storage_path=str(target_path),
                             mime_type=file_type,
