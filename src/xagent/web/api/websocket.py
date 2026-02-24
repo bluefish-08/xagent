@@ -66,6 +66,23 @@ def normalize_filename(filename: str) -> str:
     return normalized_name
 
 
+def build_unique_target_path(target_dir: Any, filename: str) -> Any:
+    from pathlib import Path
+
+    base_path = Path(target_dir) / filename
+    if not base_path.exists():
+        return base_path
+
+    stem = base_path.stem
+    suffix = base_path.suffix
+    counter = 1
+    while True:
+        candidate = base_path.parent / f"{stem}_{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def create_stream_event(
     event_type: str,
     task_id: int,
@@ -106,8 +123,8 @@ def convert_to_local_time(utc_dt: Any) -> datetime:
 
 
 def _build_output_file_id(relative_path: str) -> str:
-    normalized = relative_path.lstrip("/")
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"xagent-output:{normalized}"))
+    del relative_path
+    return str(uuid.uuid4())
 
 
 def _resolve_output_storage_path(raw_path: str) -> Optional[tuple[Any, str]]:
@@ -243,6 +260,9 @@ def _normalize_file_outputs(
 
         final_file_id = str(file_record.file_id)
         final_filename = item_filename or str(file_record.filename)
+
+        if item_file_id:
+            path_to_file_id[item_file_id] = final_file_id
 
         normalized_outputs.append(
             {
@@ -702,7 +722,7 @@ async def handle_file_upload_for_task(
                 # Use normalized filename instead of original
                 original_file_name = Path(file_name).name
                 normalized_file_name = normalize_filename(original_file_name)
-                target_path = target_dir / normalized_file_name
+                target_path = build_unique_target_path(target_dir, normalized_file_name)
 
                 # Copy file to workspace
                 shutil.copy2(temp_file_path, target_path)
@@ -2248,7 +2268,9 @@ async def handle_build_preview_execution(
                         # Normalize filename
                         original_file_name = Path(file_name).name
                         normalized_file_name = normalize_filename(original_file_name)
-                        target_path = target_dir / normalized_file_name
+                        target_path = build_unique_target_path(
+                            target_dir, normalized_file_name
+                        )
 
                         # Copy file to workspace
                         shutil.copy2(temp_file_path, target_path)
