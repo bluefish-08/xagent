@@ -88,29 +88,17 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
     }
   }, [open, filePreview.filePath, filePreview.content, filePreview.error, dispatch, t, filePreview.fileName])
 
-  const processHtmlContent = (htmlContent: string, filePath: string) => {
-    if (!htmlContent || !filePath) return htmlContent
+  const processHtmlContent = (htmlContent: string, fileId: string) => {
+    if (!htmlContent || !fileId) return htmlContent
 
-    const dirPath = filePath.substring(0, filePath.lastIndexOf('/'))
     const apiUrl = getApiUrl()
-
-    // Extract task_id from filePath (e.g., "web_task_78/output/file.html" -> "78")
-    const taskIdMatch = filePath.match(/web_task_(\d+)/)
-    const taskId = taskIdMatch ? taskIdMatch[1] : null
 
     return htmlContent.replace(
       /(src|href)=["']([^"']+)["']/g,
       (match, attr, path) => {
         if (path.match(/^(https?:\/|data:|\/\/|#)/)) return match
 
-        const absolutePath = path.startsWith('/') ? path.substring(1) : `${dirPath}/${path}`
-
-        // Use public preview API if taskId is available, otherwise use download API
-        if (taskId) {
-          return `${attr}="${apiUrl}/api/files/public/preview/${taskId}/${encodeURIComponent(absolutePath)}"`
-        } else {
-          return `${attr}="${apiUrl}/api/files/download/${encodeURIComponent(absolutePath)}"`
-        }
+        return `${attr}="${apiUrl}/api/files/public/preview/${encodeURIComponent(fileId)}?relative_path=${encodeURIComponent(path)}"`
       }
     )
   }

@@ -1801,15 +1801,12 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                   <div className="mt-2 space-y-1">
                     {fileOutputsData.map((file: string | any, index: number) => {
                       let fileName, filePath
-                      if (typeof file === 'string') {
-                        fileName = file.split('/').pop() || file
-                        filePath = file
-                      } else if (typeof file === 'object' && file !== null) {
-                        fileName = file.filename || file.file_path?.split('/').pop() || 'unknown'
-                        filePath = file.download_path || file.download_url || file.file_path || file.relative_path || fileName
+                      if (typeof file === 'object' && file !== null) {
+                        fileName = file.filename || 'unknown'
+                        filePath = file.file_id || ''
                       } else {
                         fileName = 'unknown'
-                        filePath = 'unknown'
+                        filePath = ''
                       }
 
                       return (
@@ -1820,20 +1817,21 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                               // Dispatch custom event to open file preview with all files
                               const allFiles = fileOutputsData.map((file: string | any) => {
                                 let fFileName, fFilePath
-                                if (typeof file === 'string') {
-                                  fFileName = file.split('/').pop() || file
-                                  fFilePath = file
-                                } else if (typeof file === 'object' && file !== null) {
-                                  fFileName = file.filename || file.file_path?.split('/').pop() || 'unknown'
-                                  fFilePath = file.download_path || file.download_url || file.file_path || file.relative_path || fFileName
+                                if (typeof file === 'object' && file !== null) {
+                                  fFileName = file.filename || 'unknown'
+                                  fFilePath = file.file_id || ''
                                 } else {
                                   fFileName = 'unknown'
-                                  fFilePath = 'unknown'
+                                  fFilePath = ''
                                 }
                                 return { fileName: fFileName, filePath: fFilePath }
-                              })
+                              }).filter((item: { filePath: string }) => !!item.filePath)
 
-                                window.dispatchEvent(new CustomEvent('openFilePreview', {
+                              if (!filePath) {
+                                return
+                              }
+
+                              window.dispatchEvent(new CustomEvent('openFilePreview', {
                                 detail: {
                                   filePath,
                                   fileName,
@@ -1842,6 +1840,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                                 }
                               }))
                             }}
+                            disabled={!filePath}
                             className="text-xs bg-primary/10 hover:bg-primary/20 text-primary px-2 py-1 rounded transition-colors"
                           >
                             {t('agent.logs.event.messages.previewLabel')}
@@ -2729,15 +2728,12 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                     <div className="mt-2 space-y-1">
                 {taskData.file_outputs.map((file: string | any, index: number) => {
                   let fileName, filePath
-                  if (typeof file === 'string') {
-                    fileName = file.split('/').pop() || file
-                    filePath = file
-                  } else if (typeof file === 'object' && file !== null) {
-                    fileName = file.filename || file.file_path?.split('/').pop() || 'unknown'
-                    filePath = file.download_path || file.download_url || file.file_path || file.relative_path || fileName
+                  if (typeof file === 'object' && file !== null) {
+                    fileName = file.filename || 'unknown'
+                    filePath = file.file_id || ''
                   } else {
                     fileName = 'unknown'
-                    filePath = 'unknown'
+                    filePath = ''
                   }
 
                   return (
@@ -2748,20 +2744,21 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                           // Dispatch custom event to open file preview with all files
                           const allFiles = (taskData.file_outputs || []).map((file: string | any) => {
                             let fFileName, fFilePath
-                            if (typeof file === 'string') {
-                              fFileName = file.split('/').pop() || file
-                              fFilePath = file
-                            } else if (typeof file === 'object' && file !== null) {
-                              fFileName = file.filename || file.file_path?.split('/').pop() || 'unknown'
-                              fFilePath = file.download_path || file.download_url || file.file_path || file.relative_path || fFileName
+                            if (typeof file === 'object' && file !== null) {
+                              fFileName = file.filename || 'unknown'
+                              fFilePath = file.file_id || ''
                             } else {
                               fFileName = 'unknown'
-                              fFilePath = 'unknown'
+                              fFilePath = ''
                             }
                             return { fileName: fFileName, filePath: fFilePath }
-                          })
+                          }).filter((item: { filePath: string }) => !!item.filePath)
 
-                            window.dispatchEvent(new CustomEvent('openFilePreview', {
+                          if (!filePath) {
+                            return
+                          }
+
+                          window.dispatchEvent(new CustomEvent('openFilePreview', {
                             detail: {
                               filePath,
                               fileName,
@@ -2770,6 +2767,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                             }
                           }))
                         }}
+                        disabled={!filePath}
                         className="text-xs bg-primary/10 hover:bg-primary/20 text-primary px-2 py-1 rounded transition-colors"
                       >
                         {t('agent.logs.event.messages.previewLabel')}

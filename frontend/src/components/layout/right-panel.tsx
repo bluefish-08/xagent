@@ -24,6 +24,7 @@ interface StepExecution {
   step_data?: unknown
   file_outputs?: Array<{
   filename?: string
+  file_id?: string
   file_path?: string
   relative_path?: string
   download_path?: string
@@ -68,19 +69,24 @@ function StepDetail({ step }: { step: StepExecution }) {
     }))
   }
 
-  const handlePreviewFile = (filePath: string, fileName: string, allFiles?: any[]) => {
+  const handlePreviewFile = (fileId: string, fileName: string, allFiles?: any[]) => {
     // Convert all files to the format expected by openFilePreview
-    const files = allFiles?.map(file => ({
-      filePath: typeof file === 'string' ? file : (file.relative_path || file.download_path || file.file_path),
-      fileName: typeof file === 'string' ? file.split('/').pop() : (file.filename || file.relative_path?.split('/').pop() || file.download_path?.split('/').pop())
-    })) || [{
-      filePath,
-      fileName: fileName || filePath.split('/').pop() || filePath
+    const files = (allFiles?.map(file => {
+      if (typeof file === 'object' && file !== null && file.file_id) {
+        return {
+          filePath: file.file_id,
+          fileName: file.filename || 'Unknown File',
+        }
+      }
+      return null
+    }).filter(Boolean) as { filePath: string; fileName: string }[] | undefined) || [{
+      filePath: fileId,
+      fileName: fileName || fileId,
     }]
 
     openFilePreview(
-      filePath,
-      fileName || filePath.split('/').pop() || filePath,
+      fileId,
+      fileName || fileId,
       files as { filePath: string; fileName: string }[],
       0
     )
@@ -89,9 +95,9 @@ function StepDetail({ step }: { step: StepExecution }) {
   const handlePreviewAllFiles = () => {
     if (step.file_outputs && step.file_outputs.length > 0) {
       const files = step.file_outputs.map(file => ({
-        filePath: typeof file === 'string' ? file : (file.relative_path || file.download_path || file.file_path || ''),
-        fileName: typeof file === 'string' ? file.split('/').pop() : (file.filename || file.relative_path?.split('/').pop() || file.download_path?.split('/').pop() || 'Unknown File')
-      }))
+        filePath: typeof file === 'object' && file !== null ? (file.file_id || '') : '',
+        fileName: typeof file === 'object' && file !== null ? (file.filename || 'Unknown File') : 'Unknown File'
+      })).filter(file => !!file.filePath)
 
       if (files[0].filePath) {
         openFilePreview(
@@ -206,13 +212,13 @@ function StepDetail({ step }: { step: StepExecution }) {
             <CollapsibleContent>
               <div className="px-3 pb-3 space-y-2">
                 {step.file_outputs.map((file, index) => {
-                  const fileName = typeof file === 'string' ? file.split('/').pop() : (file.filename || (file.relative_path || file.download_path || file.file_path)?.split('/').pop() || 'Unknown File')
-                  const filePath = typeof file === 'string' ? file : (file.relative_path || file.download_path || file.file_path || '')
+                  const fileName = typeof file === 'object' && file !== null ? (file.filename || 'Unknown File') : 'Unknown File'
+                  const fileId = typeof file === 'object' && file !== null ? (file.file_id || '') : ''
                   return (
                     <div key={index} className="flex items-center justify-between p-2 bg-muted/30 rounded hover:bg-muted/50 transition-colors">
                       <div className="flex items-center gap-2 flex-1 min-w-0">
                         <FileText className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                        <span className="text-sm text-muted-foreground font-mono truncate" title={filePath}>
+                        <span className="text-sm text-muted-foreground font-mono truncate" title={fileId}>
                           {fileName}
                         </span>
                       </div>
@@ -220,7 +226,8 @@ function StepDetail({ step }: { step: StepExecution }) {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => filePath && handlePreviewFile(filePath, fileName || 'Unknown File', step.file_outputs)}
+                          onClick={() => fileId && handlePreviewFile(fileId, fileName || 'Unknown File', step.file_outputs)}
+                          disabled={!fileId}
                           className="h-6 w-6 p-0"
                           title={t("agent.layout.right.tooltips.previewFile")}
                         >

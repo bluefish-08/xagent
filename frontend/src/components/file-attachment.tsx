@@ -25,6 +25,7 @@ interface FileInfo {
   name: string
   size: number
   type: string
+  file_id?: string
   path?: string
 }
 
@@ -88,16 +89,17 @@ export function FileAttachment({ files, className, showPreview = true, variant =
   }
 
   const handlePreview = async (file: FileInfo) => {
-    if (!file.path) return
-
     if (onPreview) {
       onPreview(file)
       return
     }
 
+    const fileId = file.file_id
+    if (!fileId) return
+
     setIsLoading(true)
     try {
-      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(file.path)}`)
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(fileId)}`)
       if (response.ok) {
         // For image files, use arrayBuffer to get binary data
         // For text files, use text() for proper encoding
@@ -130,10 +132,11 @@ export function FileAttachment({ files, className, showPreview = true, variant =
   }
 
   const handleDownload = async (file: FileInfo) => {
-    if (!file.path) return
+    const fileId = file.file_id
+    if (!fileId) return
 
     try {
-      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(file.path)}`)
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(fileId)}`)
       if (response.ok) {
         const blob = await response.blob()
         const url = window.URL.createObjectURL(blob)
@@ -212,7 +215,7 @@ export function FileAttachment({ files, className, showPreview = true, variant =
                     variant="ghost"
                     size="sm"
                     onClick={() => handlePreview(file)}
-                    disabled={isLoading || !file.path}
+                    disabled={isLoading || (!onPreview && !file.file_id)}
                     className={cn(
                       "h-6 w-6 p-0",
                       variant === 'user-message'
@@ -226,7 +229,7 @@ export function FileAttachment({ files, className, showPreview = true, variant =
                     variant="ghost"
                     size="sm"
                     onClick={() => handleDownload(file)}
-                    disabled={!file.path}
+                    disabled={!file.file_id}
                     className={cn(
                       "h-6 w-6 p-0",
                       variant === 'user-message'

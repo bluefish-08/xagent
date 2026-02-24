@@ -28,10 +28,12 @@ import {
 import { cn } from "@/lib/utils"
 
 interface FileItem {
+  file_id: string
   filename: string
   file_size: number
   modified_time: number
   file_type?: string
+  task_id?: number | null
   workspace_id?: string
   relative_path?: string
 }
@@ -74,7 +76,7 @@ export function FilesPage() {
   }
 
   // File preview state
-  const [previewFile, setPreviewFile] = useState<{ filePath: string; fileName: string } | null>(null)
+  const [previewFile, setPreviewFile] = useState<{ fileId: string; fileName: string } | null>(null)
   const [isPreviewOpen, setIsPreviewOpen] = useState(false)
 
   const [displayAgents, setDisplayAgents] = useState<Agent[]>([])
@@ -94,9 +96,13 @@ export function FilesPage() {
     // Extract agent IDs from file paths
     const inferredAgentIds = new Set<number>()
     files.forEach(file => {
-      const match = file.relative_path?.match(/^web_task_(\d+)\//)
-      if (match) {
-        inferredAgentIds.add(parseInt(match[1]))
+      if (typeof file.task_id === 'number') {
+        inferredAgentIds.add(file.task_id)
+      } else {
+        const match = file.relative_path?.match(/^web_task_(\d+)\//)
+        if (match) {
+          inferredAgentIds.add(parseInt(match[1]))
+        }
       }
     })
 
@@ -185,18 +191,17 @@ export function FilesPage() {
   }
 
   const deleteFile = async (file: FileItem, skipConfirm = false) => {
-    const displayName = file.relative_path || file.filename
+    const displayName = file.filename
     if (!skipConfirm && !confirm(t('files.delete.confirmSingle', { name: displayName }))) return
 
     try {
-      const pathToDelete = file.relative_path || file.filename
-      const response = await apiRequest(`${getApiUrl()}/api/files/${encodeURIComponent(pathToDelete)}`, {
+      const response = await apiRequest(`${getApiUrl()}/api/files/${encodeURIComponent(file.file_id)}`, {
         method: 'DELETE'
       })
 
       if (response.ok) {
-        setFiles(prev => prev.filter(f => f.filename !== file.filename))
-        setSelectedFiles(prev => prev.filter(f => f !== file.filename))
+        setFiles(prev => prev.filter(f => f.file_id !== file.file_id))
+        setSelectedFiles(prev => prev.filter(f => f !== file.file_id))
       }
     } catch (error) {
       console.error('Failed to delete file:', error)
@@ -205,8 +210,7 @@ export function FilesPage() {
 
   const downloadFile = async (file: FileItem) => {
     try {
-      const pathToDownload = file.relative_path || file.filename
-      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(pathToDownload)}`)
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(file.file_id)}`)
 
       if (!response.ok) {
         throw new Error(`Download failed: ${response.statusText}`)
@@ -227,9 +231,8 @@ export function FilesPage() {
   }
 
   const handlePreviewFile = (file: FileItem) => {
-    const pathToPreview = file.relative_path || file.filename
     setPreviewFile({
-      filePath: pathToPreview,
+      fileId: file.file_id,
       fileName: file.filename
     })
     setIsPreviewOpen(true)
@@ -279,8 +282,7 @@ export function FilesPage() {
 
     // Check if file belongs to an agent task (web_task_{id})
     // Format: "web_task_13/output/hello.txt" -> Agent ID 13
-    const agentTaskMatch = file.relative_path?.match(/^web_task_(\d+)\//)
-    const fileAgentId = agentTaskMatch ? parseInt(agentTaskMatch[1]) : null
+    const fileAgentId = typeof file.task_id === 'number' ? file.task_id : null
 
     if (selectedCategory.startsWith('agent-')) {
       const targetAgentId = parseInt(selectedCategory.split('-')[1])
@@ -290,28 +292,22 @@ export function FilesPage() {
         return fileAgentId === targetAgentId
       }
 
-      // Fallback: if no ID in path, check if path includes agent name (legacy/fallback behavior)
-      const agent = displayAgents.find(a => a.id === targetAgentId)
-      if (agent && file.relative_path) {
-         return file.relative_path.includes(agent.name)
-      }
-
       return false
     }
 
     if (selectedCategory === 'uploads') {
       // User uploads are files that DO NOT match the agent task pattern
-      return fileAgentId === null && !file.relative_path?.includes('web_task_')
+      return fileAgentId === null
     }
 
     return true
   })
 
-  const toggleFileSelection = (filename: string) => {
+  const toggleFileSelection = (fileId: string) => {
     setSelectedFiles(prev =>
-      prev.includes(filename)
-        ? prev.filter(f => f !== filename)
-        : [...prev, filename]
+      prev.includes(fileId)
+        ? prev.filter(f => f !== fileId)
+        : [...prev, fileId]
     )
   }
 
@@ -319,8 +315,8 @@ export function FilesPage() {
     if (selectedFiles.length === 0) return
     if (!confirm(t('files.delete.confirmMultiple', { count: selectedFiles.length }))) return
 
-    for (const filename of selectedFiles) {
-      const fileToDelete = files.find(f => f.filename === filename)
+    for (const fileId of selectedFiles) {
+      const fileToDelete = files.find(f => f.file_id === fileId)
       if (fileToDelete) {
         await deleteFile(fileToDelete, true)
       }
@@ -497,7 +493,7 @@ export function FilesPage() {
               <div className="divide-y">
                 {filteredFiles.map((file) => (
                   <div
-                    key={file.filename}
+                    key={file.file_id}
                     className="grid grid-cols-12 gap-4 p-4 hover:bg-muted/50 transition-colors items-center group text-sm"
                   >
                     <div className="col-span-5 flex items-center gap-3 min-w-0">
@@ -505,11 +501,11 @@ export function FilesPage() {
                       <div className="w-5 flex justify-center">
                         <input
                           type="checkbox"
-                          checked={selectedFiles.includes(file.filename)}
-                          onChange={() => toggleFileSelection(file.filename)}
+                          checked={selectedFiles.includes(file.file_id)}
+                          onChange={() => toggleFileSelection(file.file_id)}
                           className={cn(
                             "rounded border-gray-300 text-primary focus:ring-primary accent-primary h-4 w-4 transition-opacity",
-                            selectedFiles.includes(file.filename) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                            selectedFiles.includes(file.file_id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                           )}
                         />
                       </div>
@@ -578,9 +574,9 @@ export function FilesPage() {
          <StandaloneFilePreviewDialog
             open={isPreviewOpen}
             onOpenChange={setIsPreviewOpen}
-            filePath={previewFile.filePath}
+            fileId={previewFile.fileId}
             fileName={previewFile.fileName}
-         />
+          />
       )}
     </div>
   )
