@@ -89,8 +89,11 @@ export function MarkdownRenderer({ content, className = '', onFileClick }: Markd
         e.preventDefault()
         const filePath = link.getAttribute('data-file-path')
         if (filePath) {
-          // Extract filename from path
-          const fileName = filePath.split('/').pop() || filePath
+          const fileName =
+            link.textContent?.trim() ||
+            link.getAttribute('title') ||
+            filePath.split('/').pop() ||
+            filePath
           onFileClick(filePath, fileName)
         }
         return
@@ -102,8 +105,11 @@ export function MarkdownRenderer({ content, className = '', onFileClick }: Markd
         e.preventDefault()
         const filePath = img.getAttribute('data-file-path')
         if (filePath) {
-          // Extract filename from path
-          const fileName = filePath.split('/').pop() || filePath
+          const fileName =
+            img.getAttribute('alt') ||
+            img.getAttribute('title') ||
+            filePath.split('/').pop() ||
+            filePath
           onFileClick(filePath, fileName)
         }
       }
