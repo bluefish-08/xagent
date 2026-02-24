@@ -105,6 +105,166 @@ def convert_to_local_time(utc_dt: Any) -> datetime:
     return local_dt.replace(tzinfo=None)  # type: ignore[no-any-return]
 
 
+def _build_output_file_id(relative_path: str) -> str:
+    normalized = relative_path.lstrip("/")
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"xagent-output:{normalized}"))
+
+
+def _resolve_output_storage_path(raw_path: str) -> Optional[tuple[Any, str]]:
+    from pathlib import Path
+
+    from ..config import UPLOADS_DIR
+
+    if not raw_path:
+        return None
+
+    path_candidate = Path(raw_path)
+    if path_candidate.exists() and path_candidate.is_file():
+        resolved = path_candidate.resolve()
+    else:
+        resolved = (UPLOADS_DIR / raw_path.lstrip("/")).resolve()
+        if not resolved.exists() or not resolved.is_file():
+            return None
+
+    uploads_root = UPLOADS_DIR.resolve()
+    try:
+        relative_path = str(resolved.relative_to(uploads_root))
+    except ValueError:
+        return None
+
+    return resolved, relative_path
+
+
+def _rewrite_file_links_to_file_id(
+    output_text: Any, path_to_file_id: Dict[str, str]
+) -> Any:
+    if not isinstance(output_text, str) or not output_text:
+        return output_text
+
+    def replace_link(match: re.Match[str]) -> str:
+        token = match.group(1).strip()
+        candidates = [
+            token,
+            token.lstrip("/"),
+            token.replace("%2F", "/").lstrip("/"),
+        ]
+        for candidate in candidates:
+            mapped_file_id = path_to_file_id.get(candidate)
+            if mapped_file_id:
+                return f"(file:{mapped_file_id})"
+        return match.group(0)
+
+    return re.sub(r"\(file:([^)]+)\)", replace_link, output_text)
+
+
+def _normalize_file_outputs(
+    db: Session,
+    task_id: int,
+    task_user_id: int,
+    file_outputs: Any,
+) -> tuple[list[Dict[str, str]], Dict[str, str]]:
+    from ..models.uploaded_file import UploadedFile
+
+    if isinstance(file_outputs, str):
+        file_outputs = [file_outputs] if file_outputs.strip() else []
+    if not isinstance(file_outputs, list):
+        return [], {}
+
+    normalized_outputs: list[Dict[str, str]] = []
+    path_to_file_id: Dict[str, str] = {}
+    changed = False
+
+    for item in file_outputs:
+        item_file_id = ""
+        item_filename = ""
+        raw_paths: list[str] = []
+
+        if isinstance(item, str):
+            raw_paths = [item]
+        elif isinstance(item, dict):
+            if isinstance(item.get("file_id"), str):
+                item_file_id = str(item.get("file_id"))
+            if isinstance(item.get("filename"), str):
+                item_filename = str(item.get("filename"))
+            for key in ("file_path", "download_path", "relative_path", "path"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_paths.append(value)
+        else:
+            continue
+
+        resolved_info = None
+        for raw_path in raw_paths:
+            resolved_info = _resolve_output_storage_path(raw_path)
+            if resolved_info is not None:
+                break
+
+        if resolved_info is None:
+            if item_file_id:
+                normalized_outputs.append(
+                    {
+                        "file_id": item_file_id,
+                        "filename": item_filename or "output",
+                    }
+                )
+            continue
+
+        resolved_path, relative_path = resolved_info
+        normalized_relative_path = relative_path.lstrip("/")
+        expected_file_id = item_file_id or _build_output_file_id(
+            normalized_relative_path
+        )
+
+        file_record = (
+            db.query(UploadedFile)
+            .filter(UploadedFile.storage_path == str(resolved_path))
+            .first()
+        )
+        if file_record is None and item_file_id:
+            file_record = (
+                db.query(UploadedFile)
+                .filter(UploadedFile.file_id == item_file_id)
+                .first()
+            )
+
+        if file_record is None:
+            file_record = UploadedFile(
+                file_id=expected_file_id,
+                user_id=task_user_id,
+                task_id=task_id,
+                filename=item_filename or resolved_path.name,
+                storage_path=str(resolved_path),
+                mime_type=None,
+                file_size=int(resolved_path.stat().st_size),
+            )
+            db.add(file_record)
+            db.flush()
+            changed = True
+
+        final_file_id = str(file_record.file_id)
+        final_filename = item_filename or str(file_record.filename)
+
+        normalized_outputs.append(
+            {
+                "file_id": final_file_id,
+                "filename": final_filename,
+            }
+        )
+
+        for raw_path in raw_paths:
+            stripped = raw_path.strip()
+            if stripped:
+                path_to_file_id[stripped] = final_file_id
+                path_to_file_id[stripped.lstrip("/")] = final_file_id
+        path_to_file_id[normalized_relative_path] = final_file_id
+        path_to_file_id[f"/{normalized_relative_path}"] = final_file_id
+
+    if changed:
+        db.commit()
+
+    return normalized_outputs, path_to_file_id
+
+
 async def execute_task_background(
     task_id: int,
     user_message: str,
@@ -143,8 +303,20 @@ async def execute_task_background(
                 db_session=db,
             )
 
+        normalized_outputs, path_to_file_id = _normalize_file_outputs(
+            db,
+            task_id=int(task_id),
+            task_user_id=int(cast(Any, task.user_id)),
+            file_outputs=result.get("file_outputs", []),
+        )
+        if normalized_outputs:
+            result["file_outputs"] = normalized_outputs
+
         # Get AI response
-        ai_response = result.get("output", "Task completed")
+        ai_response = _rewrite_file_links_to_file_id(
+            result.get("output", "Task completed"),
+            path_to_file_id,
+        )
 
         # Task execution result is logged by ConsoleTraceHandler, no need for duplicate logs
 
@@ -248,8 +420,20 @@ async def execute_continuation_background(
             # Call continuation
             result = await dag_pattern.handle_continuation(user_message, context)
 
+        normalized_outputs, path_to_file_id = _normalize_file_outputs(
+            db,
+            task_id=int(task_id),
+            task_user_id=int(cast(Any, task.user_id)),
+            file_outputs=result.get("file_outputs", []),
+        )
+        if normalized_outputs:
+            result["file_outputs"] = normalized_outputs
+
         # Get AI response
-        ai_response = result.get("output", "Task continuation completed")
+        ai_response = _rewrite_file_links_to_file_id(
+            result.get("output", "Task continuation completed"),
+            path_to_file_id,
+        )
 
         # Update task status (get new session to avoid expiration)
         from ..models.database import get_db
@@ -1119,61 +1303,16 @@ async def handle_execute_task(
             # Note: trace_task_completion is handled by handle_chat_message to avoid duplicates
 
             # Extract file output info
-            file_outputs = result.get("file_outputs", [])
-            # Convert to list if file_outputs is string
-            if isinstance(file_outputs, str):
-                file_outputs = [file_outputs] if file_outputs.strip() else []
-
-            if isinstance(file_outputs, list):
-                from pathlib import Path
-
-                from ..config import UPLOADS_DIR
-                from ..models.uploaded_file import UploadedFile
-
-                normalized_outputs: list[Any] = []
-                for item in file_outputs:
-                    if not isinstance(item, str) or not item:
-                        normalized_outputs.append(item)
-                        continue
-
-                    output_path = Path(item)
-                    if not output_path.exists() or not output_path.is_file():
-                        normalized_outputs.append(item)
-                        continue
-
-                    try:
-                        output_path.resolve().relative_to(UPLOADS_DIR.resolve())
-                    except ValueError:
-                        normalized_outputs.append(item)
-                        continue
-
-                    file_record = (
-                        db.query(UploadedFile)
-                        .filter(UploadedFile.storage_path == str(output_path))
-                        .first()
-                    )
-                    if file_record is None:
-                        file_record = UploadedFile(
-                            user_id=int(cast(Any, task.user_id)),
-                            task_id=int(task_id),
-                            filename=output_path.name,
-                            storage_path=str(output_path),
-                            mime_type=None,
-                            file_size=int(output_path.stat().st_size),
-                        )
-                        db.add(file_record)
-                        db.flush()
-
-                    normalized_outputs.append(
-                        {
-                            "file_id": file_record.file_id,
-                            "filename": file_record.filename,
-                            "file_path": item,
-                        }
-                    )
-
-                db.commit()
-                file_outputs = normalized_outputs
+            file_outputs, path_to_file_id = _normalize_file_outputs(
+                db,
+                task_id=int(task_id),
+                task_user_id=int(cast(Any, task.user_id)),
+                file_outputs=result.get("file_outputs", []),
+            )
+            result["output"] = _rewrite_file_links_to_file_id(
+                result.get("output", ""),
+                path_to_file_id,
+            )
 
             # Send task completion event (don't duplicate result as trace system already sent)
             await manager.broadcast_to_task(
