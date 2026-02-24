@@ -145,6 +145,7 @@ class Task(Base):  # type: ignore
     # Relationships
     user = relationship("User", back_populates="tasks")
     dag_executions = relationship("DAGExecution", back_populates="task")
+    uploaded_files = relationship("UploadedFile", back_populates="task")
 
     def __repr__(self) -> str:
         return f"<Task(id={self.id}, title='{self.title}', status='{self.status}')>"
