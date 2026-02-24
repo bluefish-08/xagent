@@ -1214,19 +1214,37 @@ async def create_task(
 
         # Add file information to description if files are specified
         if request.files:
-            from ..config import UPLOADS_DIR
+            from pathlib import Path
+
+            from ..models.uploaded_file import UploadedFile
 
             file_info_list = []
             file_paths = []
 
-            for filename in request.files:
-                file_path = UPLOADS_DIR / filename
+            for file_id in request.files:
+                uploaded_file = (
+                    db.query(UploadedFile)
+                    .filter(
+                        UploadedFile.file_id == file_id,
+                        UploadedFile.user_id == int(user.id),
+                    )
+                    .first()
+                )
+                if uploaded_file is None:
+                    file_info_list.append(f"File ID: {file_id} (File does not exist)")
+                    continue
+
+                file_path = Path(str(uploaded_file.storage_path))
                 file_paths.append(str(file_path))
 
                 if file_path.exists():
-                    file_info_list.append(f"File: {filename} (Path: {file_path})")
+                    file_info_list.append(
+                        f"File: {uploaded_file.filename} (Path: {file_path})"
+                    )
                 else:
-                    file_info_list.append(f"File: {filename} (File does not exist)")
+                    file_info_list.append(
+                        f"File: {uploaded_file.filename} (File does not exist)"
+                    )
 
             if file_info_list:
                 if task_description:

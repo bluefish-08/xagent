@@ -7,7 +7,7 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -461,6 +461,7 @@ async def handle_file_upload_for_task(
         from pathlib import Path
 
         from .chat import get_agent_manager
+        from ..models.uploaded_file import UploadedFile
 
         uploaded_files = []
         file_info_list = []
@@ -523,9 +524,24 @@ async def handle_file_upload_for_task(
                 shutil.copy2(temp_file_path, target_path)
                 uploaded_files.append(str(target_path))
 
+                if user is None:
+                    raise ValueError("Authenticated user is required for file upload")
+
+                file_record = UploadedFile(
+                    user_id=int(cast(Any, user.id)),
+                    task_id=task_id,
+                    filename=normalized_file_name,
+                    storage_path=str(target_path),
+                    mime_type=file_type,
+                    file_size=int(file_size),
+                )
+                db.add(file_record)
+                db.flush()
+
                 # Build file info using normalized filename
                 file_info_list.append(
                     {
+                        "file_id": file_record.file_id,
                         "name": normalized_file_name,
                         "original_name": original_file_name,
                         "size": file_size,
@@ -545,6 +561,7 @@ async def handle_file_upload_for_task(
                     logger.info(f"🗑️ Cleaned up temp file: {temp_file_path}")
 
         logger.info(f"🎉 File upload completed, uploaded {len(uploaded_files)} files")
+        db.commit()
         return {"uploaded_files": uploaded_files, "file_info_list": file_info_list}
 
     except Exception as e:
@@ -1106,6 +1123,57 @@ async def handle_execute_task(
             # Convert to list if file_outputs is string
             if isinstance(file_outputs, str):
                 file_outputs = [file_outputs] if file_outputs.strip() else []
+
+            if isinstance(file_outputs, list):
+                from pathlib import Path
+
+                from ..config import UPLOADS_DIR
+                from ..models.uploaded_file import UploadedFile
+
+                normalized_outputs: list[Any] = []
+                for item in file_outputs:
+                    if not isinstance(item, str) or not item:
+                        normalized_outputs.append(item)
+                        continue
+
+                    output_path = Path(item)
+                    if not output_path.exists() or not output_path.is_file():
+                        normalized_outputs.append(item)
+                        continue
+
+                    try:
+                        output_path.resolve().relative_to(UPLOADS_DIR.resolve())
+                    except ValueError:
+                        normalized_outputs.append(item)
+                        continue
+
+                    file_record = (
+                        db.query(UploadedFile)
+                        .filter(UploadedFile.storage_path == str(output_path))
+                        .first()
+                    )
+                    if file_record is None:
+                        file_record = UploadedFile(
+                            user_id=int(cast(Any, task.user_id)),
+                            task_id=int(task_id),
+                            filename=output_path.name,
+                            storage_path=str(output_path),
+                            mime_type=None,
+                            file_size=int(output_path.stat().st_size),
+                        )
+                        db.add(file_record)
+                        db.flush()
+
+                    normalized_outputs.append(
+                        {
+                            "file_id": file_record.file_id,
+                            "filename": file_record.filename,
+                            "file_path": item,
+                        }
+                    )
+
+                db.commit()
+                file_outputs = normalized_outputs
 
             # Send task completion event (don't duplicate result as trace system already sent)
             await manager.broadcast_to_task(
@@ -1990,6 +2058,7 @@ async def handle_build_preview_execution(
                 import shutil
                 import tempfile
                 from pathlib import Path
+                from ..models.uploaded_file import UploadedFile
 
                 for file_info in files_data:
                     file_name = file_info.get("name", "unknown")
@@ -2046,8 +2115,20 @@ async def handle_build_preview_execution(
                         shutil.copy2(temp_file_path, target_path)
                         uploaded_files.append(str(target_path))
 
+                        file_record = UploadedFile(
+                            user_id=int(cast(Any, user.id)),
+                            task_id=preview_task_id,
+                            filename=normalized_file_name,
+                            storage_path=str(target_path),
+                            mime_type=file_type,
+                            file_size=int(file_size),
+                        )
+                        db.add(file_record)
+                        db.flush()
+
                         file_info_list.append(
                             {
+                                "file_id": file_record.file_id,
                                 "name": normalized_file_name,
                                 "original_name": original_file_name,
                                 "size": file_size,
@@ -2078,6 +2159,7 @@ async def handle_build_preview_execution(
                 logger.info(
                     f"🎉 File upload completed, uploaded {len(uploaded_files)} files"
                 )
+                db.commit()
 
             except Exception as e:
                 logger.error(
