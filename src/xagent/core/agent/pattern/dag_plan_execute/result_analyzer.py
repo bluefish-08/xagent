@@ -498,8 +498,8 @@ STORAGE THRESHOLD: Be extremely conservative. Default to should_store = false un
             file_outputs_section = "\n\nOutput Files:\n"
             for i, file_info in enumerate(file_outputs, 1):
                 filename = file_info.get("filename", "")
-                relative_path = file_info.get("relative_path", "")
-                file_outputs_section += f"  {i}. {filename} (path: {relative_path})\n"
+                file_id = file_info.get("file_id", "")
+                file_outputs_section += f"  {i}. {filename} (file_id: {file_id})\n"
             file_outputs_section += "\n"
 
         system_prompt = (
