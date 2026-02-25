@@ -81,6 +81,25 @@ def _ensure_under_uploads(path: Path, user_id: int) -> None:
         raise HTTPException(status_code=403, detail="Access denied") from exc
 
 
+def _resolve_public_preview_target(
+    base_path: Path, relative_path: Optional[str], user_id: int
+) -> Path:
+    _ensure_under_uploads(base_path, user_id)
+    if not relative_path:
+        return base_path
+
+    base_dir = base_path.parent.resolve()
+    candidate = (base_dir / relative_path).resolve()
+
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Access denied") from exc
+
+    _ensure_under_uploads(candidate, user_id)
+    return candidate
+
+
 def _to_unix_timestamp(path: Path, fallback: Any) -> int:
     if path.exists():
         return int(path.stat().st_mtime)
@@ -419,14 +438,11 @@ async def public_preview_file(
 ) -> Any:
     file_record = _get_file_record(db, file_id)
     base_path = Path(_file_storage_path_value(file_record))
-    target_path = base_path
-
-    if relative_path:
-        candidate = (base_path.parent / relative_path).resolve()
-        _ensure_under_uploads(candidate, _file_user_id_value(file_record))
-        target_path = candidate
-    else:
-        _ensure_under_uploads(base_path, _file_user_id_value(file_record))
+    target_path = _resolve_public_preview_target(
+        base_path,
+        relative_path,
+        _file_user_id_value(file_record),
+    )
 
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")

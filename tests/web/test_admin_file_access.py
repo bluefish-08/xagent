@@ -271,3 +271,87 @@ class TestAdminFileAccess:
             .first()
             is None
         )
+
+    def test_public_preview_allows_relative_asset_in_same_directory(
+        self, test_db, temp_uploads_dir
+    ):
+        admin_user, regular_user, test_app, session = test_db
+        del admin_user
+        regular_user_id = int(cast(Any, regular_user.id))
+        task = Task(
+            id=82,
+            user_id=regular_user_id,
+            title="Preview Task",
+            description="public preview test",
+        )
+        session.add(task)
+        session.commit()
+
+        uploaded_file = create_uploaded_file(
+            session,
+            temp_uploads_dir,
+            regular_user_id,
+            int(cast(Any, task.id)),
+            "index.html",
+            "<img src='assets/pic.txt'>",
+        )
+
+        asset_dir = Path(str(uploaded_file.storage_path)).parent / "assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        asset_file = asset_dir / "pic.txt"
+        asset_file.write_text("asset content")
+
+        client = TestClient(test_app)
+        response = client.get(
+            f"/api/files/public/preview/{uploaded_file.file_id}",
+            params={"relative_path": "assets/pic.txt"},
+        )
+
+        assert response.status_code == 200
+        assert response.content == b"asset content"
+
+    def test_public_preview_blocks_parent_traversal(self, test_db, temp_uploads_dir):
+        admin_user, regular_user, test_app, session = test_db
+        del admin_user
+        regular_user_id = int(cast(Any, regular_user.id))
+
+        task_a = Task(
+            id=83,
+            user_id=regular_user_id,
+            title="Task A",
+            description="base file",
+        )
+        task_b = Task(
+            id=84,
+            user_id=regular_user_id,
+            title="Task B",
+            description="secret file",
+        )
+        session.add(task_a)
+        session.add(task_b)
+        session.commit()
+
+        base_file = create_uploaded_file(
+            session,
+            temp_uploads_dir,
+            regular_user_id,
+            int(cast(Any, task_a.id)),
+            "index.html",
+            "base",
+        )
+        create_uploaded_file(
+            session,
+            temp_uploads_dir,
+            regular_user_id,
+            int(cast(Any, task_b.id)),
+            "secret.txt",
+            "top secret",
+        )
+
+        client = TestClient(test_app)
+        response = client.get(
+            f"/api/files/public/preview/{base_file.file_id}",
+            params={"relative_path": "../../web_task_84/output/secret.txt"},
+        )
+
+        assert response.status_code == 403
