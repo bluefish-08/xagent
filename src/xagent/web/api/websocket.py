@@ -700,8 +700,8 @@ async def handle_file_upload_for_task(
         import tempfile
         from pathlib import Path
 
-        from .chat import get_agent_manager
         from ..models.uploaded_file import UploadedFile
+        from .chat import get_agent_manager
 
         uploaded_files = []
         file_info_list = []
@@ -2273,6 +2273,7 @@ async def handle_build_preview_execution(
                 import shutil
                 import tempfile
                 from pathlib import Path
+
                 from ..models.uploaded_file import UploadedFile
 
                 for file_info in files_data:
