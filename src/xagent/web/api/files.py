@@ -207,7 +207,8 @@ def _pptx_fallback_html(path: Path) -> HTMLResponse:
 
 @file_router.post("/upload")
 async def upload_file(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
     task_type: str = Form(...),
     message: str = Form(""),
     task_id: str = Form(None),
@@ -216,87 +217,29 @@ async def upload_file(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     del message
-    if not file.filename or not file.filename.strip():
-        raise HTTPException(status_code=422, detail="No filename provided")
-    if not is_allowed_file(file.filename, task_type):
-        raise HTTPException(
-            status_code=500,
-            detail=f"File type {Path(file.filename).suffix.lower()} not supported for task type {task_type}",
-        )
+    upload_items: list[UploadFile] = []
+    if file is not None:
+        upload_items.append(file)
+    if files:
+        upload_items.extend(files)
 
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=500,
-            detail=f"File size exceeds maximum limit of {MAX_FILE_SIZE // (1024 * 1024)}MB",
-        )
+    if not upload_items:
+        raise HTTPException(status_code=422, detail="No files provided")
 
-    parsed_task_id = _parse_task_id(task_id)
-    target_path = _build_unique_file_path(
-        get_upload_path(file.filename, task_id, folder, _user_id_value(user))
-    )
-    with open(target_path, "wb") as buffer:
-        buffer.write(content)
-
-    file_record = UploadedFile(
-        user_id=_user_id_value(user),
-        task_id=parsed_task_id,
-        filename=Path(file.filename).name,
-        storage_path=str(target_path),
-        mime_type=file.content_type,
-        file_size=len(content),
-    )
-    db.add(file_record)
-    db.commit()
-    db.refresh(file_record)
-
-    content_preview = ""
-    try:
-        preview_content = read_file(str(target_path))
-        content_preview = (
-            preview_content[:500] + "..."
-            if isinstance(preview_content, str) and len(preview_content) > 500
-            else preview_content
-        )
-    except Exception:
-        content_preview = ""
-
-    return {
-        "success": True,
-        "file_id": file_record.file_id,
-        "filename": file_record.filename,
-        "file_size": file_record.file_size,
-        "mime_type": file_record.mime_type,
-        "task_type": task_type,
-        "content_preview": content_preview,
-        "message": f"Successfully uploaded {file_record.filename}",
-    }
-
-
-@file_router.post("/upload-multiple")
-async def upload_multiple_files(
-    files: list[UploadFile] = File(...),
-    task_type: str = Form(...),
-    message: str = Form(""),
-    task_id: str = Form(None),
-    folder: str = Form(None),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    del message
+    single_file_mode = file is not None and (not files)
     parsed_task_id = _parse_task_id(task_id)
     uploaded_files = []
 
-    for file in files:
-        if not file.filename or not file.filename.strip():
+    for uploaded in upload_items:
+        if not uploaded.filename or not uploaded.filename.strip():
             raise HTTPException(status_code=422, detail="No filename provided")
-        if not is_allowed_file(file.filename, task_type):
+        if not is_allowed_file(uploaded.filename, task_type):
             raise HTTPException(
                 status_code=500,
-                detail=f"File type {Path(file.filename).suffix.lower()} not supported for task type {task_type}",
+                detail=f"File type {Path(uploaded.filename).suffix.lower()} not supported for task type {task_type}",
             )
 
-        content = await file.read()
+        content = await uploaded.read()
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=500,
@@ -304,7 +247,7 @@ async def upload_multiple_files(
             )
 
         target_path = _build_unique_file_path(
-            get_upload_path(file.filename, task_id, folder, _user_id_value(user))
+            get_upload_path(uploaded.filename, task_id, folder, _user_id_value(user))
         )
         with open(target_path, "wb") as buffer:
             buffer.write(content)
@@ -312,13 +255,24 @@ async def upload_multiple_files(
         file_record = UploadedFile(
             user_id=_user_id_value(user),
             task_id=parsed_task_id,
-            filename=Path(file.filename).name,
+            filename=Path(uploaded.filename).name,
             storage_path=str(target_path),
-            mime_type=file.content_type,
+            mime_type=uploaded.content_type,
             file_size=len(content),
         )
         db.add(file_record)
         db.flush()
+
+        content_preview = ""
+        try:
+            preview_content = read_file(str(target_path))
+            content_preview = (
+                preview_content[:500] + "..."
+                if isinstance(preview_content, str) and len(preview_content) > 500
+                else preview_content
+            )
+        except Exception:
+            content_preview = ""
 
         uploaded_files.append(
             {
@@ -326,10 +280,24 @@ async def upload_multiple_files(
                 "filename": file_record.filename,
                 "file_size": file_record.file_size,
                 "mime_type": file_record.mime_type,
+                "content_preview": content_preview,
             }
         )
 
     db.commit()
+
+    if single_file_mode:
+        first_file = uploaded_files[0]
+        return {
+            "success": True,
+            "file_id": first_file["file_id"],
+            "filename": first_file["filename"],
+            "file_size": first_file["file_size"],
+            "mime_type": first_file["mime_type"],
+            "task_type": task_type,
+            "content_preview": first_file["content_preview"],
+            "message": f"Successfully uploaded {first_file['filename']}",
+        }
 
     return {
         "success": True,

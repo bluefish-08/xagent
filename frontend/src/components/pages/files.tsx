@@ -172,7 +172,7 @@ export function FilesPage() {
       formData.append('task_type', 'general')
       formData.append('message', '')
 
-      const response = await apiRequest(`${getApiUrl()}/api/files/upload-multiple`, {
+      const response = await apiRequest(`${getApiUrl()}/api/files/upload`, {
         method: 'POST',
         body: formData
       })
