@@ -298,33 +298,6 @@ def _rewrite_links_in_payload(payload: Any, path_to_file_id: Dict[str, str]) -> 
     return payload
 
 
-def _normalize_historical_event_data(
-    db: Session,
-    task_id: int,
-    task_user_id: int,
-    event_data: Any,
-) -> Any:
-    if not isinstance(event_data, dict):
-        return event_data
-
-    normalized_data = dict(event_data)
-
-    normalized_outputs, path_to_file_id = _normalize_file_outputs(
-        db,
-        task_id=task_id,
-        task_user_id=task_user_id,
-        file_outputs=normalized_data.get("file_outputs", []),
-    )
-
-    if normalized_outputs:
-        normalized_data["file_outputs"] = normalized_outputs
-
-    if path_to_file_id:
-        normalized_data = _rewrite_links_in_payload(normalized_data, path_to_file_id)
-
-    return normalized_data
-
-
 async def execute_task_background(
     task_id: int,
     user_message: str,
@@ -1509,14 +1482,39 @@ async def send_historical_data_as_stream(
             # Merge all time-sensitive events and sort by timestamp
             historical_events = []
 
-            # Add unified trace events
+            historical_path_to_file_id: Dict[str, str] = {}
+            normalized_trace_data_by_event_id: Dict[str, Any] = {}
+            task_user_id = int(cast(Any, task.user_id))
+
             for trace_event in trace_events:
-                normalized_event_data = _normalize_historical_event_data(
-                    db,
-                    task_id=task_id,
-                    task_user_id=int(cast(Any, task.user_id)),
-                    event_data=trace_event.data,
+                normalized_event_data = trace_event.data
+                if isinstance(trace_event.data, dict):
+                    normalized_event_data = dict(trace_event.data)
+                    normalized_outputs, path_to_file_id = _normalize_file_outputs(
+                        db,
+                        task_id=task_id,
+                        task_user_id=task_user_id,
+                        file_outputs=normalized_event_data.get("file_outputs", []),
+                    )
+                    if normalized_outputs:
+                        normalized_event_data["file_outputs"] = normalized_outputs
+                    if path_to_file_id:
+                        historical_path_to_file_id.update(path_to_file_id)
+                normalized_trace_data_by_event_id[str(trace_event.event_id)] = (
+                    normalized_event_data
                 )
+
+            for trace_event in trace_events:
+                normalized_event_data = normalized_trace_data_by_event_id.get(
+                    str(trace_event.event_id), trace_event.data
+                )
+                if historical_path_to_file_id and isinstance(
+                    normalized_event_data, dict
+                ):
+                    normalized_event_data = _rewrite_links_in_payload(
+                        normalized_event_data,
+                        historical_path_to_file_id,
+                    )
                 historical_events.append(
                     {
                         "type": "trace_event",
