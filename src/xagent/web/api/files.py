@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pptx import Presentation
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...core.tools.adapters.vibe.file_tool import read_file
@@ -147,11 +148,17 @@ def _infer_backfill_task_id(
     if not rel_parts:
         return None
     first_part = rel_parts[0]
-    if not first_part.startswith("web_task_"):
+    task_id_part: Optional[str] = None
+    if first_part.startswith("web_task_"):
+        task_id_part = first_part.replace("web_task_", "", 1)
+    elif first_part.startswith("task_"):
+        task_id_part = first_part.replace("task_", "", 1)
+
+    if task_id_part is None:
         return None
 
     try:
-        task_id = int(first_part.replace("web_task_", "", 1))
+        task_id = int(task_id_part)
     except ValueError:
         return None
 
@@ -201,8 +208,14 @@ def _backfill_uploaded_file_records(db: Session, user: User) -> None:
             created += 1
 
     if created > 0:
-        db.commit()
-        logger.info(f"Backfilled {created} uploaded_files records")
+        try:
+            db.commit()
+            logger.info(f"Backfilled {created} uploaded_files records")
+        except IntegrityError:
+            db.rollback()
+            logger.warning(
+                "Backfill commit hit unique constraint race; rolled back safely"
+            )
 
 
 def _get_file_record(db: Session, file_id: str) -> UploadedFile:
