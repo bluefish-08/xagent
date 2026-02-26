@@ -285,6 +285,46 @@ def _normalize_file_outputs(
     return normalized_outputs, path_to_file_id
 
 
+def _rewrite_links_in_payload(payload: Any, path_to_file_id: Dict[str, str]) -> Any:
+    if isinstance(payload, str):
+        return _rewrite_file_links_to_file_id(payload, path_to_file_id)
+    if isinstance(payload, list):
+        return [_rewrite_links_in_payload(item, path_to_file_id) for item in payload]
+    if isinstance(payload, dict):
+        return {
+            key: _rewrite_links_in_payload(value, path_to_file_id)
+            for key, value in payload.items()
+        }
+    return payload
+
+
+def _normalize_historical_event_data(
+    db: Session,
+    task_id: int,
+    task_user_id: int,
+    event_data: Any,
+) -> Any:
+    if not isinstance(event_data, dict):
+        return event_data
+
+    normalized_data = dict(event_data)
+
+    normalized_outputs, path_to_file_id = _normalize_file_outputs(
+        db,
+        task_id=task_id,
+        task_user_id=task_user_id,
+        file_outputs=normalized_data.get("file_outputs", []),
+    )
+
+    if normalized_outputs:
+        normalized_data["file_outputs"] = normalized_outputs
+
+    if path_to_file_id:
+        normalized_data = _rewrite_links_in_payload(normalized_data, path_to_file_id)
+
+    return normalized_data
+
+
 async def execute_task_background(
     task_id: int,
     user_message: str,
@@ -1471,6 +1511,12 @@ async def send_historical_data_as_stream(
 
             # Add unified trace events
             for trace_event in trace_events:
+                normalized_event_data = _normalize_historical_event_data(
+                    db,
+                    task_id=task_id,
+                    task_user_id=int(cast(Any, task.user_id)),
+                    event_data=trace_event.data,
+                )
                 historical_events.append(
                     {
                         "type": "trace_event",
@@ -1479,7 +1525,7 @@ async def send_historical_data_as_stream(
                             "event_type": trace_event.event_type,
                             "step_id": trace_event.step_id,
                             "parent_event_id": trace_event.parent_event_id,
-                            "data": trace_event.data,
+                            "data": normalized_event_data,
                         },
                         "timestamp": safe_timestamp_to_unix(trace_event.timestamp)
                         if trace_event.timestamp
