@@ -115,6 +115,96 @@ def _extract_relative_path(storage_path: Path, user_id: int) -> str:
         return storage_path.name
 
 
+def _collect_backfill_user_ids(user: User) -> list[int]:
+    if not _is_admin_user(user):
+        return [_user_id_value(user)]
+
+    user_ids: list[int] = []
+    if not UPLOADS_DIR.exists():
+        return user_ids
+
+    for child in UPLOADS_DIR.iterdir():
+        if not child.is_dir() or not child.name.startswith("user_"):
+            continue
+        try:
+            user_ids.append(int(child.name.replace("user_", "", 1)))
+        except ValueError:
+            continue
+    return user_ids
+
+
+def _infer_backfill_task_id(
+    db: Session, file_path: Path, user_id: int
+) -> Optional[int]:
+    from ..models.task import Task
+
+    user_root = UPLOADS_DIR / f"user_{user_id}"
+    try:
+        rel_parts = file_path.relative_to(user_root).parts
+    except ValueError:
+        return None
+
+    if not rel_parts:
+        return None
+    first_part = rel_parts[0]
+    if not first_part.startswith("web_task_"):
+        return None
+
+    try:
+        task_id = int(first_part.replace("web_task_", "", 1))
+    except ValueError:
+        return None
+
+    task = db.query(Task.id).filter(Task.id == task_id, Task.user_id == user_id).first()
+    return task_id if task is not None else None
+
+
+def _backfill_uploaded_file_records(db: Session, user: User) -> None:
+    if not UPLOADS_DIR.exists():
+        return
+
+    target_user_ids = _collect_backfill_user_ids(user)
+    if not target_user_ids:
+        return
+
+    existing_paths = {
+        row[0]
+        for row in db.query(UploadedFile.storage_path)
+        .filter(UploadedFile.user_id.in_(target_user_ids))
+        .all()
+    }
+
+    created = 0
+    for target_user_id in target_user_ids:
+        user_root = UPLOADS_DIR / f"user_{target_user_id}"
+        if not user_root.exists() or not user_root.is_dir():
+            continue
+
+        for candidate in user_root.rglob("*"):
+            if not candidate.is_file():
+                continue
+
+            storage_path = str(candidate)
+            if storage_path in existing_paths:
+                continue
+
+            file_record = UploadedFile(
+                user_id=target_user_id,
+                task_id=_infer_backfill_task_id(db, candidate, target_user_id),
+                filename=candidate.name,
+                storage_path=storage_path,
+                mime_type=_guess_media_type(candidate.name),
+                file_size=candidate.stat().st_size,
+            )
+            db.add(file_record)
+            existing_paths.add(storage_path)
+            created += 1
+
+    if created > 0:
+        db.commit()
+        logger.info(f"Backfilled {created} uploaded_files records")
+
+
 def _get_file_record(db: Session, file_id: str) -> UploadedFile:
     file_record = db.query(UploadedFile).filter(UploadedFile.file_id == file_id).first()
     if file_record is None:
@@ -312,6 +402,8 @@ async def upload_file(
 async def list_files(
     user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
+    _backfill_uploaded_file_records(db, user)
+
     query = db.query(UploadedFile)
     if not _is_admin_user(user):
         query = query.filter(UploadedFile.user_id == _user_id_value(user))
