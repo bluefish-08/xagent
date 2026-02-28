@@ -11,7 +11,7 @@ import { ChatInput } from "@/components/chat/ChatInput"
 import { ChatMessage } from "@/components/chat/ChatMessage"
 import { apiRequest } from "@/lib/api-wrapper"
 import { getApiUrl, getWsUrl } from "@/lib/utils"
-import { PlusCircle, MessageSquare, Upload, Download, Info, Settings2 } from "lucide-react"
+import { PlusCircle, MessageSquare, Upload, Download, Info, Settings2, ChevronLeft } from "lucide-react"
 import { useI18n } from "@/contexts/i18n-context"
 import { useAuth } from "@/contexts/auth-context"
 import { FileAttachment } from "@/components/file-attachment"
@@ -121,6 +121,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [logoUrl, setLogoUrl] = useState<string | null>(null)  // Existing logo URL
   const [isCreating, setIsCreating] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [successVisible, setSuccessVisible] = useState(false)
   const [loadingAgent, setLoadingAgent] = useState(false)
   const [originalData, setOriginalData] = useState<any>(null)
   const [isKbModalOpen, setIsKbModalOpen] = useState(false)
@@ -138,6 +140,32 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   // Chat State
   const [messages, setMessages] = useState<Message[]>([])
+
+  useEffect(() => {
+    if (!successMessage) {
+      setSuccessVisible(false)
+      return
+    }
+
+    setSuccessVisible(false)
+    const enterTimer = requestAnimationFrame(() => {
+      setSuccessVisible(true)
+    })
+
+    const hideTimer = setTimeout(() => {
+      setSuccessVisible(false)
+    }, 1900)
+
+    const clearTimer = setTimeout(() => {
+      setSuccessMessage(null)
+    }, 2300)
+
+    return () => {
+      cancelAnimationFrame(enterTimer)
+      clearTimeout(hideTimer)
+      clearTimeout(clearTimer)
+    }
+  }, [successMessage])
 
   useEffect(() => {
     setMessages([{
@@ -683,8 +711,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }, [name, description, instructions, executionMode, logoFile, suggestedPrompts, selectedKbs, selectedSkills, selectedToolCategories, modelConfig, originalData])
 
   const handleCreate = async () => {
-    // Clear previous error
     setErrorMessage(null)
+    setSuccessMessage(null)
 
     // Validation
     if (!name.trim()) {
@@ -791,6 +819,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
     setLoadingAgent(true)
     setErrorMessage(null)
+    setSuccessMessage(null)
 
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${agentId}/publish`, {
@@ -798,13 +827,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       })
 
       if (response.ok) {
-        // Optional: show success message
-        // Update local state to reflect published status
         setOriginalData({
           ...originalData,
-          status: "published"
+          status: "published",
         })
-        router.push("/build")
+        setSuccessMessage(t("builds.editor.success.published"))
       } else {
         const error = await response.json()
         setErrorMessage(error.detail || "Failed to publish agent")
@@ -822,6 +849,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
     setLoadingAgent(true)
     setErrorMessage(null)
+    setSuccessMessage(null)
 
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${agentId}/unpublish`, {
@@ -829,12 +857,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       })
 
       if (response.ok) {
-        // Update local state to reflect unpublished status
         setOriginalData({
           ...originalData,
-          status: "draft"
+          status: "draft",
         })
-        router.push("/build")
+        setSuccessMessage(t("builds.editor.success.unpublished"))
       } else {
         const error = await response.json()
         setErrorMessage(error.detail || "Failed to unpublish agent")
@@ -851,23 +878,24 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     if (!createdAgent?.id) return
 
     setLoadingAgent(true)
+    setErrorMessage(null)
+    setSuccessMessage(null)
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${createdAgent.id}/publish`, {
         method: "POST",
       })
 
       if (response.ok) {
+        setSuccessMessage(t("builds.editor.success.published"))
         setShowSuccessDialog(false)
-        router.push("/build")
+        router.replace(`/build/${createdAgent.id}`)
       } else {
         const error = await response.json()
-        // Show error in dialog? or main error message
-        // For now, let's just close and show main error if possible, or alert
-        alert(error.detail || "Failed to publish agent")
+        setErrorMessage(error.detail || "Failed to publish agent")
       }
     } catch (error) {
       console.error("Failed to publish agent:", error)
-      alert("Failed to publish agent")
+      setErrorMessage(t("builds.editor.error.unknown"))
     } finally {
       setLoadingAgent(false)
     }
@@ -875,8 +903,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   const handleDialogClose = () => {
     setShowSuccessDialog(false)
-    // Refresh to enter full edit mode with proper context
-    window.location.reload()
+    if (createdAgent?.id) {
+      router.replace(`/build/${createdAgent.id}`)
+    }
   }
 
   const LeftPanel = (
@@ -1294,9 +1323,31 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   return (
     <div className="flex flex-col h-[100vh]">
+      {successMessage && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50">
+          <div
+            role="status"
+            aria-live="polite"
+            className={`inline-flex items-center px-4 py-2 rounded-md border border-emerald-300 bg-emerald-50 text-emerald-700 text-sm shadow-sm transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${successVisible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 -translate-y-1.5 scale-95"}`}
+          >
+            {successMessage}
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="border-b flex justify-between items-center p-8">
         <div>
+          {isEditMode && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-1 mb-2 text-muted-foreground hover:text-foreground"
+              onClick={() => router.push("/build")}
+            >
+              <ChevronLeft className="h-4 w-4 mr-1" />
+              {t("builds.editor.header.backToList")}
+            </Button>
+          )}
           <h1 className="text-3xl font-bold mb-1">{t("builds.editor.header.title")}</h1>
           <p className="text-muted-foreground">{t("builds.editor.header.subtitle")}</p>
         </div>
@@ -1304,14 +1355,22 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           {errorMessage && (
             <div className="text-sm text-destructive">{errorMessage}</div>
           )}
-          <Button onClick={isEditMode && !isDirty ? (originalData?.status === "published" ? handleUnpublish : handlePublish) : handleCreate} disabled={isCreating || loadingAgent}>
-            {isCreating
-              ? (isEditMode ? t("builds.editor.header.updating") : t("builds.editor.header.creating"))
-              : isEditMode
-              ? (isDirty ? t("builds.editor.header.update") : (originalData?.status === "published" ? t("builds.editor.header.unpublish") : t("builds.editor.header.publish")))
-              : t("builds.editor.header.create")
-            }
-          </Button>
+          {isEditMode && !isDirty && originalData?.status === "published" ? (
+            <>
+              <Button variant="outline" onClick={handleUnpublish} disabled={isCreating || loadingAgent}>
+                {t("builds.editor.header.unpublish")}
+              </Button>
+            </>
+          ) : (
+            <Button onClick={isEditMode && !isDirty ? handlePublish : handleCreate} disabled={isCreating || loadingAgent}>
+              {isCreating
+                ? (isEditMode ? t("builds.editor.header.updating") : t("builds.editor.header.creating"))
+                : isEditMode
+                ? (isDirty ? t("builds.editor.header.update") : t("builds.editor.header.publish"))
+                : t("builds.editor.header.create")
+              }
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1384,13 +1443,15 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               {t("builds.editor.success.createdDesc", { name: createdAgent?.name })}
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={handleDialogClose}>
-              {t("common.cancel") || "Close"}
-            </Button>
-            <Button onClick={handleDialogPublish}>
-              {t("builds.editor.header.publish")}
-            </Button>
+          <DialogFooter className="gap-2 sm:justify-end">
+            <div className="flex w-full sm:w-auto gap-2 justify-end">
+              <Button variant="outline" onClick={handleDialogClose}>
+                {t("common.cancel")}
+              </Button>
+              <Button onClick={handleDialogPublish}>
+                {t("builds.editor.header.publish")}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

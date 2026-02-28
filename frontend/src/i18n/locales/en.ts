@@ -1545,6 +1545,7 @@ Build when you need.`
       header: {
         title: "Custom Agent",
         subtitle: "Configure your AI agent's behavior and capabilities.",
+        backToList: "Back to list",
         create: "Create",
         update: "Update",
         publish: "Publish",
@@ -1559,6 +1560,8 @@ Build when you need.`
       success: {
         created: "Agent created successfully",
         createdDesc: "Your '{name}' has been created successfully",
+        published: "Agent published successfully",
+        unpublished: "Agent unpublished successfully",
       },
       error: {
         failed: "Failed to create agent",
