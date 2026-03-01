@@ -42,8 +42,8 @@ class PlanGenerator:
         "{\n"
         '  "plan": {\n'
         '    "steps": [\n'
-        '      {"id": "step1", "name": "Research", "description": "Gather information", "tool_names": ["web_search", "calculator"], "dependencies": [], "difficulty": "hard"},\n'
-        '      {"id": "step2", "name": "Analyze Data", "description": "Analyze collected information", "tool_names": ["data_analyzer", "chart_generator"], "dependencies": ["step1"], "difficulty": "hard"},\n'
+        '      {"id": "step1", "name": "Research", "description": "Gather information", "tool_names": ["web_search"], "dependencies": [], "difficulty": "hard"},\n'
+        '      {"id": "step2", "name": "Analyze Data", "description": "Analyze collected information", "tool_names": ["execute_python_code"], "dependencies": ["step1"], "difficulty": "hard"},\n'
         '      {"id": "step3", "name": "Organize Results", "description": "Summarize and format findings", "tool_names": [], "dependencies": ["step1", "step2"], "difficulty": "easy"}\n'
         "    ]\n"
         "  }\n"
@@ -861,7 +861,7 @@ class PlanGenerator:
             f'    "steps": [\n'
             f'      {{"id": "check_intent", "name": "Check Intent", "description": "Determine if human assistance is explicitly requested", "tool_names": [], "dependencies": [], "difficulty": "easy", "conditional_branches": {{"human": "human_step", "kb": "kb_step"}}}},\n'
             f'      {{"id": "human_step", "name": "Human Response", "description": "Connect to human agent", "tool_names": [], "dependencies": ["check_intent"], "difficulty": "easy", "required_branch": "human"}},\n'
-            f'      {{"id": "kb_step", "name": "KB Search", "description": "Search knowledge base", "tool_names": ["knowledge_base_search"], "dependencies": ["check_intent"], "difficulty": "hard", "required_branch": "kb"}}\n'
+            f'      {{"id": "kb_step", "name": "KB Search", "description": "Search knowledge base", "tool_names": ["knowledge_search"], "dependencies": ["check_intent"], "difficulty": "hard", "required_branch": "kb"}}\n'
             f"    ]\n"
             f"  }}\n"
             f"}}\n\n"
@@ -871,8 +871,8 @@ class PlanGenerator:
             f'    "task_name": "Data Analysis and Report",\n'
             f'    "goal": "{goal}",\n'
             f'    "steps": [\n'
-            f'      {{"id": "step1", "name": "Research", "description": "Gather information", "tool_names": ["web_search", "calculator"], "dependencies": [], "difficulty": "hard"}},\n'
-            f'      {{"id": "step2", "name": "Analyze Data", "description": "Analyze collected information", "tool_names": ["data_analyzer", "chart_generator"], "dependencies": ["step1"], "difficulty": "hard"}},\n'
+            f'      {{"id": "step1", "name": "Research", "description": "Gather information", "tool_names": ["web_search", "zhipu_web_search"], "dependencies": [], "difficulty": "hard"}},\n'
+            f'      {{"id": "step2", "name": "Analyze Data", "description": "Analyze collected information", "tool_names": ["execute_python_code"], "dependencies": ["step1"], "difficulty": "hard"}},\n'
             f'      {{"id": "step3", "name": "Organize Results", "description": "Summarize and format findings", "tool_names": [], "dependencies": ["step1", "step2"], "difficulty": "easy"}}\n'
             f"    ]\n"
             f"  }}\n"

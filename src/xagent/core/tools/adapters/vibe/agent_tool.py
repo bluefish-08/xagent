@@ -3,11 +3,11 @@ Agent Tool - Convert published agents into callable tools
 """
 
 import logging
-from typing import Any, Mapping, Optional, Type
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Type
 
 from pydantic import BaseModel, Field
 
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,9 @@ class AgentTool(AbstractBaseTool):
 
     This allows published agents to be called as tools from other agents.
     """
+
+    # Agent tools belong to the AGENT category
+    category: ToolCategory = ToolCategory.AGENT
 
     def __init__(
         self,
@@ -318,3 +321,37 @@ def get_published_agents_tools(
         logger.error(f"Failed to load published agents as tools: {e}", exc_info=True)
 
     return tools
+
+
+# Register tool creator for auto-discovery
+# Import at bottom to avoid circular import with factory
+from .factory import register_tool  # noqa: E402
+
+if TYPE_CHECKING:
+    from xagent.web.tools.config import WebToolConfig
+
+
+@register_tool
+async def create_agent_tools(config: "WebToolConfig") -> list[AbstractBaseTool]:
+    """Create tools from published agents."""
+    if not config.get_enable_agent_tools():
+        return []
+
+    try:
+        db = config.get_db()
+        user_id = config.get_user_id()
+        if not user_id:
+            return []
+
+        excluded_agent_id = config.get_excluded_agent_id() if config else None
+
+        return get_published_agents_tools(
+            db=db,
+            user_id=user_id,
+            task_id=config.get_task_id(),
+            workspace_base_dir="uploads",
+            excluded_agent_id=excluded_agent_id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create agent tools: {e}")
+        return []

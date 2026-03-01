@@ -445,3 +445,84 @@ def get_global_workspace() -> TaskWorkspace:
             "Global workspace not initialized. Call init_global_workspace() first."
         )
     return _global_workspace
+
+
+class MockWorkspace:
+    """
+    Mock workspace that doesn't create actual directories on disk.
+
+    This is used for scenarios like tool listing where we need a workspace
+    object for tool creation but don't want to create directories on disk.
+
+    All paths are virtual and won't be created. File operations will fail if
+    attempted, which is fine for read-only operations like tool metadata retrieval.
+    """
+
+    def __init__(
+        self,
+        id: str = "_mock_",
+        base_dir: str = "/mock/workspace",
+    ):
+        """
+        Initialize mock workspace.
+
+        Args:
+            id: Workspace identifier
+            base_dir: Virtual base directory (won't be created)
+        """
+        self.id = id
+        self.base_dir = Path(base_dir)
+
+        # Virtual paths (not created on disk)
+        self.workspace_dir = self.base_dir / id
+        self.input_dir = self.workspace_dir / "input"
+        self.output_dir = self.workspace_dir / "output"
+        self.temp_dir = self.workspace_dir / "temp"
+
+        # No external allowed directories for mock
+        self.allowed_external_dirs: List[Path] = []
+
+        logger.debug(
+            f"Created mock workspace: {self.workspace_dir} (not created on disk)"
+        )
+
+    def get_allowed_dirs(self) -> List[str]:
+        """Get list of allowed directories for this workspace (virtual paths)."""
+        return [
+            str(self.workspace_dir),
+            str(self.input_dir),
+            str(self.output_dir),
+            str(self.temp_dir),
+        ]
+
+    def resolve_path(self, file_path: str, default_dir: str = "output") -> Path:
+        """
+        Resolve a file path within the workspace.
+
+        For mock workspace, this returns a virtual path without creating it.
+
+        Args:
+            file_path: Relative or absolute file path
+            default_dir: Default subdirectory if path is relative
+
+        Returns:
+            Resolved absolute path (virtual, not created)
+        """
+        path = Path(file_path)
+
+        # If absolute path, just return it (for mock workspace)
+        if path.is_absolute():
+            return path
+
+        # Relative path - resolve to default directory
+        if default_dir == "input":
+            return self.input_dir / file_path
+        elif default_dir == "output":
+            return self.output_dir / file_path
+        elif default_dir == "temp":
+            return self.temp_dir / file_path
+        else:
+            return self.workspace_dir / file_path
+
+    def __repr__(self) -> str:
+        return f"MockWorkspace(id='{self.id}', path='{self.workspace_dir}')"

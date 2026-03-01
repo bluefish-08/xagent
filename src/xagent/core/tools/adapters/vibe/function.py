@@ -5,7 +5,7 @@ from typing import Any, Callable, Mapping, Optional, Type, get_origin
 
 from pydantic import BaseModel, RootModel, ValidationError, create_model
 
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -19,6 +19,9 @@ class FunctionTool(AbstractBaseTool):
     supports synchronous and asynchronous functions.
     Stateless by default.
     """
+
+    # Default category for this tool class - can be overridden per instance
+    category: ToolCategory = ToolCategory.OTHER
 
     def __init__(
         self,

@@ -11,6 +11,25 @@ class ToolVisibility(str, Enum):
     INTERNAL = "internal"
 
 
+class ToolCategory(str, Enum):
+    """Centralized enum for tool categories.
+
+    All tools should declare their category using this enum to ensure
+    consistency across the codebase and enable auto-discovery in the UI.
+    """
+
+    VISION = "vision"
+    IMAGE = "image"
+    KNOWLEDGE = "knowledge"
+    FILE = "file"
+    BASIC = "basic"
+    BROWSER = "browser"
+    PPT = "ppt"
+    AGENT = "agent"
+    MCP = "mcp"
+    OTHER = "other"
+
+
 class ToolMetadata(BaseModel):
     name: str
     description: Optional[str] = None
@@ -18,6 +37,7 @@ class ToolMetadata(BaseModel):
     visibility: ToolVisibility = ToolVisibility.PRIVATE
     allow_users: Optional[list[str]] = None  # Explicitly allowed user IDs
     has_state: bool = False
+    category: ToolCategory = ToolCategory.OTHER  # Default category
 
 
 @runtime_checkable
@@ -62,6 +82,7 @@ class AbstractBaseTool(ABC, Tool):
             visibility=getattr(self, "_visibility", ToolVisibility.PRIVATE),
             allow_users=getattr(self, "_allow_users", None),
             has_state=self.state_type() is not None,
+            category=getattr(self, "category", ToolCategory.OTHER),
         )
 
     @abstractmethod

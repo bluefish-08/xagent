@@ -120,12 +120,15 @@ class TestAgentServiceManagerReconstruction:
             patch("xagent.web.api.chat.resolve_llms_from_names") as mock_resolve_llms,
             patch("xagent.web.api.chat.get_memory_store") as mock_get_memory,
             patch("xagent.web.api.chat.Tracer"),
-            patch("xagent.web.api.chat.create_default_tools") as mock_create_tools,
+            patch(
+                "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+            ) as mock_tool_factory,
         ):
             # 设置所有必要的mock
             mock_resolve_llms.return_value = (MagicMock(), None, None, None)
             mock_get_memory.return_value = MagicMock()
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+            # Mock create_all_tools to avoid DB initialization
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
 
             # 创建mock AgentService实例
             mock_agent_service = MagicMock()
@@ -173,12 +176,15 @@ class TestAgentServiceManagerReconstruction:
             patch("xagent.web.api.chat.resolve_llms_from_names") as mock_resolve_llms,
             patch("xagent.web.api.chat.get_memory_store") as mock_get_memory,
             patch("xagent.web.api.chat.Tracer"),
-            patch("xagent.web.api.chat.create_default_tools") as mock_create_tools,
+            patch(
+                "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+            ) as mock_tool_factory,
         ):
             # 设置所有必要的mock
             mock_resolve_llms.return_value = (MagicMock(), None, None, None)
             mock_get_memory.return_value = MagicMock()
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+            # Mock create_all_tools to avoid DB initialization
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
 
             # 创建mock AgentService实例
             mock_agent_service = MagicMock()
@@ -214,12 +220,14 @@ class TestAgentServiceManagerReconstruction:
             patch("xagent.web.api.chat.resolve_llms_from_names") as mock_resolve_llms,
             patch("xagent.web.api.chat.get_memory_store") as mock_get_memory,
             patch("xagent.web.api.chat.Tracer"),
-            patch("xagent.web.api.chat.create_default_tools") as mock_create_tools,
+            patch(
+                "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+            ) as mock_tool_factory,
         ):
             # 设置所有必要的mock
             mock_resolve_llms.return_value = (MagicMock(), None, None, None)
             mock_get_memory.return_value = MagicMock()
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
 
             # 创建mock AgentService实例
             mock_agent_instance = MagicMock()
@@ -290,7 +298,9 @@ class TestAgentServiceManagerReconstruction:
 
         # Mock AgentService创建和reconstruct_from_history
         with (
-            patch("xagent.web.api.chat.create_default_tools") as mock_create_tools,
+            patch(
+                "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+            ) as mock_tool_factory,
             patch("xagent.web.api.chat.AgentService") as mock_agent_service_class,
         ):
             # 设置mock AgentService实例
@@ -298,7 +308,7 @@ class TestAgentServiceManagerReconstruction:
             mock_agent_instance.reconstruct_from_history = AsyncMock()
             mock_agent_service_class.return_value = mock_agent_instance
 
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
 
             # 调用方法
             await agent_manager._reconstruct_agent_from_history(1, mock_db)
@@ -353,8 +363,10 @@ class TestAgentServiceManagerReconstruction:
         mock_db.query.side_effect = Exception("Database error")
 
         # 调用方法应该正常处理错误并创建新agent
-        with patch("xagent.web.api.chat.create_default_tools") as mock_create_tools:
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+        with patch(
+            "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+        ) as mock_tool_factory:
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
             agent = await agent_manager.get_agent_for_task(1, mock_db, user=mock_user)
 
         # 验证结果
@@ -406,8 +418,10 @@ class TestAgentServiceManagerReconstruction:
         mock_user.id = 1
 
         # 调用方法
-        with patch("xagent.web.api.chat.create_default_tools") as mock_create_tools:
-            mock_create_tools.return_value = ([], MagicMock())  # (tools, tool_config)
+        with patch(
+            "xagent.core.tools.adapters.vibe.factory.ToolFactory"
+        ) as mock_tool_factory:
+            mock_tool_factory.create_all_tools = AsyncMock(return_value=[])
             await agent_manager.get_agent_for_task(1, mock_db, user=mock_user)
 
         # 验证任务被创建

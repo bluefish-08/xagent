@@ -4,7 +4,7 @@ Adapts pptx_tool.py to be used as an xagent tool via vibe adapter system.
 """
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
 
 from ...core.pptx_tool import (
     clean_pptx,
@@ -12,14 +12,24 @@ from ...core.pptx_tool import (
     read_pptx,
     unpack_pptx,
 )
+from .base import ToolCategory
+from .config import BaseToolConfig
+from .factory import ToolFactory, register_tool
 from .function import FunctionTool
+
+logger = logging.getLogger(__name__)
+
+
+class PPTXTool(FunctionTool):
+    """PPTXTool with ToolCategory.PPT category."""
+
+    category = ToolCategory.PPT
+
 
 if TYPE_CHECKING:
     from ....workspace import TaskWorkspace
 else:
     TaskWorkspace = Any  # type: ignore[assignment]
-
-logger = logging.getLogger(__name__)
 
 
 class PPTXGenerationTool:
@@ -61,7 +71,7 @@ class PPTXGenerationTool:
     def get_tools(self) -> list:
         """Get all tool instances."""
         return [
-            FunctionTool(
+            PPTXTool(
                 self.read_pptx,
                 name="read_pptx",
                 description="""Read PPTX file and extract information.
@@ -81,7 +91,7 @@ Returns:
 """,
                 tags=["pptx", "presentation", "file"],
             ),
-            FunctionTool(
+            PPTXTool(
                 self.unpack_pptx,
                 name="unpack_pptx",
                 description="""Unpack PPTX file to directory for advanced editing.
@@ -103,7 +113,7 @@ Returns:
 """,
                 tags=["pptx", "presentation", "unpack", "editing"],
             ),
-            FunctionTool(
+            PPTXTool(
                 self.pack_pptx,
                 name="pack_pptx",
                 description="""Pack directory into PPTX file.
@@ -121,7 +131,7 @@ Returns:
 """,
                 tags=["pptx", "presentation", "pack", "editing"],
             ),
-            FunctionTool(
+            PPTXTool(
                 self.clean_pptx,
                 name="clean_pptx",
                 description="""Clean orphaned files from unpacked PPTX directory.
@@ -146,17 +156,19 @@ Returns:
         ]
 
 
-def create_pptx_tool(
-    workspace: Optional[TaskWorkspace] = None,
-) -> list:
+@register_tool
+async def create_pptx_tool(config: "BaseToolConfig") -> list:
     """
     Create PPTX tools with workspace support.
 
+    Registered via @register_tool decorator for auto-discovery.
+
     Args:
-        workspace: Workspace for file management
+        config: Tool configuration with workspace settings
 
     Returns:
         List of tool instances
     """
+    workspace = ToolFactory._create_workspace(config.get_workspace_config())
     tool_instance = PPTXGenerationTool(workspace)
     return tool_instance.get_tools()

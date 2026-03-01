@@ -12,10 +12,16 @@ from pydantic import BaseModel, Field
 from xagent.core.tools.core.javascript_executor import JavaScriptExecutorCore
 from xagent.core.workspace import TaskWorkspace
 
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 from .function import FunctionTool
 
 logger = logging.getLogger(__name__)
+
+
+class JavaScriptExecutorFunctionTool(FunctionTool):
+    """JavaScript executor tool with BASIC category."""
+
+    category = ToolCategory.BASIC
 
 
 class JavaScriptExecutorArgs(BaseModel):
@@ -119,7 +125,7 @@ def get_javascript_executor_tool(info: Optional[dict[str, Any]] = None) -> Funct
         )
         return result
 
-    return FunctionTool(execute_javascript_code)
+    return JavaScriptExecutorFunctionTool(execute_javascript_code)
 
 
 def create_javascript_executor_tool(workspace: TaskWorkspace) -> AbstractBaseTool:

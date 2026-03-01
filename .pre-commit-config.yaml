@@ -72,14 +72,14 @@ repos:
     hooks:
       - id: npm-lint
         name: npm lint
-        entry: sh -c 'cd frontend && npm run lint'
+        entry: npm run --prefix frontend lint
         language: system
         pass_filenames: false
         types_or: [javascript, jsx, ts, tsx, json]
 
       - id: npm-type-check
         name: npm type-check
-        entry: sh -c 'cd frontend && npm run type-check'
+        entry: npm run --prefix frontend type-check
         language: system
         pass_filenames: false
         types_or: [javascript, jsx, ts, tsx]

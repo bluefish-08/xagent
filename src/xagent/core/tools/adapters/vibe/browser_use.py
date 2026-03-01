@@ -24,7 +24,7 @@ from ....tools.core.browser_use import (
     get_browser_manager,
 )
 from ....workspace import TaskWorkspace
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,7 @@ class BrowserCloseResult(BaseModel):
 
 
 class BrowserNavigateTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Navigate to a URL in a browser session."""
 
     def __init__(
@@ -407,6 +408,7 @@ class BrowserNavigateTool(AbstractBaseTool):
 
 
 class BrowserClickTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Click an element on the current page."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -467,6 +469,7 @@ class BrowserClickTool(AbstractBaseTool):
 
 
 class BrowserFillTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Fill an input field with text."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -516,6 +519,7 @@ class BrowserFillTool(AbstractBaseTool):
 
 
 class BrowserScreenshotTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Take a screenshot of the current page."""
 
     def __init__(
@@ -649,6 +653,7 @@ class BrowserScreenshotTool(AbstractBaseTool):
 
 
 class BrowserExtractTextTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Extract text content from the page."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -712,6 +717,7 @@ class BrowserExtractTextTool(AbstractBaseTool):
 
 
 class BrowserEvaluateTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Execute JavaScript code in the browser."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -761,6 +767,7 @@ class BrowserEvaluateTool(AbstractBaseTool):
 
 
 class BrowserListSessionsTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """List all active browser sessions for debugging."""
 
     def __init__(self) -> None:
@@ -810,6 +817,7 @@ class BrowserListSessionsTool(AbstractBaseTool):
 
 
 class BrowserSelectOptionTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Select an option from a dropdown."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -871,6 +879,7 @@ class BrowserSelectOptionTool(AbstractBaseTool):
 
 
 class BrowserWaitForSelectorTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Wait for an element to appear on the page."""
 
     def __init__(self, task_id: Optional[str] = None):
@@ -931,6 +940,7 @@ class BrowserWaitForSelectorTool(AbstractBaseTool):
 
 
 class BrowserCloseTool(AbstractBaseTool):
+    category = ToolCategory.BROWSER
     """Close a browser session and free resources."""
 
     def __init__(self, task_id: Optional[str] = None):

@@ -11,10 +11,16 @@ from pydantic import BaseModel, Field
 
 from ....workspace import TaskWorkspace
 from ...core.python_executor import PythonExecutorCore
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 from .function import FunctionTool
 
 logger = logging.getLogger(__name__)
+
+
+class PythonExecutorFunctionTool(FunctionTool):
+    """Python executor tool with BASIC category."""
+
+    category = ToolCategory.BASIC
 
 
 class PythonExecutorArgs(BaseModel):
@@ -133,7 +139,7 @@ def get_python_executor_tool(info: Optional[dict[str, Any]] = None) -> FunctionT
         )
         return result
 
-    return FunctionTool(execute_python_code)
+    return PythonExecutorFunctionTool(execute_python_code)
 
 
 def create_python_executor_tool(workspace: TaskWorkspace) -> AbstractBaseTool:

@@ -40,6 +40,7 @@ interface Tool {
   description: string
   type: 'builtin' | 'mcp' | 'image' | 'vision'
   category: string
+  display_category?: string  // Add display_category field
   enabled: boolean
   status?: string
   status_reason?: string
@@ -118,6 +119,7 @@ export default function ToolsPage() {
         description: tool.description,
         type: tool.type,
         category: tool.category,
+        display_category: tool.display_category,  // Read display_category from API
         enabled: tool.enabled,
         status: tool.status,
         status_reason: tool.status_reason,
@@ -242,6 +244,30 @@ export default function ToolsPage() {
 
   const getCategoryLabel = (category: string) => {
     if (!category) return ""
+
+    // Special cases for correct capitalization
+    const categoryDisplayMap: Record<string, string> = {
+      ppt: "PPT",
+    pptx: "PPTX",
+    ai: "AI",
+    api: "API",
+    llm: "LLM",
+    ai2: "AI2",
+      }
+
+    // Check special cases first
+    if (categoryDisplayMap[category]) {
+      const key = `tools.categories.${category}`
+      const translated = t(key)
+      // If translation exists and is not just the key itself, use it
+      if (translated !== key) {
+        return translated
+      }
+      // Otherwise use the special case mapping
+      return categoryDisplayMap[category]
+    }
+
+    // Try translation
     const key = `tools.categories.${category}`
     const translated = t(key)
     if (translated === key) {
@@ -270,11 +296,12 @@ export default function ToolsPage() {
   }
 
   const getBadgeInfo = (tool: Tool) => {
-    // Display category instead of "Built-in API"
-    // Capitalize the category
-    const categoryDisplay = tool.category
-      ? getCategoryLabel(tool.category)
-      : t('tools.badges.types.tool');
+    // Use display_category if available, otherwise fallback to category
+    const categoryDisplay = tool.display_category
+      ? tool.display_category  // Already formatted correctly (PPT not Ppt)
+      : tool.category
+        ? getCategoryLabel(tool.category)  // Fallback to translation
+        : t('tools.badges.types.tool');
 
     return { label: categoryDisplay, variant: "secondary" as const }
   }

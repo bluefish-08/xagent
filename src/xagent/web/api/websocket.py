@@ -1882,35 +1882,50 @@ async def handle_build_preview_execution(
             )
             return
 
-        # Filter tools by category - use tool name to category mapping
+        # Filter tools by category - use tool metadata
         # Note: tool names are stable, defined in code, no database storage needed
         allowed_tools = None
         if tool_categories:
-            # Tool name to category mapping (hardcoded in code, consistent with ToolFactory.create_all_tools implementation)
-            TOOL_CATEGORY_MAP = {
-                "vision": ["understand_images"],
-                "image": ["generate_image", "edit_image"],
-                "knowledge": ["search_knowledge_base", "list_knowledge_bases"],
-                "file": ["read_file", "write_file", "list_directory", "file_search"],
-                "basic": ["calculator", "web_search", "zhipu_web_search"],
-                "browser": [
-                    "browser_navigate",
-                    "browser_click",
-                    "browser_fill",
-                    "browser_extract",
-                ],
-            }
+            # Get all tools and filter by category using metadata
+            from ...core.tools.adapters.vibe.factory import ToolFactory
 
-            allowed_tools = []
-            for category in tool_categories:
-                if category in TOOL_CATEGORY_MAP:
-                    allowed_tools.extend(TOOL_CATEGORY_MAP[category])
+            class MinimalRequest:
+                def __init__(self, user_id: int) -> None:
+                    self.user: Any = type("obj", (), {"id": user_id})()
+                    self.credentials: Any = None
+
+            temp_config = WebToolConfig(
+                db=db,
+                request=MinimalRequest(int(user.id)),
+                user_id=int(user.id),
+                is_admin=bool(user.is_admin),
+                workspace_config=None,
+                include_mcp_tools=False,
+                task_id=None,
+                browser_tools_enabled=False,
+            )
+
+            # Collect tools by category (async)
+            import asyncio
+
+            async def _get_tools_by_category() -> list[str]:
+                all_tools = await ToolFactory.create_all_tools(temp_config)
+                allowed_tools = []
+
+                for tool in all_tools:
+                    if hasattr(tool, "metadata") and hasattr(tool.metadata, "category"):
+                        category = str(tool.metadata.category.value)
+                        if category in tool_categories:
+                            # Tool protocol doesn't guarantee name attribute, use getattr
+                            tool_name = getattr(tool, "name", None)
+                            if tool_name:
+                                allowed_tools.append(tool_name)
+
+                return allowed_tools
+
+            allowed_tools = asyncio.run(_get_tools_by_category())
 
         # Create tool configuration
-        class MinimalRequest:
-            def __init__(self, user_id: int) -> None:
-                self.user = type("obj", (), {"id": user_id})()
-
         tool_config = WebToolConfig(
             db=db,
             request=MinimalRequest(int(user.id)),

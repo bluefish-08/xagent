@@ -5,12 +5,22 @@ This module provides file tools that are bound to specific workspace instances.
 Each tool instance operates within its designated workspace only.
 """
 
-from typing import Any, Dict, List
+import logging
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from xagent.core.workspace import TaskWorkspace
 
 from ...core.workspace_file_tool import FileInfo, WorkspaceFileOperations
+from .base import ToolCategory
 from .function import FunctionTool
+
+logger = logging.getLogger(__name__)
+
+
+class FileTool(FunctionTool):
+    """Base class for file tools with FILE category."""
+
+    category = ToolCategory.FILE
 
 
 class WorkspaceFileTools(WorkspaceFileOperations):
@@ -124,77 +134,77 @@ class WorkspaceFileTools(WorkspaceFileOperations):
     def get_tools(self) -> List[FunctionTool]:
         """Get all tool instances"""
         return [
-            FunctionTool(
+            FileTool(
                 self.read_file,
                 name="read_file",
                 description="Read file content in workspace. Use relative paths (e.g., 'filename.txt'), not absolute paths.",
             ),
-            FunctionTool(
+            FileTool(
                 self.write_file,
                 name="write_file",
                 description="Write file content in workspace. Use relative paths (e.g., 'filename.txt'), not absolute paths.\n\nImportant: For HTML files, when referencing resources in the same directory (CSS, JS, images), only use filenames (e.g., '1.png'), not absolute paths (e.g., '/uploads/xxx/1.png'). All files are in the workspace, and browsers will automatically resolve relative paths.",
             ),
-            FunctionTool(
+            FileTool(
                 self.append_file,
                 name="append_file",
                 description="Append content to file in workspace. Use relative paths (e.g., 'filename.txt'), not absolute paths.",
             ),
-            FunctionTool(
+            FileTool(
                 self.delete_file,
                 name="delete_file",
                 description="Delete file in workspace. Use relative paths (e.g., 'filename.txt'), not absolute paths.",
             ),
-            FunctionTool(
+            FileTool(
                 self.list_files,
                 name="list_files",
                 description="List files in workspace directory (defaults to all directories including input, output, temp. Can also specify specific directory like list_files('input'))",
             ),
-            FunctionTool(
+            FileTool(
                 self.create_directory,
                 name="create_directory",
                 description="Create directory in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.file_exists,
                 name="file_exists",
                 description="Check if file exists in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.get_file_info,
                 name="get_file_info",
                 description="Get detailed file information in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.read_json_file,
                 name="read_json_file",
                 description="Read JSON file in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.write_json_file,
                 name="write_json_file",
                 description="Write JSON file in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.read_csv_file,
                 name="read_csv_file",
                 description="Read CSV file in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.write_csv_file,
                 name="write_csv_file",
                 description="Write CSV file in workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.get_workspace_output_files,
                 name="get_workspace_output_files",
                 description="Get output file list from current workspace",
             ),
-            FunctionTool(
+            FileTool(
                 self.edit_file,
                 name="edit_file",
                 description="Precisely edit file content in workspace, supporting multiple edit operations based on line numbers and pattern matching. Use relative paths (e.g., 'filename.txt'), not absolute paths.",
             ),
-            FunctionTool(
+            FileTool(
                 self.find_and_replace,
                 name="find_and_replace",
                 description="Convenience function to find and replace text content in workspace. Use relative paths (e.g., 'filename.txt'), not absolute paths.",
@@ -214,3 +224,28 @@ def create_workspace_file_tools(workspace: TaskWorkspace) -> List[FunctionTool]:
     """
     tools_instance = WorkspaceFileTools(workspace)
     return tools_instance.get_tools()
+
+
+# Register tool creator for auto-discovery
+# Import at bottom to avoid circular import with factory
+from .factory import ToolFactory, register_tool  # noqa: E402
+
+if TYPE_CHECKING:
+    from .config import BaseToolConfig
+
+
+@register_tool
+async def create_file_tools(config: "BaseToolConfig") -> List[Any]:
+    """Create workspace-bound file tools."""
+    if not config.get_file_tools_enabled():
+        return []
+
+    workspace = ToolFactory._create_workspace(config.get_workspace_config())
+    if not workspace:
+        return []
+
+    try:
+        return create_workspace_file_tools(workspace)
+    except Exception as e:
+        logger.warning(f"Failed to create file tools: {e}")
+        return []

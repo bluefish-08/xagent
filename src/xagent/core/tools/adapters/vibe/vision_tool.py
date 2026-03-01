@@ -5,15 +5,22 @@ Framework wrapper around the pure vision core
 
 import logging
 import os
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 from xagent.core.workspace import TaskWorkspace
 
 from ....model.chat.basic.base import BaseLLM
 from ...core.vision_tool import DetectObjectsResult, UnderstandImagesResult, VisionCore
+from .base import ToolCategory
 from .function import FunctionTool
 
 logger = logging.getLogger(__name__)
+
+
+class VisionFunctionTool(FunctionTool):
+    """VisionFunctionTool with ToolCategory.VISION category."""
+
+    category = ToolCategory.VISION
 
 
 class VisionTool:
@@ -176,7 +183,7 @@ class VisionTool:
     def get_tools(self) -> list:
         """Get all tool instances."""
         tools = [
-            FunctionTool(
+            VisionFunctionTool(
                 self.understand_images,
                 name="understand_images",
                 description="""
@@ -215,7 +222,7 @@ Image requirements:
 The tool uses advanced vision AI models to provide detailed, accurate analysis of image content.
                 """.strip(),
             ),
-            FunctionTool(
+            VisionFunctionTool(
                 self.describe_images,
                 name="describe_images",
                 description="""
@@ -239,7 +246,7 @@ Parameters:
 Use this tool when you need descriptive text about images without asking specific questions.
                 """.strip(),
             ),
-            FunctionTool(
+            VisionFunctionTool(
                 self.detect_objects,
                 name="detect_objects",
                 description="""
@@ -424,3 +431,27 @@ def get_vision_tool(
 
     tool_instance = VisionTool(vision_model, workspace)
     return tool_instance.get_tools()
+
+
+# Register tool creator for auto-discovery
+# Import at bottom to avoid circular import with factory
+from .factory import ToolFactory, register_tool  # noqa: E402
+
+if TYPE_CHECKING:
+    from .config import BaseToolConfig
+
+
+@register_tool
+async def create_vision_tools(config: "BaseToolConfig") -> List[Any]:
+    """Create vision understanding tools."""
+    vision_model = config.get_vision_model()
+    if not vision_model:
+        return []
+
+    workspace = ToolFactory._create_workspace(config.get_workspace_config())
+
+    try:
+        return get_vision_tool(vision_model=vision_model, workspace=workspace)
+    except Exception as e:
+        logger.warning(f"Failed to create vision tools: {e}")
+        return []

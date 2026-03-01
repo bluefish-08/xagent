@@ -213,7 +213,7 @@ class TestDatabaseMCPServerManager:
 class TestToolFactoryMCPIntegration:
     """Test ToolFactory MCP integration."""
 
-    @patch("xagent.core.tools.adapters.vibe.factory.load_mcp_tools_as_agent_tools")
+    @patch("xagent.core.tools.adapters.vibe.mcp_adapter.load_mcp_tools_as_agent_tools")
     async def test_create_mcp_tools_success(
         self, mock_load_mcp, test_db, sample_stdio_config
     ):
@@ -239,7 +239,7 @@ class TestToolFactoryMCPIntegration:
         connections_arg = call_args[0][0]  # First positional argument
         assert sample_stdio_config["name"] in connections_arg
 
-    @patch("xagent.core.tools.adapters.vibe.factory.load_mcp_tools_as_agent_tools")
+    @patch("xagent.core.tools.adapters.vibe.mcp_adapter.load_mcp_tools_as_agent_tools")
     async def test_create_mcp_tools_no_connections(self, mock_load_mcp, test_db):
         """Test MCP tools creation with no connections."""
         tools = await ToolFactory.create_mcp_tools(test_db)
@@ -247,7 +247,7 @@ class TestToolFactoryMCPIntegration:
         assert tools == []
         mock_load_mcp.assert_not_called()
 
-    @patch("xagent.core.tools.adapters.vibe.factory.load_mcp_tools_as_agent_tools")
+    @patch("xagent.core.tools.adapters.vibe.mcp_adapter.load_mcp_tools_as_agent_tools")
     async def test_create_mcp_tools_error_handling(
         self, mock_load_mcp, test_db, sample_stdio_config
     ):

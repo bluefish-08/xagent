@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ....workspace import TaskWorkspace
 from ...core.image_web_search import ImageWebSearchCore
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,9 @@ class ImageWebSearchResult(BaseModel):
 
 class ImageWebSearchTool(AbstractBaseTool):
     """Framework wrapper for the pure image web search tool"""
+
+    # Image web search is a basic search tool, similar to web search
+    category: ToolCategory = ToolCategory.BASIC
 
     def __init__(self, workspace: Optional[TaskWorkspace] = None) -> None:
         self._visibility = ToolVisibility.PUBLIC

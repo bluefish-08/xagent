@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ....workspace import TaskWorkspace
 from ...core.logo_overlay import LogoOverlayCore
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,9 @@ class LogoOverlayResult(BaseModel):
 
 class LogoOverlayTool(AbstractBaseTool):
     """Tool for overlaying logos on base images"""
+
+    # Logo overlay is an image processing/editing tool
+    category: ToolCategory = ToolCategory.IMAGE
 
     def __init__(self, workspace: Optional[TaskWorkspace] = None) -> None:
         self._visibility = ToolVisibility.PUBLIC

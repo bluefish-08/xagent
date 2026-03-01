@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Mapping, Type
 from pydantic import BaseModel, Field
 
 from ...core.web_search import WebSearchCore
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class WebSearchResult(BaseModel):
 
 
 class WebSearchTool(AbstractBaseTool):
+    category = ToolCategory.BASIC
     """Framework wrapper for the pure web search tool"""
 
     def __init__(self) -> None:

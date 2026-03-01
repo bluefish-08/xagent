@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Type
 from pydantic import BaseModel, Field
 
 from ...core.zhipu_web_search import ZhipuWebSearchCore
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 
 class ZhipuWebSearchArgs(BaseModel):
@@ -45,6 +45,7 @@ class ZhipuWebSearchResult(BaseModel):
 
 
 class ZhipuWebSearchTool(AbstractBaseTool):
+    category = ToolCategory.BASIC
     """Framework wrapper for the Zhipu web search tool."""
 
     def __init__(self) -> None:

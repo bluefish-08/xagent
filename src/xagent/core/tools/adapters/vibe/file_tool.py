@@ -23,51 +23,55 @@ from ...core.file_tool import (
     write_file,
     write_json_file,
 )
+from .base import ToolCategory
 from .function import FunctionTool
 
+
+class FileTool(FunctionTool):
+    """FileTool with ToolCategory.FILE category."""
+
+    category = ToolCategory.FILE
+
+
 # Create basic tool instances (these tools are unsafe, for internal use only)
-read_file_tool = FunctionTool(
-    read_file, name="read_file", description="Read file content"
-)
-write_file_tool = FunctionTool(
+read_file_tool = FileTool(read_file, name="read_file", description="Read file content")
+write_file_tool = FileTool(
     write_file, name="write_file", description="Write content to file"
 )
-append_file_tool = FunctionTool(
+append_file_tool = FileTool(
     append_file, name="append_file", description="Append content to file"
 )
-delete_file_tool = FunctionTool(
-    delete_file, name="delete_file", description="Delete file"
-)
-list_files_tool = FunctionTool(
+delete_file_tool = FileTool(delete_file, name="delete_file", description="Delete file")
+list_files_tool = FileTool(
     list_files, name="list_files", description="List files in directory"
 )
-create_directory_tool = FunctionTool(
+create_directory_tool = FileTool(
     create_directory, name="create_directory", description="Create directory"
 )
-file_exists_tool = FunctionTool(
+file_exists_tool = FileTool(
     file_exists, name="file_exists", description="Check if file exists"
 )
-get_file_info_tool = FunctionTool(
+get_file_info_tool = FileTool(
     get_file_info, name="get_file_info", description="Get detailed file information"
 )
-read_json_file_tool = FunctionTool(
+read_json_file_tool = FileTool(
     read_json_file, name="read_json_file", description="Read JSON file"
 )
-write_json_file_tool = FunctionTool(
+write_json_file_tool = FileTool(
     write_json_file, name="write_json_file", description="Write JSON file"
 )
-read_csv_file_tool = FunctionTool(
+read_csv_file_tool = FileTool(
     read_csv_file, name="read_csv_file", description="Read CSV file"
 )
-write_csv_file_tool = FunctionTool(
+write_csv_file_tool = FileTool(
     write_csv_file, name="write_csv_file", description="Write CSV file"
 )
-edit_file_tool = FunctionTool(
+edit_file_tool = FileTool(
     edit_file,
     name="edit_file",
     description="Precisely edit file content, supporting various editing operations based on line numbers and pattern matching",
 )
-find_and_replace_tool = FunctionTool(
+find_and_replace_tool = FileTool(
     find_and_replace,
     name="find_and_replace",
     description="Convenient function to find and replace text content",

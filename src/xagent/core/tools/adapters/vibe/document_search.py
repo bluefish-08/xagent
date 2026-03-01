@@ -13,12 +13,13 @@ from ...core.document_search import (
     list_knowledge_bases,
     search_knowledge_base,
 )
-from .base import AbstractBaseTool, ToolVisibility
+from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
 logger = logging.getLogger(__name__)
 
 
 class ListKnowledgeBasesTool(AbstractBaseTool):
+    category = ToolCategory.KNOWLEDGE
     """Tool to list all available knowledge bases."""
 
     def __init__(
@@ -90,6 +91,8 @@ def get_list_knowledge_bases_tool(
 
 class KnowledgeSearchTool(AbstractBaseTool):
     """Knowledge base search tool for Vibe agents."""
+
+    category = ToolCategory.KNOWLEDGE
 
     def __init__(
         self,

@@ -8,40 +8,152 @@ and configuration management.
 # mypy: ignore-errors
 
 import logging
-import os
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from .....web.models.mcp import MCPServer, UserMCPServer
+if TYPE_CHECKING:
+    pass
+
 from ....workspace import TaskWorkspace
 from .base import Tool
-from .config import ToolConfig
-from .image_tool import create_image_tool
-
-# Import MCP function for test compatibility
-from .mcp_adapter import load_mcp_tools_as_agent_tools
-from .tavily_web_search import TavilyWebSearchTool
-from .vision_tool import get_vision_tool
-from .web_search import WebSearchTool
-from .zhipu_web_search import ZhipuWebSearchTool
+from .config import BaseToolConfig
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["ToolFactory", "ToolRegistry", "register_tool"]
+
+
+class ToolRegistry:
+    """
+    Global registry for tool creators using decorator pattern.
+
+    Tools are registered using @register_tool decorator and automatically
+    discovered during create_all_tools().
+    """
+
+    _tool_creators: List[Callable] = []
+    _modules_imported = False
+
+    @classmethod
+    def register(cls, creator: Callable) -> Callable:
+        """
+        Register a tool creator function.
+
+        The creator function will be called during create_all_tools()
+        with the current config.
+
+        Usage:
+            @register_tool
+            def create_my_tools(config: BaseToolConfig) -> List[Tool]:
+                return [MyTool(...)]
+        """
+        cls._tool_creators.append(creator)
+        return creator
+
+    @classmethod
+    def _import_tool_modules(cls):
+        """Import tool modules to trigger @register_tool decorator registration."""
+        if cls._modules_imported:
+            return
+
+        try:
+            # Import tool modules in priority order - these imports trigger @register_tool decorators
+            from . import (  # noqa: F401 - imports trigger @register_tool decorators
+                agent_tool,
+                basic_tools,
+                browser_tools,
+                image_tool,
+                knowledge_tools,
+                mcp_tools,
+                pptx_tool,
+                special_image_tools,
+                vision_tool,
+                workspace_file_tool,
+            )
+
+            cls._modules_imported = True
+            logger.info("Tool modules imported and registered")
+        except Exception as e:
+            logger.warning(f"Failed to import tool modules: {e}")
+
+    @classmethod
+    async def create_registered_tools(cls, config: BaseToolConfig) -> List[Tool]:
+        """Create tools from all registered creators."""
+        # Import tool modules on first call to trigger decorator registration
+        cls._import_tool_modules()
+
+        tools = []
+        for creator in cls._tool_creators:
+            try:
+                created_tools = await creator(config)
+                tools.extend(created_tools)
+            except Exception as e:
+                logger.warning(f"Tool creator {creator.__name__} failed: {e}")
+
+        # Sort tools by category priority
+        tools = cls._sort_tools_by_category(tools)
+        return tools
+
+    @classmethod
+    def _sort_tools_by_category(cls, tools: List[Tool]) -> List[Tool]:
+        """Sort tools by category priority.
+
+        Priority order (most important first):
+        1. BASIC - Basic tools (search, code execution)
+        2. KNOWLEDGE - Knowledge base search
+        3. FILE - File operations
+        4. VISION - Vision understanding
+        5. IMAGE - Image generation
+        6. BROWSER - Browser automation
+        7. PPT - PPT tools
+        8. MCP - MCP tools
+        9. AGENT - Agent tools (delegation)
+        10. OTHER - Other tools
+        """
+        from .base import ToolCategory
+
+        # Define category priority order
+        category_order = {
+            ToolCategory.BASIC: 0,
+            ToolCategory.KNOWLEDGE: 1,
+            ToolCategory.FILE: 2,
+            ToolCategory.VISION: 3,
+            ToolCategory.IMAGE: 4,
+            ToolCategory.BROWSER: 5,
+            ToolCategory.PPT: 6,
+            ToolCategory.MCP: 7,
+            ToolCategory.AGENT: 8,
+            ToolCategory.OTHER: 9,
+        }
+
+        def get_tool_priority(tool: Tool) -> int:
+            """Get priority for a tool based on its category."""
+            tool_category = tool.metadata.category
+            return category_order.get(tool_category, 99)
+
+        return sorted(tools, key=get_tool_priority)
+
+
+# Decorator for easy import
+register_tool = ToolRegistry.register
 
 
 class ToolFactory:
     """
     Unified tool factory that handles tool creation with proper workspace binding.
+
+    Tool categories are self-describing - each tool declares its own category
+    via the metadata.category field. No need for manual category mapping.
     """
 
     @staticmethod
-    async def create_all_tools(config: ToolConfig) -> List[Tool]:
+    async def create_all_tools(config: BaseToolConfig) -> List[Tool]:
         """
         Create all tools based on configuration.
 
-        This is the unified entry point for tool creation. All tools are created
-        based on the provided configuration, which can come from web context
-        or standalone usage.
+        This is the unified entry point for tool creation. All tools are discovered
+        automatically via @register_tool decorators based on the provided configuration.
 
         Args:
             config: Tool configuration object
@@ -49,87 +161,8 @@ class ToolFactory:
         Returns:
             List of configured tools
         """
-        tools: List[Tool] = []
-
-        # Create workspace from configuration
-        workspace = ToolFactory._create_workspace(config.get_workspace_config())
-
-        # Basic tools (always enabled if config allows)
-        if config.get_basic_tools_enabled():
-            basic_tools = ToolFactory._create_basic_tools(workspace)
-            tools.extend(basic_tools)
-
-        # Knowledge base tools
-        embedding_model = config.get_embedding_model()
-        allowed_collections = config.get_allowed_collections()
-        user_id = config.get_user_id()
-        is_admin = config.is_admin()
-        knowledge_tools = ToolFactory._create_knowledge_tools(
-            embedding_model, allowed_collections, user_id, is_admin
-        )
-        tools.extend(knowledge_tools)
-
-        # File tools (workspace-bound)
-        if config.get_file_tools_enabled() and workspace:
-            file_tools = ToolFactory._create_file_tools(workspace)
-            tools.extend(file_tools)
-
-        # Vision tools
-        vision_model = config.get_vision_model()
-        if vision_model:
-            vision_tools = get_vision_tool(
-                vision_model=vision_model, workspace=workspace
-            )
-            tools.extend(vision_tools)
-
-        # Image tools
-        image_models = config.get_image_models()
-        if image_models:
-            default_generate_model = config.get_image_generate_model()
-            default_edit_model = config.get_image_edit_model()
-            image_tools = create_image_tool(
-                image_models,
-                workspace=workspace,
-                default_generate_model=default_generate_model,
-                default_edit_model=default_edit_model,
-            )
-            tools.extend(image_tools)
-
-        # Special image tools (workspace-bound)
-        if workspace:
-            special_image_tools = ToolFactory._create_special_image_tools(workspace)
-            tools.extend(special_image_tools)
-
-        # MCP tools
-        mcp_configs = config.get_mcp_server_configs()
-        if mcp_configs:
-            mcp_tools = await ToolFactory._create_mcp_tools_from_configs(mcp_configs)
-            tools.extend(mcp_tools)
-
-        # Browser automation tools
-        task_id = config.get_task_id()
-        if config.get_browser_tools_enabled():
-            browser_tools = ToolFactory._create_browser_tools(task_id, workspace)
-            tools.extend(browser_tools)
-
-        # Published agent tools
-        if config.get_enable_agent_tools():
-            agent_tools = ToolFactory._create_agent_tools(
-                db=config.get_db(),
-                user_id=config.get_user_id(),
-                task_id=task_id,
-                config=config,
-            )
-            tools.extend(agent_tools)
-
-        # PPTX presentation tools (6 tools: read, generate, unpack, pack, add_slide, clean)
-        pptx_tools = ToolFactory._create_pptx_tools(
-            db=config.get_db(),
-            user_id=config.get_user_id(),
-            task_id=config.get_task_id(),
-            config=config,
-        )
-        tools.extend(pptx_tools)
+        # Auto-discover tools from @register_tool decorators
+        tools = await ToolRegistry.create_registered_tools(config)
 
         # Filter tools by allowed_tools if specified
         allowed_tools = config.get_allowed_tools()
@@ -151,113 +184,40 @@ class ToolFactory:
     def _create_workspace(
         workspace_config: Optional[Dict[str, Any]],
     ) -> Optional[TaskWorkspace]:
-        """Create workspace from configuration."""
+        """Create workspace from configuration.
+
+        Uses MockWorkspace for tool listing scenarios to avoid creating
+        unnecessary directories on disk.
+        """
         if not workspace_config:
             return None
 
         try:
+            task_id = workspace_config.get("task_id")
+
+            # Use MockWorkspace for tool listing scenarios
+            # This avoids creating unnecessary directories on disk
+            if task_id in ("tools_list", "_mock_", None):
+                from ....workspace import MockWorkspace
+
+                logger.debug(f"Using MockWorkspace for task_id='{task_id}'")
+                return MockWorkspace(
+                    id=task_id or "_mock_",
+                    base_dir=workspace_config.get("base_dir", "./uploads"),
+                )
+
+            # Real task - create actual workspace
             from ....workspace import WorkspaceManager
 
             workspace_manager = WorkspaceManager()
             workspace = workspace_manager.get_or_create_workspace(
                 workspace_config.get("base_dir", "./workspace"),
-                workspace_config.get("task_id", "default"),
+                task_id or "default",
             )
             return workspace
         except Exception as e:
             logger.warning(f"Failed to create workspace: {e}")
             return None
-
-    @staticmethod
-    def _create_basic_tools(workspace: Optional[TaskWorkspace]) -> List[Tool]:
-        """Create basic tools that are always available."""
-        tools: List[Tool] = []
-
-        # Web search tool preference: Zhipu -> Tavily -> Google -> none
-        zhipu_api_key = os.getenv("ZHIPU_API_KEY") or os.getenv("BIGMODEL_API_KEY")
-        tavily_api_key = os.getenv("TAVILY_API_KEY")
-        google_api_key = os.getenv("GOOGLE_API_KEY")
-        google_cse_id = os.getenv("GOOGLE_CSE_ID")
-
-        if zhipu_api_key:
-            tools.append(ZhipuWebSearchTool())
-        elif tavily_api_key:
-            tools.append(TavilyWebSearchTool())
-        elif google_api_key and google_cse_id:
-            tools.append(WebSearchTool())
-
-        # Python executor tool (if workspace available)
-        if workspace:
-            from .python_executor import get_python_executor_tool
-
-            python_tool = get_python_executor_tool({"workspace": workspace})
-            tools.append(python_tool)
-
-        # JavaScript executor tool (if workspace available)
-        if workspace:
-            from .javascript_executor import get_javascript_executor_tool
-
-            js_tool = get_javascript_executor_tool({"workspace": workspace})
-            tools.append(js_tool)
-
-        return tools
-
-    @staticmethod
-    def _create_knowledge_tools(
-        embedding_model: Optional[str] = None,
-        allowed_collections: Optional[List[str]] = None,
-        user_id: Optional[int] = None,
-        is_admin: bool = False,
-    ) -> List[Tool]:
-        """Create knowledge base search tools.
-
-        Args:
-            embedding_model: Optional embedding model ID to use for searches.
-            allowed_collections: Optional list of allowed collection names to filter.
-            user_id: Optional user ID for multi-tenancy filtering.
-            is_admin: Whether current user is admin.
-        """
-        tools: List[Tool] = []
-
-        try:
-            from .document_search import (
-                get_knowledge_search_tool,
-                get_list_knowledge_bases_tool,
-            )
-
-            # Add list knowledge bases tool first
-            list_tool = get_list_knowledge_bases_tool(
-                allowed_collections=allowed_collections,
-                user_id=user_id,
-                is_admin=is_admin,
-            )
-            tools.append(list_tool)
-            logger.info("Added list knowledge bases tool")
-
-            # Add search tool with embedding model and allowed collections
-            knowledge_tool = get_knowledge_search_tool(
-                embedding_model_id=embedding_model,
-                allowed_collections=allowed_collections,
-                user_id=user_id,
-                is_admin=is_admin,
-            )
-            tools.append(knowledge_tool)
-            logger.info("Added knowledge base search tool")
-        except Exception as e:
-            logger.warning(f"Failed to create knowledge tools: {e}")
-
-        return tools
-
-    @staticmethod
-    def _create_file_tools(workspace: TaskWorkspace) -> List[Tool]:
-        """Create workspace-bound file tools."""
-        try:
-            from .workspace_file_tool import create_workspace_file_tools
-
-            return create_workspace_file_tools(workspace)
-        except Exception as e:
-            logger.warning(f"Failed to create file tools: {e}")
-            return []
 
     @staticmethod
     async def _create_mcp_tools_from_configs(
@@ -315,7 +275,9 @@ class ToolFactory:
             List of MCP tools
         """
         try:
+            from .....web.models.mcp import MCPServer, UserMCPServer
             from ...core.mcp.manager.db import DatabaseMCPServerManager
+            from .mcp_adapter import load_mcp_tools_as_agent_tools
 
             # Load MCP server connections for the specific user
             manager = DatabaseMCPServerManager(db)
@@ -390,119 +352,4 @@ class ToolFactory:
                 return loop.run_until_complete(cls.create_mcp_tools(db, user_id))
         except Exception as e:
             logger.warning(f"Failed to create MCP tools (sync wrapper): {e}")
-            return []
-
-    @staticmethod
-    def _create_special_image_tools(workspace: TaskWorkspace) -> List[Tool]:
-        """Create special image tools that require workspace binding."""
-        tools: List[Tool] = []
-
-        try:
-            # Image web search tool
-            from .image_web_search import create_image_web_search_tool
-
-            image_search_tool = create_image_web_search_tool(workspace)
-            tools.append(image_search_tool)
-            logger.info("Added image web search tool")
-        except Exception as e:
-            logger.warning(f"Failed to create image web search tool: {e}")
-
-        try:
-            # Logo overlay tool
-            from .logo_overlay import create_logo_overlay_tool
-
-            logo_overlay_tool = create_logo_overlay_tool(workspace)
-            tools.append(logo_overlay_tool)
-            logger.info("Added logo overlay tool")
-        except Exception as e:
-            logger.warning(f"Failed to create logo overlay tool: {e}")
-
-        return tools
-
-    @staticmethod
-    def _create_browser_tools(
-        task_id: Optional[str] = None, workspace: Optional[TaskWorkspace] = None
-    ) -> List[Tool]:
-        """Create browser automation tools.
-
-        Args:
-            task_id: Optional task ID for session tracking
-            workspace: Optional workspace for saving screenshots
-        """
-        try:
-            from .browser_use import create_browser_tools
-
-            browser_tools = create_browser_tools(task_id=task_id, workspace=workspace)
-            logger.info(f"Added {len(browser_tools)} browser automation tools")
-            return browser_tools
-        except Exception as e:
-            logger.error(f"Failed to create browser tools: {e}", exc_info=True)
-            return []
-
-    @staticmethod
-    def _create_agent_tools(
-        db: Any, user_id: int, task_id: Optional[str] = None, config: Any = None
-    ) -> List[Tool]:
-        """Create tools from published agents.
-
-        Args:
-            db: Database session
-            user_id: User ID for model access
-            task_id: Optional task ID for workspace isolation
-            config: Tool configuration for getting excluded agent ID
-
-        Returns:
-            List of AgentTool instances
-        """
-        try:
-            from .agent_tool import get_published_agents_tools
-
-            excluded_agent_id = config.get_excluded_agent_id() if config else None
-
-            agent_tools = get_published_agents_tools(
-                db=db,
-                user_id=user_id,
-                task_id=task_id,
-                workspace_base_dir="uploads",
-                excluded_agent_id=excluded_agent_id,
-            )
-            logger.info(f"Added {len(agent_tools)} published agent tools")
-            return agent_tools
-        except Exception as e:
-            logger.error(f"Failed to create agent tools: {e}", exc_info=True)
-            return []
-
-    @staticmethod
-    def _create_pptx_tools(
-        db: Any = None,
-        user_id: Optional[int] = None,
-        task_id: Optional[str] = None,
-        config: Any = None,
-    ) -> List[Tool]:
-        """Create PPTX presentation tools.
-
-        Args:
-            db: Database session (unused, kept for compatibility)
-            user_id: User ID (unused, kept for compatibility)
-            task_id: Task ID (unused, kept for compatibility)
-            config: Tool configuration (unused, kept for compatibility)
-
-        Returns:
-            List of PPTX tools (read, generate, unpack, pack, add_slide, clean)
-        """
-        try:
-            from .pptx_tool import create_pptx_tool
-
-            # Get workspace from config
-            workspace = (
-                ToolFactory._create_workspace(config.get_workspace_config())
-                if config
-                else None
-            )
-
-            pptx_tools = create_pptx_tool(workspace=workspace)
-            logger.info(f"Added {len(pptx_tools)} PPTX tools")
-            return pptx_tools
-        except Exception as e:
-            logger.error(f"Failed to create PPTX tools: {e}", exc_info=True)
             return []
