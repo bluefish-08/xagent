@@ -1570,6 +1570,8 @@ Build when you need.`
       },
       error: {
         failed: "Failed to create agent",
+        publishFailed: "Failed to publish agent",
+        unpublishFailed: "Failed to unpublish agent",
         unknown: "An unknown error occurred",
       }
     },

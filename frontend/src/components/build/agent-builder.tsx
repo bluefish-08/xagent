@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dialog"
 import { useRouter, useSearchParams } from "next/navigation"
 import { KnowledgeBaseCreationDialog } from "@/components/kb/knowledge-base-creation-dialog"
+import { toast } from "sonner"
 
 interface KnowledgeBase {
   name: string
@@ -120,9 +121,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [logoFile, setLogoFile] = useState<File | null>(null)
   const [logoUrl, setLogoUrl] = useState<string | null>(null)  // Existing logo URL
   const [isCreating, setIsCreating] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [successMessage, setSuccessMessage] = useState<string | null>(null)
-  const [successVisible, setSuccessVisible] = useState(false)
   const [loadingAgent, setLoadingAgent] = useState(false)
   const [originalData, setOriginalData] = useState<any>(null)
   const [isKbModalOpen, setIsKbModalOpen] = useState(false)
@@ -152,32 +150,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   // Chat State
   const [messages, setMessages] = useState<Message[]>([])
-
-  useEffect(() => {
-    if (!successMessage) {
-      setSuccessVisible(false)
-      return
-    }
-
-    setSuccessVisible(false)
-    const enterTimer = requestAnimationFrame(() => {
-      setSuccessVisible(true)
-    })
-
-    const hideTimer = setTimeout(() => {
-      setSuccessVisible(false)
-    }, 1900)
-
-    const clearTimer = setTimeout(() => {
-      setSuccessMessage(null)
-    }, 2300)
-
-    return () => {
-      cancelAnimationFrame(enterTimer)
-      clearTimeout(hideTimer)
-      clearTimeout(clearTimer)
-    }
-  }, [successMessage])
 
   useEffect(() => {
     setMessages([{
@@ -723,22 +695,19 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }, [name, description, instructions, executionMode, logoFile, suggestedPrompts, selectedKbs, selectedSkills, selectedToolCategories, modelConfig, originalData])
 
   const handleCreate = async () => {
-    setErrorMessage(null)
-    setSuccessMessage(null)
-
     // Validation
     if (!name.trim()) {
-      setErrorMessage(t("builds.editor.validation.nameRequired"))
+      toast.error(t("builds.editor.validation.nameRequired"))
       return
     }
 
     if (!instructions.trim()) {
-      setErrorMessage(t("builds.editor.validation.instructionsRequired"))
+      toast.error(t("builds.editor.validation.instructionsRequired"))
       return
     }
 
     if (!modelConfig.general) {
-      setErrorMessage(t("builds.editor.validation.modelRequired"))
+      toast.error(t("builds.editor.validation.modelRequired"))
       return
     }
 
@@ -821,11 +790,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         }
       } else {
         const error = await response.json()
-        setErrorMessage(error.detail || t("builds.editor.error.unknown"))
+        toast.error(error.detail || t("builds.editor.error.unknown"))
       }
     } catch (error) {
       console.error("Failed to save agent:", error)
-      setErrorMessage(t("builds.editor.error.unknown"))
+      toast.error(t("builds.editor.error.unknown"))
     } finally {
       setIsCreating(false)
     }
@@ -835,8 +804,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     if (!agentId) return
 
     setLoadingAgent(true)
-    setErrorMessage(null)
-    setSuccessMessage(null)
 
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${agentId}/publish`, {
@@ -848,14 +815,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           ...originalData,
           status: "published",
         })
-        setSuccessMessage(t("builds.editor.success.published"))
+        toast.success(t("builds.editor.success.published"))
       } else {
         const error = await response.json()
-        setErrorMessage(error.detail || "Failed to publish agent")
+        toast.error(error.detail || t("builds.editor.error.publishFailed"))
       }
     } catch (error) {
       console.error("Failed to publish agent:", error)
-      setErrorMessage(t("builds.editor.error.unknown"))
+      toast.error(t("builds.editor.error.unknown"))
     } finally {
       setLoadingAgent(false)
     }
@@ -865,8 +832,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     if (!agentId) return
 
     setLoadingAgent(true)
-    setErrorMessage(null)
-    setSuccessMessage(null)
 
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${agentId}/unpublish`, {
@@ -878,14 +843,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           ...originalData,
           status: "draft",
         })
-        setSuccessMessage(t("builds.editor.success.unpublished"))
+        toast.success(t("builds.editor.success.unpublished"))
       } else {
         const error = await response.json()
-        setErrorMessage(error.detail || "Failed to unpublish agent")
+        toast.error(error.detail || t("builds.editor.error.unpublishFailed"))
       }
     } catch (error) {
       console.error("Failed to unpublish agent:", error)
-      setErrorMessage(t("builds.editor.error.unknown"))
+      toast.error(t("builds.editor.error.unknown"))
     } finally {
       setLoadingAgent(false)
     }
@@ -895,24 +860,22 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     if (!createdAgent?.id) return
 
     setLoadingAgent(true)
-    setErrorMessage(null)
-    setSuccessMessage(null)
     try {
       const response = await apiRequest(`${getApiUrl()}/api/agents/${createdAgent.id}/publish`, {
         method: "POST",
       })
 
       if (response.ok) {
-        setSuccessMessage(t("builds.editor.success.published"))
+        toast.success(t("builds.editor.success.published"))
         setShowSuccessDialog(false)
         router.replace(`/build/${createdAgent.id}`)
       } else {
         const error = await response.json()
-        setErrorMessage(error.detail || "Failed to publish agent")
+        toast.error(error.detail || t("builds.editor.error.publishFailed"))
       }
     } catch (error) {
       console.error("Failed to publish agent:", error)
-      setErrorMessage(t("builds.editor.error.unknown"))
+      toast.error(t("builds.editor.error.unknown"))
     } finally {
       setLoadingAgent(false)
     }
@@ -1361,17 +1324,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   return (
     <div className="flex flex-col h-[100vh]">
-      {successMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50">
-          <div
-            role="status"
-            aria-live="polite"
-            className={`inline-flex items-center px-4 py-2 rounded-md border border-emerald-300 bg-emerald-50 text-emerald-700 text-sm shadow-sm transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${successVisible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 -translate-y-1.5 scale-95"}`}
-          >
-            {successMessage}
-          </div>
-        </div>
-      )}
       {/* Header */}
       <div className="border-b flex justify-between items-center p-8">
         <div>
@@ -1390,9 +1342,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <p className="text-muted-foreground">{t("builds.editor.header.subtitle")}</p>
         </div>
         <div className="flex items-center gap-4">
-          {errorMessage && (
-            <div className="text-sm text-destructive">{errorMessage}</div>
-          )}
           {isEditMode && !isDirty && originalData?.status === "published" ? (
             <>
               <Button variant="outline" onClick={handleUnpublish} disabled={isCreating || loadingAgent}>

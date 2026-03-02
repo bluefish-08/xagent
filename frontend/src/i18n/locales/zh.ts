@@ -1570,6 +1570,8 @@ Build when you need.`
       },
       error: {
         failed: "创建 Agent 失败",
+        publishFailed: "发布 Agent 失败",
+        unpublishFailed: "取消发布 Agent 失败",
         unknown: "发生未知错误",
       }
     },
