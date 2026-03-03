@@ -8,7 +8,7 @@ All models use Pydantic v2 ConfigDict for future compatibility.
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -338,6 +338,68 @@ class ParseDocumentResponse(BaseModel):
     )
     written: bool = Field(
         ..., description="True if parse record was written to database"
+    )
+
+
+# ------------------------- Parse Result Display schemas -------------------------
+
+
+class ParsedTextSegmentDisplay(BaseModel):
+    """Display model for a parsed text segment."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["text"] = "text"
+    text: str = Field(..., description="The text content of the segment")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Metadata including positions, style, etc."
+    )
+
+
+class ParsedTableDisplay(BaseModel):
+    """Display model for a parsed table."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["table"] = "table"
+    html: Optional[str] = Field(None, description="HTML representation of the table")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Metadata including positions, caption, etc."
+    )
+
+
+class ParsedFigureDisplay(BaseModel):
+    """Display model for a parsed figure."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["figure"] = "figure"
+    text: str = Field(..., description="Caption or text associated with the figure")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata including positions, image_path, etc.",
+    )
+
+
+ParsedElementDisplay = Annotated[
+    Union[ParsedTextSegmentDisplay, ParsedTableDisplay, ParsedFigureDisplay],
+    Field(discriminator="type"),
+]
+
+
+class ParseResultResponse(BaseModel):
+    """Response model for displaying parse results with pagination."""
+
+    model_config = ConfigDict(frozen=True)
+
+    doc_id: str = Field(..., description="The document ID")
+    parse_hash: str = Field(..., description="SHA256 hash of parse configuration")
+    elements: List[ParsedElementDisplay] = Field(
+        default_factory=list, description="Ordered list of parsed elements"
+    )
+    pagination: Dict[str, Any] = Field(
+        ...,
+        description="Pagination information including page, page_size, total counts",
     )
 
 

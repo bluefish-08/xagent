@@ -11,6 +11,7 @@ from deepdoc import PdfParser as DeepDocPdfParser
 from deepdoc import TxtParser as DeepDocTxtParser
 from deepdoc.parser import DoclingParser as DeepDocDoclingParser
 
+from ...core.tools.core.RAG_tools.core.config import ARTIFACTS_DIR
 from ...core.tools.core.RAG_tools.utils.string_utils import sanitize_for_doc_id
 from .base import (
     DocumentParser,
@@ -70,7 +71,7 @@ def _save_image_to_disk(doc_id: str, image_obj: Any) -> str:
 def _save_bytes_to_disk(doc_id: str, image_bytes: bytes, suffix: str = ".png") -> str:
     """Saves raw image bytes to disk and returns the path."""
     safe_doc_id = sanitize_for_doc_id(doc_id, max_length=64)
-    base_dir = Path("artifacts") / "providers" / "deepdoc"
+    base_dir = ARTIFACTS_DIR / "providers" / "deepdoc"
     image_dir = base_dir / safe_doc_id / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,12 +90,39 @@ def _build_element_metadata(
 ) -> Dict[str, Any]:
     """Build metadata dict for an element."""
     layout_type = bbox.get("layout_type", "text")
-    return {
+    metadata = {
         "layout_type": layout_type,
         "doc_id": doc_id,
         "page_number": bbox.get("page_number", 1),
         **kwargs,
     }
+
+    # Extract col_id for two-column layout support
+    col_id = bbox.get("col_id", 0)
+    metadata["col_id"] = col_id
+
+    # Extract positions for PDF visualization (format: [[page_num, left, right, top, bottom], ...])
+    # We'll enrich it with col_id to format: [[page_num, col_id, left, right, top, bottom], ...]
+    positions = bbox.get("positions", [])
+    if positions:
+        enriched_positions = []
+        for pos in positions:
+            if isinstance(pos, (list, tuple)) and len(pos) >= 5:
+                # pos format: [page_num, left, right, top, bottom]; len already >= 5
+                enriched_positions.append(
+                    [
+                        int(pos[0]),
+                        col_id,
+                        float(pos[1]),
+                        float(pos[2]),
+                        float(pos[3]),
+                        float(pos[4]),
+                    ]
+                )
+        if enriched_positions:
+            metadata["positions"] = enriched_positions
+
+    return metadata
 
 
 def _process_table_element(
@@ -109,6 +137,7 @@ def _process_table_element(
     table_metadata = base_metadata.copy()
     table_metadata["image_path"] = image_path
     table_metadata["type"] = "table"
+    # positions and col_id are already in base_metadata from _build_element_metadata
 
     return ParsedTable(html=bbox.get("text", ""), image=None, metadata=table_metadata)
 
@@ -139,6 +168,7 @@ def _process_figure_element(
     figure_metadata = base_metadata.copy()
     figure_metadata["image_path"] = image_path
     figure_metadata["type"] = "figure"
+    # positions and col_id are already in base_metadata from _build_element_metadata
 
     # Ensure figure has text for proper processing
     figure_text = bbox.get("text", "").strip()
