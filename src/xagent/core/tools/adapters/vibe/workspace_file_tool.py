@@ -52,7 +52,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
         encoding: str = "utf-8",
         create_dirs: bool = True,
         filename: str | None = None,
-    ) -> bool:
+    ) -> Dict[str, Any]:
         """Write file content in workspace"""
         if file_path is None:
             file_path = filename

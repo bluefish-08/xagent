@@ -1248,7 +1248,11 @@ class DAGPlanExecutePattern(AgentPattern):
                             if relative_path
                             else f"{workspace_name}/{filename}"
                         )
-                        file_id = str(uuid4())
+                        file_id = str(file_info.get("file_id") or "").strip()
+                        if not file_id and file_path:
+                            file_id = self.workspace.register_file(file_path)
+                        if not file_id:
+                            file_id = str(uuid4())
 
                         file_outputs.append(
                             {

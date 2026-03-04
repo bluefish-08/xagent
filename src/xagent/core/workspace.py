@@ -8,9 +8,11 @@ ensuring that each agent has its own isolated workspace context.
 import logging
 import os
 import shutil
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,7 @@ class TaskWorkspace:
         self.input_dir = self.workspace_dir / "input"
         self.output_dir = self.workspace_dir / "output"
         self.temp_dir = self.workspace_dir / "temp"
+        self._file_registry_path = self.workspace_dir / ".file_registry.json"
 
         # Allowed external directories (e.g., user upload directories with knowledge base files)
         self.allowed_external_dirs: List[Path] = []
@@ -65,6 +68,99 @@ class TaskWorkspace:
 
         # Create directory structure
         self._ensure_directories()
+
+    def _load_file_registry(self) -> Dict[str, Dict[str, str]]:
+        if not self._file_registry_path.exists():
+            return {"by_path": {}, "by_id": {}}
+
+        try:
+            payload = json.loads(self._file_registry_path.read_text(encoding="utf-8"))
+            by_path = payload.get("by_path") if isinstance(payload, dict) else {}
+            by_id = payload.get("by_id") if isinstance(payload, dict) else {}
+            if not isinstance(by_path, dict) or not isinstance(by_id, dict):
+                return {"by_path": {}, "by_id": {}}
+            return {
+                "by_path": {
+                    str(k): str(v)
+                    for k, v in by_path.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                },
+                "by_id": {
+                    str(k): str(v)
+                    for k, v in by_id.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                },
+            }
+        except Exception:
+            logger.warning("Failed to load file registry: %s", self._file_registry_path)
+            return {"by_path": {}, "by_id": {}}
+
+    def _save_file_registry(self, registry: Dict[str, Dict[str, str]]) -> None:
+        self._file_registry_path.write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def register_file(self, file_path: str, file_id: Optional[str] = None) -> str:
+        resolved_path = self.resolve_path(file_path, default_dir="output")
+        if not resolved_path.exists() or not resolved_path.is_file():
+            raise FileNotFoundError(f"File not found for registration: {file_path}")
+
+        workspace_abs = self.workspace_dir.resolve()
+        try:
+            relative_path = str(resolved_path.relative_to(workspace_abs))
+        except ValueError as exc:
+            raise ValueError(f"Path {file_path} is outside workspace") from exc
+
+        registry = self._load_file_registry()
+        by_path = registry["by_path"]
+        by_id = registry["by_id"]
+
+        existing_file_id = by_path.get(relative_path)
+        if existing_file_id:
+            if existing_file_id not in by_id:
+                by_id[existing_file_id] = relative_path
+                self._save_file_registry(registry)
+            return existing_file_id
+
+        final_file_id = str(file_id).strip() if file_id else ""
+        if not final_file_id:
+            final_file_id = str(uuid4())
+
+        by_path[relative_path] = final_file_id
+        by_id[final_file_id] = relative_path
+        self._save_file_registry(registry)
+        return final_file_id
+
+    def get_registered_file_id(self, file_path: str) -> Optional[str]:
+        try:
+            resolved_path = self.resolve_path(file_path, default_dir="output")
+        except Exception:
+            return None
+
+        workspace_abs = self.workspace_dir.resolve()
+        try:
+            relative_path = str(resolved_path.relative_to(workspace_abs))
+        except ValueError:
+            return None
+
+        registry = self._load_file_registry()
+        return registry["by_path"].get(relative_path)
+
+    def resolve_file_id(self, file_id: str) -> Optional[Path]:
+        file_id = str(file_id).strip()
+        if not file_id:
+            return None
+
+        registry = self._load_file_registry()
+        relative_path = registry["by_id"].get(file_id)
+        if not relative_path:
+            return None
+
+        resolved = (self.workspace_dir / relative_path).resolve()
+        if resolved.exists() and resolved.is_file():
+            return resolved
+        return None
 
     def _ensure_directories(self) -> None:
         """Ensure all workspace directories exist"""
@@ -152,7 +248,19 @@ class TaskWorkspace:
             ValueError: If path is outside both workspace and allowed external directories
             FileNotFoundError: If relative path doesn't exist in any searched directory
         """
-        path = Path(file_path)
+        normalized_input = file_path.strip()
+        if normalized_input.startswith("file:") and not normalized_input.startswith(
+            "file://"
+        ):
+            normalized_input = normalized_input[5:].strip()
+
+        path = Path(normalized_input)
+
+        file_id_candidate = normalized_input
+        if file_id_candidate and len(path.parts) == 1 and "/" not in file_id_candidate:
+            resolved_by_id = self.resolve_file_id(file_id_candidate)
+            if resolved_by_id is not None:
+                return resolved_by_id
 
         if path.is_absolute():
             # For absolute paths, verify it's within workspace or allowed external directories
@@ -272,8 +380,10 @@ class TaskWorkspace:
     def _get_file_info(self, file_path: Path, location: str) -> Dict[str, Any]:
         """Get file information for a given path"""
         stat = file_path.stat()
+        file_id = self.register_file(str(file_path))
 
         return {
+            "file_id": file_id,
             "file_path": str(file_path),
             "relative_path": str(file_path.relative_to(self.workspace_dir)),
             "location": location,

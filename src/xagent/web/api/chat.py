@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -662,6 +664,46 @@ class AgentServiceManager:
                         **agent_kwargs,  # Pass Text2SQL-specific parameters
                     )
 
+                    selected_file_ids: list[str] = []
+                    if task and isinstance(task.agent_config, dict):
+                        raw_selected_file_ids = task.agent_config.get(
+                            "selected_file_ids"
+                        )
+                        if isinstance(raw_selected_file_ids, list):
+                            selected_file_ids = [
+                                str(item)
+                                for item in raw_selected_file_ids
+                                if isinstance(item, str) and item.strip()
+                            ]
+
+                    if selected_file_ids and self._agents[task_id].workspace:
+                        from ..models.uploaded_file import UploadedFile
+
+                        workspace = self._agents[task_id].workspace
+                        for selected_file_id in selected_file_ids:
+                            uploaded_file = (
+                                db.query(UploadedFile)
+                                .filter(
+                                    UploadedFile.file_id == selected_file_id,
+                                    UploadedFile.user_id == int(user.id),
+                                )
+                                .first()
+                            )
+                            if uploaded_file is None:
+                                continue
+
+                            source_path = Path(str(uploaded_file.storage_path))
+                            if not source_path.exists() or not source_path.is_file():
+                                continue
+
+                            target_path = _build_unique_workspace_target(
+                                workspace.input_dir, source_path.name
+                            )
+                            shutil.copy2(source_path, target_path)
+                            workspace.register_file(
+                                str(target_path), file_id=selected_file_id
+                            )
+
                 pattern_info = (
                     f"with DAG pattern and workspace using {llm_info}"
                     if use_dag
@@ -1208,6 +1250,21 @@ def get_agent_manager(request: Any = None) -> AgentServiceManager:
     return _global_agent_manager
 
 
+def _build_unique_workspace_target(base_dir: Path, filename: str) -> Path:
+    candidate = base_dir / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 1
+    while True:
+        next_candidate = base_dir / f"{stem}_{index}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        index += 1
+
+
 @chat_router.post("/task/create", response_model=TaskCreateResponse)
 async def create_task(
     request: TaskCreateRequest,
@@ -1219,10 +1276,10 @@ async def create_task(
         # Build task description with file information
         task_description = request.description or ""
 
+        selected_file_ids: list[str] = []
+
         # Add file information to description if files are specified
         if request.files:
-            from pathlib import Path
-
             from ..models.uploaded_file import UploadedFile
 
             file_info_list = []
@@ -1240,6 +1297,8 @@ async def create_task(
                 if uploaded_file is None:
                     file_info_list.append(f"File ID: {file_id} (File does not exist)")
                     continue
+
+                selected_file_ids.append(str(file_id))
 
                 file_path = Path(str(uploaded_file.storage_path))
                 file_paths.append(str(file_path))
@@ -1321,6 +1380,12 @@ async def create_task(
                 {"input": ex.input, "output": ex.output} for ex in request.examples
             ]
 
+        task_agent_config: Dict[str, Any] = {}
+        if isinstance(request.agent_config, dict):
+            task_agent_config.update(request.agent_config)
+        if selected_file_ids:
+            task_agent_config["selected_file_ids"] = selected_file_ids
+
         # Create task with PENDING status and model configuration
         task = Task(
             user_id=user.id,  # Use authenticated user ID
@@ -1331,7 +1396,7 @@ async def create_task(
             small_fast_model_name=fast_model_name,
             visual_model_name=visual_model_name,
             compact_model_name=compact_model_name,
-            agent_config=request.agent_config,
+            agent_config=task_agent_config or None,
             vibe_mode=request.vibe_mode or "task",
             process_description=request.process_description,
             examples=examples_data,
