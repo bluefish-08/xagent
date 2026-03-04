@@ -506,9 +506,33 @@ class TestWebSocket(unittest.IsolatedAsyncioTestCase):
         print("历史数据流式发送验证: ✅")
         print(f"  发送事件数量: {len(historical_events)}")
         print(f"  WebSocket调用次数: {websocket.send_text.call_count}")
-        print("  事件类型:")
-        for event in historical_events:
-            print(f"    - {event['event_type']}")
+
+    async def test_rewrite_file_links_supports_legacy_preview_paths(self):
+        from xagent.web.api.websocket import _rewrite_file_links_to_file_id
+
+        output_text = (
+            "Legacy link: [report](/preview/web_task_12/output/report.html)\n"
+            "Legacy uploads link: [img](/uploads/user_3/web_task_12/output/a.png)\n"
+            "File link: [doc](file:/preview/web_task_12/output/readme.md)"
+        )
+        path_to_file_id = {
+            "preview/web_task_12/output/report.html": "fid-report",
+            "uploads/user_3/web_task_12/output/a.png": "fid-image",
+            "preview/web_task_12/output/readme.md": "fid-readme",
+        }
+
+        rewritten = _rewrite_file_links_to_file_id(output_text, path_to_file_id)
+
+        self.assertIn("[report](file:fid-report)", rewritten)
+        self.assertIn("[img](file:fid-image)", rewritten)
+        self.assertIn("[doc](file:fid-readme)", rewritten)
+
+    async def test_rewrite_file_links_preserves_non_legacy_urls(self):
+        from xagent.web.api.websocket import _rewrite_file_links_to_file_id
+
+        output_text = "[site](https://example.com) and [local](/not-preview/path)"
+        rewritten = _rewrite_file_links_to_file_id(output_text, {})
+        self.assertEqual(rewritten, output_text)
 
     async def test_websocket_trace_handler_integration(self):
         """测试WebSocket追踪处理器集成"""

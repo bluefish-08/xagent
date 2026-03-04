@@ -275,7 +275,7 @@ class WorkspaceFileOperations:
         content: str,
         encoding: str = "utf-8",
         create_dirs: bool = True,
-    ) -> bool:
+    ) -> Dict[str, Any]:
         """Write file content in workspace"""
         logger.debug(
             "write_file called with file_path: %s, content_length: %d, workspace_id: %s",
@@ -295,8 +295,18 @@ class WorkspaceFileOperations:
         with open(resolved_path, "w", encoding=encoding) as f:
             f.write(content)
 
+        file_id = self.workspace.register_file(str(resolved_path))
+
         logger.debug("Successfully wrote file: %s", resolved_path)
-        return True
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": resolved_path.name,
+            "relative_path": str(
+                resolved_path.relative_to(self.workspace.workspace_dir)
+            ),
+            "file_path": str(resolved_path),
+        }
 
     def append_file(
         self,
@@ -667,7 +677,8 @@ def workspace_write_file(
         True if the write operation was successful.
     """
     ops = _get_workspace_ops(workspace_id)
-    return ops.write_file(file_path, content, encoding, create_dirs)
+    result = ops.write_file(file_path, content, encoding, create_dirs)
+    return bool(result.get("success", False))
 
 
 def workspace_list_files(

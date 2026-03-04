@@ -7,12 +7,26 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
+from urllib.parse import unquote
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from ..auth_dependencies import get_user_from_websocket_token
+from ..config import UPLOADS_DIR
+from ..models.database import get_db
+from ..models.task import Task
+from ..models.uploaded_file import UploadedFile
 from ..models.user import User
 from ..timeout_manager import timeout_manager
 from ..tools.config import WebToolConfig
@@ -129,10 +143,6 @@ def _build_output_file_id(relative_path: str) -> str:
 
 
 def _resolve_output_storage_path(raw_path: str) -> Optional[tuple[Any, str]]:
-    from pathlib import Path
-
-    from ..config import UPLOADS_DIR
-
     if not raw_path:
         return None
 
@@ -153,6 +163,130 @@ def _resolve_output_storage_path(raw_path: str) -> Optional[tuple[Any, str]]:
     return resolved, relative_path
 
 
+def _resolve_legacy_preview_storage_path(raw_path: str) -> Optional[tuple[Path, str]]:
+    candidates: list[str] = []
+
+    def _append_candidate(value: str) -> None:
+        normalized = value.strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    _append_candidate(raw_path)
+    _append_candidate(unquote(raw_path))
+
+    current = list(candidates)
+    for candidate in current:
+        for prefix in ("file:", "/preview/", "preview/", "/uploads/", "uploads/"):
+            if candidate.startswith(prefix):
+                _append_candidate(candidate[len(prefix) :])
+
+    for candidate in candidates:
+        resolved = _resolve_output_storage_path(candidate)
+        if resolved is not None:
+            resolved_path, relative_path = resolved
+            return Path(resolved_path), relative_path
+
+    for candidate in candidates:
+        normalized = candidate.lstrip("/")
+        if not normalized:
+            continue
+        glob_matches = list(UPLOADS_DIR.glob(f"user_*/{normalized}"))
+        if glob_matches:
+            resolved_path = glob_matches[0].resolve()
+            relative_path = str(resolved_path.relative_to(UPLOADS_DIR.resolve()))
+            return resolved_path, relative_path
+
+    return None
+
+
+def _infer_owner_from_relative_path(
+    db: Session, relative_path: str
+) -> Optional[tuple[int, Optional[int]]]:
+    path_parts = Path(relative_path).parts
+    if not path_parts:
+        return None
+
+    user_id: Optional[int] = None
+    task_id: Optional[int] = None
+
+    first = path_parts[0]
+    remaining = path_parts[1:] if len(path_parts) > 1 else []
+
+    if first.startswith("user_"):
+        try:
+            user_id = int(first.replace("user_", "", 1))
+        except ValueError:
+            return None
+        if remaining:
+            task_segment = remaining[0]
+            if task_segment.startswith("web_task_"):
+                try:
+                    task_id = int(task_segment.replace("web_task_", "", 1))
+                except ValueError:
+                    task_id = None
+            elif task_segment.startswith("task_"):
+                try:
+                    task_id = int(task_segment.replace("task_", "", 1))
+                except ValueError:
+                    task_id = None
+        return user_id, task_id
+
+    if first.startswith("web_task_"):
+        try:
+            task_id = int(first.replace("web_task_", "", 1))
+        except ValueError:
+            return None
+    elif first.startswith("task_"):
+        try:
+            task_id = int(first.replace("task_", "", 1))
+        except ValueError:
+            return None
+
+    if task_id is not None:
+        task_row = db.query(Task).filter(Task.id == task_id).first()
+        if task_row and getattr(task_row, "user_id", None) is not None:
+            return int(getattr(task_row, "user_id")), task_id
+
+    return None
+
+
+def _map_link_token_to_file_id(
+    token: str, path_to_file_id: Dict[str, str]
+) -> Optional[str]:
+    raw = token.strip()
+    if not raw:
+        return None
+
+    direct_candidates = [
+        raw,
+        raw.lstrip("/"),
+        raw.replace("%2F", "/").lstrip("/"),
+        unquote(raw),
+    ]
+
+    expanded_candidates: list[str] = []
+    for candidate in direct_candidates:
+        if not candidate:
+            continue
+        if candidate not in expanded_candidates:
+            expanded_candidates.append(candidate)
+        if candidate.startswith("file:"):
+            stripped = candidate[5:].lstrip("/")
+            if stripped and stripped not in expanded_candidates:
+                expanded_candidates.append(stripped)
+        for prefix in ("preview/", "/preview/", "uploads/", "/uploads/"):
+            if candidate.startswith(prefix):
+                stripped = candidate[len(prefix) :].lstrip("/")
+                if stripped and stripped not in expanded_candidates:
+                    expanded_candidates.append(stripped)
+
+    for candidate in expanded_candidates:
+        mapped = path_to_file_id.get(candidate)
+        if mapped:
+            return mapped
+    return None
+
+
 def _rewrite_file_links_to_file_id(
     output_text: Any, path_to_file_id: Dict[str, str]
 ) -> Any:
@@ -161,18 +295,25 @@ def _rewrite_file_links_to_file_id(
 
     def replace_link(match: re.Match[str]) -> str:
         token = match.group(1).strip()
-        candidates = [
-            token,
-            token.lstrip("/"),
-            token.replace("%2F", "/").lstrip("/"),
-        ]
-        for candidate in candidates:
-            mapped_file_id = path_to_file_id.get(candidate)
-            if mapped_file_id:
-                return f"(file:{mapped_file_id})"
+        mapped_file_id = _map_link_token_to_file_id(token, path_to_file_id)
+        if mapped_file_id:
+            return f"(file:{mapped_file_id})"
         return match.group(0)
 
-    return re.sub(r"\(file:([^)]+)\)", replace_link, output_text)
+    def replace_legacy_link(match: re.Match[str]) -> str:
+        token = match.group(1).strip()
+        mapped_file_id = _map_link_token_to_file_id(token, path_to_file_id)
+        if mapped_file_id:
+            return f"(file:{mapped_file_id})"
+        return match.group(0)
+
+    rewritten_output = re.sub(r"\(file:([^)]+)\)", replace_link, output_text)
+    rewritten_output = re.sub(
+        r"\(((?:/?preview|/?uploads)/[^)\s]+)\)",
+        replace_legacy_link,
+        rewritten_output,
+    )
+    return rewritten_output
 
 
 def _normalize_file_outputs(
@@ -279,6 +420,22 @@ def _normalize_file_outputs(
                 path_to_file_id[stripped.lstrip("/")] = final_file_id
         path_to_file_id[normalized_relative_path] = final_file_id
         path_to_file_id[f"/{normalized_relative_path}"] = final_file_id
+
+        path_to_file_id[f"preview/{normalized_relative_path}"] = final_file_id
+        path_to_file_id[f"/preview/{normalized_relative_path}"] = final_file_id
+        path_to_file_id[f"uploads/{normalized_relative_path}"] = final_file_id
+        path_to_file_id[f"/uploads/{normalized_relative_path}"] = final_file_id
+
+        normalized_parts = Path(normalized_relative_path).parts
+        if normalized_parts and normalized_parts[0].startswith("user_"):
+            without_user = "/".join(normalized_parts[1:])
+            if without_user:
+                path_to_file_id[without_user] = final_file_id
+                path_to_file_id[f"/{without_user}"] = final_file_id
+                path_to_file_id[f"preview/{without_user}"] = final_file_id
+                path_to_file_id[f"/preview/{without_user}"] = final_file_id
+                path_to_file_id[f"uploads/{without_user}"] = final_file_id
+                path_to_file_id[f"/uploads/{without_user}"] = final_file_id
 
     if changed:
         db.commit()
@@ -638,6 +795,49 @@ background_task_manager = BackgroundTaskManager()
 ws_router = APIRouter()
 
 
+@ws_router.get("/preview/{legacy_path:path}", response_model=None)
+async def redirect_legacy_preview(
+    legacy_path: str,
+    db: Session = Depends(get_db),
+) -> Any:
+    resolved_info = _resolve_legacy_preview_storage_path(legacy_path)
+    if resolved_info is None:
+        raise HTTPException(status_code=404, detail="Legacy preview target not found")
+
+    resolved_path, relative_path = resolved_info
+    file_record = (
+        db.query(UploadedFile)
+        .filter(UploadedFile.storage_path == str(resolved_path))
+        .first()
+    )
+
+    if file_record is None:
+        owner_info = _infer_owner_from_relative_path(db, relative_path)
+        if owner_info is None:
+            raise HTTPException(
+                status_code=404, detail="Cannot infer owner for legacy preview path"
+            )
+
+        owner_user_id, task_id = owner_info
+        file_record = UploadedFile(
+            file_id=_build_output_file_id(relative_path),
+            user_id=owner_user_id,
+            task_id=task_id,
+            filename=resolved_path.name,
+            storage_path=str(resolved_path),
+            mime_type=None,
+            file_size=int(resolved_path.stat().st_size),
+        )
+        db.add(file_record)
+        db.commit()
+        db.refresh(file_record)
+
+    return RedirectResponse(
+        url=f"/api/files/public/preview/{file_record.file_id}",
+        status_code=307,
+    )
+
+
 # Connection manager
 class ConnectionManager:
     def __init__(self) -> None:
@@ -790,6 +990,11 @@ async def handle_file_upload_for_task(
                 )
                 db.add(file_record)
                 db.flush()
+
+                if agent_service.workspace:
+                    agent_service.workspace.register_file(
+                        str(target_path), file_id=str(file_record.file_id)
+                    )
 
                 # Build file info using normalized filename
                 file_info_list.append(
@@ -2387,6 +2592,11 @@ async def handle_build_preview_execution(
                         )
                         db.add(file_record)
                         db.flush()
+
+                        if agent_service.workspace:
+                            agent_service.workspace.register_file(
+                                str(target_path), file_id=str(file_record.file_id)
+                            )
 
                         file_info_list.append(
                             {

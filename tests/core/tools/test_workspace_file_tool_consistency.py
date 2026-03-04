@@ -23,7 +23,8 @@ class TestWorkspaceFileToolConsistency:
 
         # Write file
         write_result = tools.write_file(test_filename, test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file exists in output directory
         output_file = workspace.output_dir / test_filename
@@ -44,7 +45,8 @@ class TestWorkspaceFileToolConsistency:
 
         # Write file with relative path
         write_result = tools.write_file(test_filename, test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file exists
         output_file = workspace.output_dir / "subdir" / "test_file.txt"
@@ -65,7 +67,8 @@ class TestWorkspaceFileToolConsistency:
 
         # Write to output directory (default for write_file)
         write_result = tools.write_file(test_filename, test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Read from output directory (should be default for read_file too)
         read_content = tools.read_file(test_filename)
@@ -96,7 +99,8 @@ class TestWorkspaceFileToolConsistency:
         # Write with output/ prefix - should go to workspace/output/banner.html
         # NOT workspace/output/output/banner.html
         write_result = tools.write_file("output/banner.html", test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file is in workspace/output/banner.html
         expected_file = workspace.output_dir / "banner.html"
@@ -120,7 +124,8 @@ class TestWorkspaceFileToolConsistency:
 
         # Write with input/ prefix
         write_result = tools.write_file("input/data.txt", test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file is in workspace/input/data.txt
         expected_file = workspace.input_dir / "data.txt"
@@ -136,12 +141,34 @@ class TestWorkspaceFileToolConsistency:
 
         # Write with temp/ prefix
         write_result = tools.write_file("temp/cache.txt", test_content)
-        assert write_result is True
+        assert write_result["success"] is True
+        assert isinstance(write_result.get("file_id"), str)
 
-        # Verify file is in workspace/temp/cache.txt
         expected_file = workspace.temp_dir / "cache.txt"
         assert expected_file.exists()
         assert expected_file.read_text() == test_content
+
+    def test_read_by_file_id(self, tmp_path):
+        workspace = TaskWorkspace("test_task", str(tmp_path))
+        tools = WorkspaceFileTools(workspace)
+
+        test_content = "Read by file_id"
+        result = tools.write_file("output/read_by_id.txt", test_content)
+        file_id = result["file_id"]
+
+        read_content = tools.read_file(file_id)
+        assert read_content == test_content
+
+    def test_read_by_file_link_prefix(self, tmp_path):
+        workspace = TaskWorkspace("test_task", str(tmp_path))
+        tools = WorkspaceFileTools(workspace)
+
+        test_content = "Read by file:file_id"
+        result = tools.write_file("output/read_by_link_id.txt", test_content)
+        file_id = result["file_id"]
+
+        read_content = tools.read_file(f"file:{file_id}")
+        assert read_content == test_content
 
 
 if __name__ == "__main__":

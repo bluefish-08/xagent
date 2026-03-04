@@ -40,8 +40,16 @@ class TestDAGFileOutputs:
         filenames = [f.get("filename", "") for f in file_outputs]
         assert "result.txt" in filenames
         assert "data.json" in filenames
+        assert all(
+            isinstance(f.get("file_id"), str) and f.get("file_id") for f in file_outputs
+        )
         file_paths = [f.get("file_path", "") for f in file_outputs]
         assert any(str(workspace.output_dir) in path for path in file_paths)
+
+        second_pass = dag_pattern._extract_file_outputs()
+        by_name = {f["filename"]: f.get("file_id") for f in file_outputs}
+        second_by_name = {f["filename"]: f.get("file_id") for f in second_pass}
+        assert by_name == second_by_name
 
     def test_extract_file_outputs_without_workspace(self, tmp_path):
         """Test that file outputs fallback to execution results when no workspace."""

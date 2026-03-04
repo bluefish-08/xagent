@@ -83,7 +83,7 @@ Available models (⭐[DEFAULT] marks the configured default model):
 **IMPORTANT: Prefer the default model marked with ⭐[DEFAULT]. Only specify model_id if the user explicitly requests a different model.**
 
 Parameters:
-- image_url (required): single image path/URL or a list of image paths/URLs for multi-image editing
+- image_url (required): single image path/URL/file_id (supports both `file_id` and `file:file_id`) or a list of image paths/URLs/file_ids for multi-image editing
 - prompt (required): description of the desired edits and changes
 - negative_prompt (optional): undesired elements in the result
 - model_id (optional): model name from the list above. Omit to use the default model marked with ⭐[DEFAULT].
@@ -248,6 +248,9 @@ Images are automatically saved to workspace.
         Returns:
             str: Resolved image path/URL suitable for the image model
         """
+        if image_input.startswith("file:") and not image_input.startswith("file://"):
+            image_input = image_input[5:].strip()
+
         # Check if it's a URL (http/https)
         if image_input.startswith(("http://", "https://")):
             return image_input
@@ -446,11 +449,14 @@ Images are automatically saved to workspace.
 
             image_url = result.get("image_url")
             image_path = None
+            image_file_id: Optional[str] = None
 
             # Download image to workspace if workspace is available
             if image_url and self._workspace:
                 try:
                     image_path = await self._download_image(image_url)
+                    if image_path:
+                        image_file_id = self._workspace.register_file(image_path)
                 except Exception as e:
                     logger.warning(f"Failed to download image to workspace: {e}")
                     # Continue execution even if download fails
@@ -461,6 +467,7 @@ Images are automatically saved to workspace.
                 "success": True,
                 "image_url": image_url,
                 "image_path": image_path,
+                "file_id": image_file_id,
                 "usage": result.get("usage", {}),
                 "task_metric": result.get("task_metric", {}),
                 "request_id": result.get("request_id"),
@@ -535,6 +542,7 @@ Images are automatically saved to workspace.
 
             edited_image_url = result.get("image_url")
             image_path = None
+            image_file_id: Optional[str] = None
 
             # Download image to workspace if workspace is available
             if edited_image_url and self._workspace:
@@ -542,6 +550,8 @@ Images are automatically saved to workspace.
                     # Use a different filename pattern for edited images
                     filename = f"edited_image_{uuid.uuid4().hex[:8]}.png"
                     image_path = await self._download_image(edited_image_url, filename)
+                    if image_path:
+                        image_file_id = self._workspace.register_file(image_path)
                 except Exception as e:
                     logger.warning(f"Failed to download edited image to workspace: {e}")
                     # Continue execution even if download fails
@@ -552,6 +562,7 @@ Images are automatically saved to workspace.
                 "success": True,
                 "image_url": edited_image_url,
                 "image_path": image_path,
+                "file_id": image_file_id,
                 "usage": result.get("usage", {}),
                 "task_metric": result.get("task_metric", {}),
                 "request_id": result.get("request_id"),
