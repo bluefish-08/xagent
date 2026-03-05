@@ -79,7 +79,9 @@ class TestDAGComprehensive:
         # Step3 writes a file
         test_content = "Test content"
         write_result = step3_write.func("test.txt", test_content)
-        assert write_result is True
+        assert isinstance(write_result, dict)
+        assert write_result.get("success") is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file exists
         output_file = workspace.output_dir / "test.txt"
@@ -165,7 +167,9 @@ class TestDAGComprehensive:
 
         # Write the file (like step 3 in the DAG)
         write_result = write_tool.func("gradient_hello.html", html_content)
-        assert write_result is True
+        assert isinstance(write_result, dict)
+        assert write_result.get("success") is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file exists immediately after write
         output_file = workspace.output_dir / "gradient_hello.html"
@@ -195,7 +199,9 @@ class TestDAGComprehensive:
         # First agent writes
         content = "Test content"
         write_result = write_tool.func("test.txt", content)
-        assert write_result is True
+        assert isinstance(write_result, dict)
+        assert write_result.get("success") is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Second agent reads
         read_content = read_tool.func("test.txt")
@@ -245,7 +251,9 @@ class TestDAGComprehensive:
         write_result, read_result = await asyncio.gather(write_task(), read_task())
 
         # Write should succeed
-        assert write_result is True
+        assert isinstance(write_result, dict)
+        assert write_result.get("success") is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Read might fail if there's a race condition
         # But eventually the file should be readable
@@ -281,7 +289,9 @@ class TestDAGComprehensive:
         for delay in [0, 0.001, 0.01, 0.1]:
             # Write file
             write_result = write_tool.func(test_filename, test_content)
-            assert write_result is True
+            assert isinstance(write_result, dict)
+            assert write_result.get("success") is True
+            assert isinstance(write_result.get("file_id"), str)
 
             # Add delay
             if delay > 0:

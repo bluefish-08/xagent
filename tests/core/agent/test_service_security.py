@@ -136,7 +136,9 @@ class TestAgentServiceSecurity:
         # Test writing to a file within workspace
         test_content = "Hello, workspace!"
         result = write_tool.func("test.txt", test_content)
-        assert result is True
+        assert isinstance(result, dict)
+        assert result.get("success") is True
+        assert isinstance(result.get("file_id"), str)
 
         # Verify file was created in workspace
         test_file_path = service.workspace.output_dir / "test.txt"
