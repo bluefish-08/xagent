@@ -96,7 +96,9 @@ class TestAgentServiceWorkspaceIntegration:
 
         # Write file
         write_result = write_tool.func("test_direct.html", test_content)
-        assert write_result is True
+        assert isinstance(write_result, dict)
+        assert write_result.get("success") is True
+        assert isinstance(write_result.get("file_id"), str)
 
         # Verify file exists
         output_file = service.workspace.output_dir / "test_direct.html"
