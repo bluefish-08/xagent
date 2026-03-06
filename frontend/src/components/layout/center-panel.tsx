@@ -654,7 +654,7 @@ function CenterPanelInner({
               {getPhaseBadge(displayPhase)}
             </div>
             <div className="text-xs text-muted-foreground">
-              {t("agent.layout.center.labels.updatedAt")}: {formatDagExecutionTime(dagExecution.updated_at)}
+              {t("agent.layout.center.labels.updatedAt")}{formatDagExecutionTime(dagExecution.updated_at)}
             </div>
           </div>
         )}

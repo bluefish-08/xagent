@@ -17,6 +17,7 @@ const en = {
     planning: "Formulating Plan",
     taskPaused: "Task Paused",
     noData: "No Data",
+    refresh: "Refresh",
     errors: {
       unknown: "Unknown error",
     },
@@ -609,9 +610,14 @@ Build when you need.`
     },
   },
   files: {
+    fileTooLarge: "File is too large (max 100MB)",
     header: {
       title: "File Management",
       description: "Manage project files: upload, preview, download, and delete.",
+    },
+    tabs: {
+      input: "Input",
+      output: "Output",
     },
     search: {
       placeholder: "Search files...",
@@ -1537,6 +1543,7 @@ Build when you need.`
         inputPlaceholder: "Type your message...",
         loading: "Loading agent...",
         notFound: "Agent not found",
+        notFoundDescription: "This agent does not exist or may have been deleted. You can create a new one to get started.",
         failed: "Failed to load agent",
         taskCreated: "Task created. Implementing WebSocket connection...",
         error: "Error: {message}",
@@ -1667,6 +1674,20 @@ Build when you need.`
           ppt: "PowerPoint",
           office: "Office Tools",
           specialImage: "Image Tools",
+          agent: "Agent Invocation",
+        },
+        categoryDescriptions: {
+          basic: "System basic capabilities, including core functions like mathematical calculations and date/time retrieval.",
+          file: "File system operations, supporting reading, writing, searching, listing, and managing files.",
+          vision: "Computer vision capabilities, supporting image recognition, analysis, and content extraction.",
+          image: "Image generation and processing, supporting text-to-image, image editing, and other creative functions.",
+          knowledge: "Knowledge base retrieval and management, supporting semantic search and citation of document content.",
+          mcp: "Model Context Protocol extensions, connecting external services and data sources.",
+          browser: "Web browsing and automation, supporting web content scraping and interactive operations.",
+          ppt: "Presentation creation, supporting slide generation, editing, and formatting.",
+          office: "Office document processing, supporting operations for common formats like Word and Excel.",
+          specialImage: "Advanced image processing, providing professional image analysis and conversion tools.",
+          agent: "Multi-agent collaboration, supporting invocation of other Agents to complete complex tasks.",
         },
       },
       suggestedPrompts: {
@@ -1770,8 +1791,8 @@ Build when you need.`
           hint: "Primarily used for complex tasks. Defaults to the default model set on the Models page",
         },
         smallFast: {
-          label: "Small/Fast Model (Optional)",
-          placeholder: "Select small/fast model...",
+          label: "Fast Model (Optional)",
+          placeholder: "Select fast model...",
           hint: "Optional configuration for simple tasks to get faster responses",
           options: {
             noneLabel: "Do not use fast model",

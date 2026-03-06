@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Send, Paperclip, X, File as FileIcon, Sparkles, Pause, Play } from "lucide-react";
+import { Send, Paperclip, X, File as FileIcon, Sparkles, Pause, Play, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn, getApiUrl } from "@/lib/utils";
 import { useI18n } from "@/contexts/i18n-context";
 import { ConfigDialog } from "@/components/config-dialog";
 import { apiRequest } from "@/lib/api-wrapper";
+import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,6 +18,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+
+interface FileItem {
+  filename: string;
+  file_size: number;
+  modified_time: number;
+  file_type?: string;
+  workspace_id?: string;
+  relative_path?: string;
+}
 
 interface ChatInputProps {
   onSend: (message: string, config?: any) => void | Promise<void>;
@@ -60,20 +70,166 @@ export function ChatInput({
   const [isFocused, setIsFocused] = useState(false);
   const [showNoModelAlert, setShowNoModelAlert] = useState(false);
 
+  // File picker state
+  const [showFilePicker, setShowFilePicker] = useState(false);
+  const [fileList, setFileList] = useState<FileItem[]>([]);
+  const [filteredFiles, setFilteredFiles] = useState<FileItem[]>([]);
+  const [selectedFileIndex, setSelectedFileIndex] = useState(0);
+  const [triggerIndex, setTriggerIndex] = useState<number>(-1);
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+  const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
+
+  // Track files for async operations
+  const filesRef = useRef(files);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
   // Determine if controlled or uncontrolled
   const isControlled = inputValue !== undefined;
   const message = isControlled ? inputValue : internalMessage;
 
   const handleMessageChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
+    const cursor = e.target.selectionStart;
+
     if (isControlled) {
       onInputChange?.(newValue);
     } else {
       setInternalMessage(newValue);
     }
+
+    checkTrigger(newValue, cursor);
   };
 
+  const fetchFiles = async () => {
+    if (fileList.length > 0) return;
+    setIsLoadingFiles(true);
+    try {
+      const response = await apiRequest(`${getApiUrl()}/api/files/list`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.files) {
+          setFileList(data.files);
+        }
+      }
+    } catch (error) {
+      console.error(t("files.previewDialog.errors.loadFailed"), error);
+      toast.error(t("files.previewDialog.errors.loadFailed"));
+    } finally {
+      setIsLoadingFiles(false);
+    }
+  };
+
+  const checkTrigger = (text: string, cursor: number) => {
+    const textBeforeCursor = text.slice(0, cursor);
+    const lastHashIndex = textBeforeCursor.lastIndexOf("#");
+
+    if (lastHashIndex !== -1) {
+      // Allow trigger anywhere
+      const query = textBeforeCursor.slice(lastHashIndex + 1);
+      if (!query.includes(" ") && !query.includes("\n")) {
+        setTriggerIndex(lastHashIndex);
+        setShowFilePicker(true);
+        fetchFiles();
+
+        // Filter files
+        const lowerQuery = query.toLowerCase();
+        const filtered = fileList.filter(f =>
+          (f.filename.toLowerCase().includes(lowerQuery) ||
+           (f.relative_path && f.relative_path.toLowerCase().includes(lowerQuery)))
+        );
+        setFilteredFiles(filtered);
+        setSelectedFileIndex(0);
+        return;
+      }
+    }
+    setShowFilePicker(false);
+    setTriggerIndex(-1);
+  };
+
+  // Update filtered files when fileList changes (e.g. after fetch)
+  useEffect(() => {
+    if (showFilePicker && fileList.length > 0 && triggerIndex !== -1) {
+       if (message.length > triggerIndex) {
+         const query = message.slice(triggerIndex + 1).split(/[\s\n]/)[0];
+         const lowerQuery = query.toLowerCase();
+         const filtered = fileList.filter(f =>
+            (f.filename.toLowerCase().includes(lowerQuery) ||
+             (f.relative_path && f.relative_path.toLowerCase().includes(lowerQuery)))
+          );
+          setFilteredFiles(filtered);
+       }
+    }
+  }, [fileList, showFilePicker, triggerIndex, message]);
+
+  const insertFile = async (file: FileItem) => {
+    const fileId = file.relative_path || file.filename;
+    if (downloadingFile) return;
+
+    setDownloadingFile(fileId);
+
+    try {
+      const filePath = file.relative_path || file.filename;
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(filePath)}`);
+
+      if (response.ok) {
+        const blob = await response.blob();
+
+        const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+        if (blob.size > MAX_FILE_SIZE) {
+          toast.error(t("files.fileTooLarge"));
+          return;
+        }
+
+        const newFile = new File([blob], file.filename, {
+          type: file.file_type || blob.type || 'application/octet-stream',
+          lastModified: file.modified_time * 1000
+        });
+
+        if (onFilesChange) {
+          // Use ref to get latest files to avoid stale closure
+          onFilesChange([...filesRef.current, newFile]);
+        }
+
+        // Success: Remove query from text and close picker
+        const currentText = textareaRef.current?.value || (isControlled ? inputValue || "" : internalMessage);
+
+        if (triggerIndex !== -1) {
+            let endIndex = currentText.indexOf(" ", triggerIndex);
+            if (endIndex === -1) endIndex = currentText.indexOf("\n", triggerIndex);
+            if (endIndex === -1) endIndex = currentText.length;
+
+            const prefix = currentText.slice(0, triggerIndex);
+            const suffix = currentText.slice(endIndex);
+            const newText = prefix + suffix;
+
+            if (isControlled) {
+                onInputChange?.(newText);
+            } else {
+                setInternalMessage(newText);
+            }
+        }
+
+        setShowFilePicker(false);
+        setTriggerIndex(-1);
+      } else {
+        console.error("Failed to download file:", response.statusText);
+        toast.error(t("files.downloadFailed") || "Failed to download file");
+      }
+    } catch (error) {
+      console.error("Error fetching file:", error);
+      toast.error(t("files.downloadFailed") || "Failed to download file");
+    } finally {
+      setDownloadingFile(null);
+      // Restore focus
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  };
+
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isSubmittingRef = useRef(false);
   const { t } = useI18n();
   const [agentConfig, setAgentConfig] = useState<{
@@ -83,13 +239,28 @@ export function ChatInput({
     compactModel?: string;
     memorySimilarityThreshold?: number;
   }>({ model: "", memorySimilarityThreshold: 1.5 });
+  const [models, setModels] = useState<any[]>([]);
 
   // Fetch default models on mount
   useEffect(() => {
     const fetchDefaultModels = async () => {
       try {
         const apiUrl = getApiUrl();
-        // Fetch user default models first
+
+        // Fetch all models first to have the list for display names
+        const modelsResponse = await apiRequest(`${apiUrl}/api/models/?category=llm`, {
+            headers: {}
+        });
+
+        let allModels: any[] = [];
+        if (modelsResponse.ok) {
+            allModels = await modelsResponse.json();
+            if (Array.isArray(allModels)) {
+                setModels(allModels);
+            }
+        }
+
+        // Fetch user default models
         const defaultResponse = await apiRequest(`${apiUrl}/api/models/user-default`, {
           headers: {}
         });
@@ -106,20 +277,12 @@ export function ChatInput({
           }
         }
 
-        // Fetch all models to find default if no user preference
-        if (!defaultModels.general) {
-          const modelsResponse = await apiRequest(`${apiUrl}/api/models/?category=llm`, {
-            headers: {}
-          });
-          if (modelsResponse.ok) {
-            const data = await modelsResponse.json();
-            if (Array.isArray(data) && data.length > 0) {
-              const defaultModel = data.find((m: any) => m.is_default) || data[0];
-              if (defaultModel) {
-                defaultModels.general = { model_id: defaultModel.model_id };
-              }
+        // Find default if no user preference
+        if (!defaultModels.general && allModels.length > 0) {
+            const defaultModel = allModels.find((m: any) => m.is_default) || allModels[0];
+            if (defaultModel) {
+            defaultModels.general = { model_id: defaultModel.model_id };
             }
-          }
         }
 
         setAgentConfig(prev => ({
@@ -200,6 +363,31 @@ export function ChatInput({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (showFilePicker) {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedFileIndex(prev => Math.max(0, prev - 1));
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedFileIndex(prev => Math.min(filteredFiles.length - 1, prev + 1));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        if (filteredFiles.length > 0) {
+          insertFile(filteredFiles[selectedFileIndex]);
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowFilePicker(false);
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       // Prevent triggering submit when using IME (e.g., Chinese input method)
       if (e.nativeEvent.isComposing) {
@@ -218,19 +406,25 @@ export function ChatInput({
       e.preventDefault();
       const pastedFiles: File[] = [];
 
-      fileItems.forEach(item => {
+      fileItems.forEach((item, index) => {
         const file = item.getAsFile();
         if (file) {
           const hasName = typeof (file as any).name === 'string' && (file as any).name.length > 0;
-          if (hasName) {
+          // Handle default "image.png" name which causes conflicts when pasting multiple images
+          if (hasName && file.name !== 'image.png') {
             pastedFiles.push(file);
           } else {
             const timestamp = Date.now();
             const mime = item.type || file.type || 'application/octet-stream';
             const ext = mime.split('/')[1] || 'bin';
-            const namedFile = new File([file], `pasted-file-${timestamp}.${ext}`, {
+            // If it was image.png, preserve extension but make unique. Otherwise default to pasted-file
+            const baseName = file.name === 'image.png'
+              ? `image-${timestamp}-${index}`
+              : `pasted-file-${timestamp}-${index}`;
+
+            const namedFile = new File([file], `${baseName}.${ext}`, {
               type: mime,
-              lastModified: Date.now(),
+              lastModified: timestamp,
             });
             pastedFiles.push(namedFile);
           }
@@ -291,8 +485,49 @@ export function ChatInput({
       )}
 
       {/* Input area */}
-      <form
-        onSubmit={handleSubmit}
+      <div className="relative">
+        {showFilePicker && (
+          <div className="absolute bottom-full left-0 mb-2 w-full max-w-sm rounded-lg border bg-popover shadow-md z-50 overflow-hidden">
+            {isLoadingFiles ? (
+              <div className="p-4 flex items-center justify-center text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                {t("common.loading")}
+              </div>
+            ) : filteredFiles.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground text-center">
+                {t("files.table.empty.noMatch")}
+              </div>
+            ) : (
+              <div className="max-h-[200px] overflow-y-auto p-1">
+                {filteredFiles.map((file, index) => (
+                  <div
+                    key={index}
+                    className={cn(
+                      "flex items-center gap-2 px-3 py-2 text-sm rounded-md cursor-pointer transition-colors overflow-scroll",
+                      index === selectedFileIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted",
+                      downloadingFile === (file.relative_path || file.filename) && "opacity-70"
+                    )}
+                    onClick={() => insertFile(file)}
+                  >
+                    {downloadingFile === (file.relative_path || file.filename) ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+                    ) : (
+                      <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    )}
+                    <div className="flex flex-col items-start">
+                      <span className="truncate font-medium">{file.filename}</span>
+                      {file.relative_path && file.relative_path !== file.filename && (
+                        <span className="truncate text-xs text-muted-foreground">{file.relative_path}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <form
+          onSubmit={handleSubmit}
         className={cn(
           "relative rounded-2xl bg-card overflow-hidden transition-all duration-300 border-2 shadow-lg",
           isFocused
@@ -306,7 +541,14 @@ export function ChatInput({
         />
 
         <Textarea
+          ref={textareaRef}
           value={message}
+          onClick={() => {
+            if (showFilePicker) {
+              setShowFilePicker(false);
+              setTriggerIndex(-1);
+            }
+          }}
           onChange={handleMessageChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
@@ -314,7 +556,7 @@ export function ChatInput({
           onBlur={() => setIsFocused(false)}
           placeholder={t("chatPage.input.placeholder")}
           className="min-h-[130px] max-h-[300px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 pb-14 text-[15px] placeholder:text-muted-foreground/60"
-          disabled={isLoading}
+          disabled={isLoading || !!downloadingFile}
         />
 
         {/* Bottom toolbar */}
@@ -330,10 +572,10 @@ export function ChatInput({
                     size="sm"
                     className="h-9 px-3 text-muted-foreground rounded-xl gap-2 cursor-default"
                     disabled={true}
-                    title={agentConfig.model || t("chatPage.input.noModel")}
+                    title={models.find(m => m.model_id === agentConfig.model)?.model_name || agentConfig.model || t("chatPage.input.noModel")}
                   >
                     <span className="text-xs font-normal max-w-[150px] truncate hidden sm:inline-block">
-                      {agentConfig.model || t("chatPage.input.noModel")}
+                      {models.find(m => m.model_id === agentConfig.model)?.model_name || agentConfig.model || t("chatPage.input.noModel")}
                     </span>
                   </Button>
                 ) : (
@@ -350,7 +592,7 @@ export function ChatInput({
                         title={t('agent.input.actions.config')}
                       >
                         <span className="text-xs font-normal max-w-[150px] truncate hidden sm:inline-block">
-                          {agentConfig.model || t("chatPage.input.noModel")}
+                          {models.find(m => m.model_id === agentConfig.model)?.model_name || agentConfig.model || t("chatPage.input.noModel")}
                         </span>
                       </Button>
                     }
@@ -430,6 +672,7 @@ export function ChatInput({
           </div>
         </div>
       </form>
+      </div>
 
       <AlertDialog open={showNoModelAlert} onOpenChange={setShowNoModelAlert}>
         <AlertDialogContent>

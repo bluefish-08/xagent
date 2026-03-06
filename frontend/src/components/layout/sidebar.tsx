@@ -232,16 +232,13 @@ export function Sidebar({ isCollapsible = false, className }: SidebarProps) {
 
   // Get currently selected task ID (parsed from path, supports /task/[id] format)
   const getCurrentTaskId = useCallback(() => {
-    if (typeof window !== 'undefined') {
-      const pathname = window.location.pathname;
-      // Match /task/[number] pattern
-      const match = pathname.match(/^\/task\/(\d+)$/);
-      if (match) {
-        return match[1];
-      }
+    // Match /task/[number] pattern
+    const match = pathname.match(/^\/task\/(\d+)\/?$/);
+    if (match) {
+      return match[1];
     }
     return null;
-  }, [])
+  }, [pathname])
 
   const [tasks, setTasks] = useState<Task[]>([])
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
@@ -522,8 +519,8 @@ export function Sidebar({ isCollapsible = false, className }: SidebarProps) {
                         title={task.title}
                         className={cn(
                           "group flex items-center px-4 py-2 text-sm font-medium transition-colors mb-1 truncate relative pr-8",
-                          currentTaskId === task.task_id
-                            ? "bg-gradient-to-r from-[hsl(var(--sidebar-active-bg-from))] to-[hsl(var(--sidebar-active-bg-to))] text-[hsl(var(--sidebar-active-text))] font-semibold before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-[100%] before:w-1 before:bg-[hsl(var(--sidebar-active-border))] before:rounded-r-full"
+                          String(currentTaskId) === String(task.task_id)
+                            ? "bg-accent/80 text-accent-foreground font-medium"
                             : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                         )}
                       >
@@ -537,7 +534,7 @@ export function Sidebar({ isCollapsible = false, className }: SidebarProps) {
                           ) : (
                             <MessageSquare className={cn(
                               "h-4 w-4 absolute inset-0 transition-opacity duration-200 group-hover:opacity-0",
-                              currentTaskId === task.task_id ? "text-[hsl(var(--sidebar-active-text))]" : "text-gray-500"
+                              String(currentTaskId) === String(task.task_id) ? "text-accent-foreground" : "text-gray-500"
                             )} />
                           )}
                           <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center">

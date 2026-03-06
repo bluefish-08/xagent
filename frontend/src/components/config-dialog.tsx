@@ -1,11 +1,12 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
-import { Settings, X, Loader2 } from "lucide-react"
+import { Settings, X, Loader2, Info, ArrowRight } from "lucide-react"
 import { cn, getApiUrl, getAuthHeaders } from "@/lib/utils"
 import { apiRequest } from "@/lib/api-wrapper"
 import { useAuth } from "@/contexts/auth-context"
@@ -13,6 +14,12 @@ import { Select } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
 import { useI18n } from "@/contexts/i18n-context"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 interface Model {
   id: number
@@ -47,6 +54,7 @@ interface ConfigDialogProps {
 
 export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigDialogProps) {
   const { token } = useAuth()
+  const router = useRouter();
   const [open, setOpen] = useState(false)
   const [models, setModels] = useState<Model[]>([])
   const [loading, setLoading] = useState(false)
@@ -168,7 +176,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
           </DialogHeader>
         </div>
 
-        <div className="flex-1 overflow-visible px-6 space-y-6">
+        <div className="flex-1 overflow-y-auto px-6 space-y-6">
           {/* Model Selection */}
           <div className="space-y-4">
             <div>
@@ -187,18 +195,45 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
               <div className="text-center py-4">
                 <p className="text-sm text-muted-foreground">{t('agent.configDialog.modelSelect.empty.title')}</p>
                 <p className="text-xs text-muted-foreground mt-1">{t('agent.configDialog.modelSelect.empty.hint')}</p>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="mt-4"
+                  onClick={() => router.push("/models")}
+                  title={t('agent.configDialog.modelSelect.empty.button')}
+                >
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
               </div>
             ) : (
               <div className="space-y-4">
                 {/* Main model selection */}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">{t('agent.configDialog.modelSelect.main.label')}</label>
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-sm">
+                      {t('agent.configDialog.modelSelect.main.label')}
+                    </Label>
+                    <TooltipProvider>
+                      <Tooltip delayDuration={300}>
+                        <TooltipTrigger asChild>
+                          <div className="cursor-default">
+                            <Info className="h-3 w-3 text-muted-foreground/70 hover:text-muted-foreground" />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-[200px]">
+                            {t('agent.configDialog.modelSelect.main.hint')}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Select
                     value={config.model}
                     onValueChange={handleModelSelect}
                     options={models.map(m => ({
                       value: m.model_id,
-                      label: m.model_id,
+                      label: m.model_name,
                       description: `${m.model_name}${m.description ? ' - ' + m.description : ''} (${m.model_provider})`,
                       isDefault: m.is_default,
                       isSmallFast: m.is_small_fast,
@@ -206,14 +241,29 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                     }))}
                     placeholder={t('agent.configDialog.modelSelect.main.placeholder')}
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('agent.configDialog.modelSelect.main.hint')}
-                  </p>
                 </div>
 
                 {/* Small/fast model selection (optional) */}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">{t('agent.configDialog.modelSelect.smallFast.label')}</label>
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-sm">
+                      {t('agent.configDialog.modelSelect.smallFast.label')}
+                    </Label>
+                    <TooltipProvider>
+                      <Tooltip delayDuration={300}>
+                        <TooltipTrigger asChild>
+                          <div className="cursor-default">
+                            <Info className="h-3 w-3 text-muted-foreground/70 hover:text-muted-foreground" />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-[200px]">
+                            {t('agent.configDialog.modelSelect.smallFast.hint')}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Select
                     value={config.smallFastModel || ""}
                     onValueChange={handleSmallFastModelSelect}
@@ -221,7 +271,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                       { value: "", label: t('agent.configDialog.modelSelect.smallFast.options.noneLabel'), description: t('agent.configDialog.modelSelect.smallFast.options.noneDescription') },
                       ...models.map(m => ({
                         value: m.model_id,
-                        label: m.model_id,
+                        label: m.model_name,
                         description: `${m.model_name}${m.description ? ' - ' + m.description : ''} (${m.model_provider})${m.is_small_fast ? t('agent.configDialog.modelSelect.smallFast.options.tagFast') : ''}`,
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
@@ -230,14 +280,29 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                     ]}
                     placeholder={t('agent.configDialog.modelSelect.smallFast.placeholder')}
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('agent.configDialog.modelSelect.smallFast.hint')}
-                  </p>
                 </div>
 
                 {/* Visual model selection (optional) */}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">{t('agent.configDialog.modelSelect.visual.label')}</label>
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-sm">
+                      {t('agent.configDialog.modelSelect.visual.label')}
+                    </Label>
+                    <TooltipProvider>
+                      <Tooltip delayDuration={300}>
+                        <TooltipTrigger asChild>
+                          <div className="cursor-default">
+                            <Info className="h-3 w-3 text-muted-foreground/70 hover:text-muted-foreground" />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-[200px]">
+                            {t('agent.configDialog.modelSelect.visual.hint')}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Select
                     value={config.visualModel || ""}
                     onValueChange={handleVisualModelSelect}
@@ -245,7 +310,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                       { value: "", label: t('agent.configDialog.modelSelect.visual.options.noneLabel'), description: t('agent.configDialog.modelSelect.visual.options.noneDescription') },
                       ...models.map(m => ({
                         value: m.model_id,
-                        label: m.model_id,
+                        label: m.model_name,
                         description: `${m.model_name}${m.description ? ' - ' + m.description : ''} (${m.model_provider})${m.is_visual ? t('agent.configDialog.modelSelect.visual.options.tagVisual') : ''}`,
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
@@ -254,14 +319,29 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                     ]}
                     placeholder={t('agent.configDialog.modelSelect.visual.placeholder')}
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('agent.configDialog.modelSelect.visual.hint')}
-                  </p>
                 </div>
 
                 {/* Long context model selection (optional) */}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">{t('agent.configDialog.modelSelect.compact.label')}</label>
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-sm">
+                      {t('agent.configDialog.modelSelect.compact.label')}
+                    </Label>
+                    <TooltipProvider>
+                      <Tooltip delayDuration={300}>
+                        <TooltipTrigger asChild>
+                          <div className="cursor-default">
+                            <Info className="h-3 w-3 text-muted-foreground/70 hover:text-muted-foreground" />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-[200px]">
+                            {t('agent.configDialog.modelSelect.compact.hint')}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Select
                     value={config.compactModel || ""}
                     onValueChange={handleCompactModelSelect}
@@ -269,7 +349,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                       { value: "", label: t('agent.configDialog.modelSelect.compact.options.noneLabel'), description: t('agent.configDialog.modelSelect.compact.options.noneDescription') },
                       ...models.map(m => ({
                         value: m.model_id,
-                        label: m.model_id,
+                        label: m.model_name,
                         description: `${m.model_name}${m.description ? ' - ' + m.description : ''} (${m.model_provider})${m.is_compact ? t('agent.configDialog.modelSelect.compact.options.tagCompact') : ''}`,
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
@@ -279,17 +359,13 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                     ]}
                     placeholder={t('agent.configDialog.modelSelect.compact.placeholder')}
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('agent.configDialog.modelSelect.compact.hint')}
-                  </p>
                 </div>
 
                 {/* Memory similarity threshold configuration */}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">{t('agent.configDialog.memoryThreshold.label')}</label>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm">{t('agent.configDialog.memoryThreshold.subLabel')}</Label>
+                      <Label className="text-sm">{t('agent.configDialog.memoryThreshold.label')}</Label>
                       <Badge variant="outline" className="text-xs">
                         {config.memorySimilarityThreshold?.toFixed(1) ?? "1.5"}
                       </Badge>

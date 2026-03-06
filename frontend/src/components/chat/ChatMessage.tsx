@@ -2,6 +2,7 @@ import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TraceEventRenderer } from "./TraceEventRenderer";
 import { useI18n } from "@/contexts/i18n-context";
+import { MarkdownRenderer } from "@/components/ui/markdown-renderer";
 import type React from "react";
 
 interface ToolArgs {
@@ -197,13 +198,19 @@ export function ChatMessage({
           <div className={cn("flex-1 min-w-0")}>
             {content ? (
               typeof content === "string" ? (
-                <p className={cn(
-                  "text-sm leading-relaxed whitespace-pre-wrap",
-                  isUser && "max-h-60 overflow-y-auto",
-                  !isUser && "pt-2"
-                )}>
-                  {content}
-                </p>
+                isUser ? (
+                  <p className={cn(
+                    "text-sm leading-relaxed whitespace-pre-wrap",
+                    "max-h-60 overflow-y-auto"
+                  )}>
+                    {content}
+                  </p>
+                ) : (
+                  <MarkdownRenderer
+                    content={content}
+                    className="prose-sm pt-2 leading-relaxed"
+                  />
+                )
               ) : (
                 <div className="text-sm leading-relaxed">{content}</div>
               )

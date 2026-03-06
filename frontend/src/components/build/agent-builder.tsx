@@ -495,12 +495,32 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   const toolCategoryOptions = toolCategories.map(category => {
     const toolsInCategory = tools.filter(t => t.category === category)
+    const categoryDesc = getCategoryDescription(category)
     return {
       value: category,
       label: getCategoryLabel(category),
-      description: `${toolsInCategory.length} tools: ${toolsInCategory.map(t => t.name).join(', ')}`
+      count: toolsInCategory.length,
+      description: (categoryDesc ? `**${categoryDesc}**\n\n` : '') + `${toolsInCategory.map(t => t.name).join(', ')}`
     }
   })
+
+  // Helper function for category descriptions
+  function getCategoryDescription(category: string): string {
+    const descriptions: Record<string, string> = {
+      'basic': t('builds.configForm.tools.categoryDescriptions.basic'),
+      'file': t('builds.configForm.tools.categoryDescriptions.file'),
+      'vision': t('builds.configForm.tools.categoryDescriptions.vision'),
+      'image': t('builds.configForm.tools.categoryDescriptions.image'),
+      'knowledge': t('builds.configForm.tools.categoryDescriptions.knowledge'),
+      'mcp': t('builds.configForm.tools.categoryDescriptions.mcp'),
+      'browser': t('builds.configForm.tools.categoryDescriptions.browser'),
+      'ppt': t('builds.configForm.tools.categoryDescriptions.ppt'),
+      'office': t('builds.configForm.tools.categoryDescriptions.office'),
+      'special_image': t('builds.configForm.tools.categoryDescriptions.specialImage'),
+      'agent': t('builds.configForm.tools.categoryDescriptions.agent'),
+    }
+    return descriptions[category] || ""
+  }
 
   // Helper function for category labels
   function getCategoryLabel(category: string): string {
@@ -515,6 +535,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       'ppt': t('builds.configForm.tools.categories.ppt'),
       'office': t('builds.configForm.tools.categories.office'),
       'special_image': t('builds.configForm.tools.categories.specialImage'),
+      'agent': t('builds.configForm.tools.categories.agent'),
     }
     return labels[category] || category
   }

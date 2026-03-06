@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, Suspense, useCallback, useMemo } from "react";
-import { GitMerge, Bot, Download, ArrowLeft, Loader2, Sparkles } from "lucide-react";
+import { GitMerge, Bot, Download, ArrowLeft, Loader2, Sparkles, FolderOpen } from "lucide-react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { useParams, useRouter } from "next/navigation"
 import { PreviewSheet } from "@/components/preview-sheet";
 import { FilePreviewContent } from "@/components/file-preview-content";
 import { TokenUsageDisplay } from "@/components/chat/TokenUsageDisplay";
+import { TaskFileManager } from "@/components/task-file-manager";
 import { getApiUrl } from "@/lib/utils";
 import { apiRequest } from "@/lib/api-wrapper";
 import type React from "react";
@@ -401,6 +402,19 @@ function TaskDetailContent() {
                 </div>
               )}
 
+              <TaskFileManager
+                taskId={state.taskId}
+                onPreview={(filePath, fileName) => openFilePreview(filePath, fileName)}
+              >
+                <div
+                  className="ml-2 inline-flex items-center gap-1 rounded-xl border bg-card/80 backdrop-blur p-2 cursor-pointer hover:bg-muted/30 transition-colors text-sm"
+                  title={t("files.header.title")}
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  {t("files.header.title")}
+                </div>
+              </TaskFileManager>
+
               <div className="ml-auto">
                 <TokenUsageDisplay
                   taskId={state.taskId}
@@ -454,7 +468,10 @@ function TaskDetailContent() {
                 setDagPreviewOpen(false);
               }
             }}
-            title={state.filePreview.isOpen ? <>{state.filePreview.fileName}</> : t("chatPage.executionPlan.title")}
+            title={
+              state.filePreview.isOpen ? <>{state.filePreview.fileName}</> :
+              t("chatPage.executionPlan.title")
+            }
             actions={state.filePreview.isOpen ? (
               <Button
                 variant="outline"

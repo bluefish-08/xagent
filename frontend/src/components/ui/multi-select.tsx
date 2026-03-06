@@ -9,6 +9,7 @@ interface MultiSelectOption {
   value: string
   label: string
   description?: string
+  count?: number
 }
 
 interface MultiSelectProps {
@@ -195,6 +196,11 @@ export function MultiSelect({ values, onValuesChange, options, placeholder, clas
                         <div className="w-2 h-2 rounded-full bg-primary" />
                       )}
                     </div>
+                    {option.count !== undefined && (
+                      <span className="text-xs text-muted-foreground bg-secondary px-2 py-0.5 rounded-full ml-2">
+                        {option.count}
+                      </span>
+                    )}
                   </div>
                   {option.description && (
                     <MarkdownDescription content={option.description} />

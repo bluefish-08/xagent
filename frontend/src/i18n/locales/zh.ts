@@ -17,6 +17,7 @@ const zh = {
     planning: "正在制定计划",
     taskPaused: "任务已暂停",
     noData: "暂无数据",
+    refresh: "刷新",
     errors: {
       unknown: "未知错误",
     },
@@ -609,9 +610,14 @@ Build when you need.`
     },
   },
   files: {
+    fileTooLarge: "文件过大（最大 100MB）",
     header: {
       title: "文件管理",
       description: "管理项目文件：上传、预览、下载与删除",
+    },
+    tabs: {
+      input: "输入",
+      output: "输出",
     },
     search: {
       placeholder: "搜索文件...",
@@ -1536,7 +1542,8 @@ Build when you need.`
         welcome: "你好！我是 {name}。{description}\n\n你可以直接开始对话，或者选择下方的建议提示词。",
         inputPlaceholder: "输入你的消息...",
         loading: "加载 agent 中...",
-        notFound: "Agent 未找到",
+        notFound: "Agent 不存在",
+        notFoundDescription: "该 Agent 不存在或已被删除，你可以创建一个新的 Agent 开始",
         failed: "加载 agent 失败",
         taskCreated: "任务已创建。正在实现 WebSocket 连接...",
         error: "错误：{message}",
@@ -1667,6 +1674,20 @@ Build when you need.`
           ppt: "PowerPoint",
           office: "办公工具",
           specialImage: "图像工具",
+          agent: "Agent 调用",
+        },
+        categoryDescriptions: {
+          basic: "系统基础能力，包括数学计算、日期时间获取等核心功能。",
+          file: "文件系统操作，支持文件的读写、搜索、列表和管理。",
+          vision: "计算机视觉能力，支持图像识别、分析和内容提取。",
+          image: "图像生成与处理，支持文生图、图像编辑等创意功能。",
+          knowledge: "知识库检索与管理，支持文档内容的语义搜索和引用。",
+          mcp: "Model Context Protocol 扩展，连接外部服务和数据源。",
+          browser: "网页浏览与自动化，支持网页内容抓取和交互操作。",
+          ppt: "演示文稿制作，支持幻灯片的生成、编辑和格式化。",
+          office: "办公文档处理，支持 Word、Excel 等常用格式的操作。",
+          specialImage: "高级图像处理，提供更专业的图像分析和转换工具。",
+          agent: "多智能体协同，支持调用其他 Agent 完成复杂任务。",
         },
       },
       suggestedPrompts: {
@@ -1770,7 +1791,7 @@ Build when you need.`
           hint: "主要用于处理复杂任务，默认使用模型管理页面设置的默认模型",
         },
         smallFast: {
-          label: "小型/快速模型（可选）",
+          label: "快速模型（可选）",
           placeholder: "选择快速模型...",
           hint: "可选配置，用于处理简单任务以获得更快的响应速度",
           options: {
