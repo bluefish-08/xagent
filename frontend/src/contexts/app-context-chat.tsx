@@ -8,6 +8,7 @@ import { FileAttachment } from "../components/file-attachment"
 import { ReplayScheduler } from '@/lib/replay-scheduler'
 import { CollapsibleSection } from "../components/collapsible-section"
 import { Badge } from "@/components/ui/badge"
+import { ClarificationForm } from "@/components/chat/clarification-form"
 
 interface WebSocketMessage {
   type: string
@@ -17,6 +18,19 @@ interface WebSocketMessage {
   step_id?: string
   event_type?: string
   event_id?: string
+}
+export interface Interaction {
+  type: "select_one" | "select_multiple" | "text_input" | "file_upload" | "confirm" | "number_input";
+  field: string;
+  label: string;
+  options?: Array<{ label: string; value: string }>;
+  placeholder?: string;
+  multiline?: boolean;
+  min?: number;
+  max?: number;
+  default?: any;
+  accept?: string[] | string;
+  multiple?: boolean;
 }
 import { useWebSocket } from "@/hooks/use-websocket"
 import { useAuth } from "@/contexts/auth-context"
@@ -59,7 +73,7 @@ if (typeof window !== 'undefined') {
 let isHistoricalDataLoading = false
 // Store pending task info for auto-execution after historical data loads
 let pendingTaskToExecute: { description: string } | null = null
-const isDuplicateMessage = (content: string | React.ReactNode, type: string = 'general', force: boolean = false) => {
+const isDuplicateMessage = (content: string | React.ReactNode, type: string = 'general', force: boolean = false, shouldCache: boolean = true) => {
   // Convert React element to string representation for comparison
   let contentStr: string
   if (typeof content === 'string') {
@@ -81,20 +95,131 @@ const isDuplicateMessage = (content: string | React.ReactNode, type: string = 'g
   }
 
   const key = `${type}:${contentStr}`
-  if (recentMessages.has(key)) {
+  if (!force && recentMessages.has(key)) {
     return true
   }
-  recentMessages.add(key)
-  // Clean up old messages after 30 seconds
-  setTimeout(() => {
-    recentMessages.delete(key)
-  }, 30000)
+
+  if (shouldCache) {
+    recentMessages.add(key)
+    // Clean up old messages after 30 seconds
+    setTimeout(() => {
+      recentMessages.delete(key)
+    }, 30000)
+  }
+
   return false
 }
 
 // Backward compatibility for result messages
 const isDuplicateResult = (content: string) => {
   return isDuplicateMessage(content, 'result')
+}
+
+
+const normalizeInteractions = (value: unknown): Interaction[] => {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((item: any) => {
+      if (!item || typeof item !== "object") {
+        return null
+      }
+
+      const type = item.type
+      const field = item.field
+      if (
+        !["select_one", "select_multiple", "text_input", "file_upload", "confirm", "number_input"].includes(type) ||
+        typeof field !== "string" ||
+        !field.trim()
+      ) {
+        return null
+      }
+
+      const normalized: Interaction = {
+        type,
+        field,
+        label: typeof item.label === "string" && item.label.trim() ? item.label : field,
+      }
+
+      if (Array.isArray(item.options)) {
+        normalized.options = item.options
+          .filter((opt: any) => opt && typeof opt.value === "string")
+          .map((opt: any) => ({
+            value: opt.value,
+            label: typeof opt.label === "string" ? opt.label : opt.value,
+          }))
+      }
+
+      if (typeof item.placeholder === "string") normalized.placeholder = item.placeholder
+      if (typeof item.multiline === "boolean") normalized.multiline = item.multiline
+      if (typeof item.min === "number") normalized.min = item.min
+      if (typeof item.max === "number") normalized.max = item.max
+      if (typeof item.default !== "undefined") normalized.default = item.default
+      if (Array.isArray(item.accept) || typeof item.accept === "string") normalized.accept = item.accept
+      if (typeof item.multiple === "boolean") normalized.multiple = item.multiple
+
+      return normalized
+    })
+    .filter(Boolean) as Interaction[]
+}
+
+const extractClarificationMessage = (raw: unknown): { interactions: Interaction[]; timeout?: number; expiresAt?: string } | null => {
+  let asObject = raw && typeof raw === "object" ? (raw as any) : null
+
+  if (typeof raw === 'string') {
+    try {
+      asObject = JSON.parse(raw)
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  const directInteractions = normalizeInteractions(asObject?.interactions)
+  if (directInteractions.length > 0) {
+    return {
+      interactions: directInteractions,
+      timeout: typeof asObject?.timeout === 'number' ? asObject.timeout : undefined,
+      expiresAt: typeof asObject?.expires_at === 'string' ? asObject.expires_at : undefined,
+    }
+  }
+
+  const chatResponse = asObject?.chat_response
+  if (chatResponse && typeof chatResponse === "object") {
+    const chatInteractions = normalizeInteractions((chatResponse as any).interactions)
+    if (chatInteractions.length > 0) {
+      return {
+        interactions: chatInteractions,
+        timeout: typeof (chatResponse as any).timeout === 'number' ? (chatResponse as any).timeout : undefined,
+        expiresAt: typeof (chatResponse as any).expires_at === 'string' ? (chatResponse as any).expires_at : undefined,
+      }
+    }
+  }
+
+  const resultValue = asObject?.result
+  // Try to parse result if it's a string
+  let parsedResult = resultValue
+  if (typeof resultValue === 'string') {
+    try {
+      parsedResult = JSON.parse(resultValue)
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (parsedResult && typeof parsedResult === "object") {
+    const nested = extractClarificationMessage(parsedResult)
+    if (nested) return nested
+  }
+
+  const metadataValue = asObject?.metadata
+  if (metadataValue && typeof metadataValue === "object") {
+    const nested = extractClarificationMessage(metadataValue)
+    if (nested) return nested
+  }
+
+  return null
 }
 
 
@@ -107,6 +232,7 @@ interface Message {
   isResult?: boolean
   isFileOutput?: boolean
   traceEvents?: TraceEvent[]
+  interactions?: Interaction[]
 }
 
 interface Task {
@@ -232,6 +358,7 @@ type AppAction =
   | { type: "ADD_TO_REPLAY_CACHE"; payload: WebSocketMessage }
   | { type: "CLEAR_REPLAY_CACHE" }
   | { type: "SET_HISTORY_LOADING"; payload: boolean }
+  | { type: "SYNC_PROCESSING_STATUS" }
 
 const initialState: AppState = {
   messages: [],
@@ -270,6 +397,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "SET_HISTORY_LOADING":
       return { ...state, isHistoryLoading: action.payload }
+
+    case "SYNC_PROCESSING_STATUS":
+      if (state.currentTask?.status === 'completed' || state.currentTask?.status === 'failed') {
+        return { ...state, isProcessing: false }
+      }
+      return state
 
     case "TRIGGER_TASK_UPDATE":
       return { ...state, lastTaskUpdate: Date.now() }
@@ -849,7 +982,9 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
             })
 
             // Check if this is a duplicate message
-            const isDuplicate = isDuplicateMessage(messageContent, 'user-message')
+            // Note: We don't cache messages from WebSocket to prevent blocking subsequent identical messages
+            // This is especially important for historical data loading where we might receive multiple identical messages
+            const isDuplicate = isDuplicateMessage(messageContent, 'user-message', false, false)
             console.log('🔍 Duplicate check:', {
               messageContent,
               isDuplicate,
@@ -1782,22 +1917,50 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
 
           // Task Completion Events
           else if (eventType === "task_completion") {
-            const { result, success, metadata } = eventData
-            console.log('🔍 task_completion event:', { result, success, metadata, hasResult: !!(result && result.trim() !== '') })
+            const { result, success } = eventData
+            // Check for clarification request in task completion
+            const clarification = extractClarificationMessage(eventData)
+            if (clarification) {
+              const msgId = generateMessageId("msg-clarification")
+              dispatch({
+                type: "ADD_MESSAGE",
+                payload: {
+                  id: msgId,
+                  role: "assistant",
+                  content: <div className="space-y-2">
+                    <div>
+                      {result.content}
+                    </div>
+                    <ClarificationForm
+                      interactions={clarification.interactions}
+                      timeout={clarification.timeout}
+                      expiresAt={(clarification as any).expiresAt}
+                      messageId={msgId}
+                    />
+                  </div>,
+                  timestamp: message.timestamp,
+                  status: "completed",
+                  isResult: true,
+                  interactions: clarification.interactions,
+                }
+              })
+              return
+            }
 
             // Parse result string into object
             let resultData = {}
-            if (typeof result === 'string') {
+            const resultContent = result?.content || result
+            if (typeof resultContent === 'string') {
               try {
-                resultData = JSON.parse(result)
+                resultData = JSON.parse(resultContent)
               } catch (e) {
-                console.log('Result is not JSON, treating as plain text output:', result)
-                resultData = { output: result }
+                console.log('Result is not JSON, treating as plain text output:', result.content)
+                resultData = { output: resultContent }
               }
-            } else if (typeof result === 'object' && result !== null) {
-              resultData = result
+            } else if (typeof resultContent === 'object' && resultContent !== null) {
+              resultData = resultContent
             } else {
-              resultData = { output: result }
+              resultData = { output: resultContent }
             }
 
             // 1. Output meta info (excluding output, file_outputs, and history)
@@ -2135,14 +2298,30 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
 
           // AI Message Events
           else if (eventType === "ai_message") {
+            const clarification = extractClarificationMessage(eventData)
+            const msgId = generateMessageId("msg-ai")
+            const content = clarification
+              ? <>
+                {eventData.content}
+                <ClarificationForm
+                  interactions={clarification.interactions}
+                  timeout={clarification.timeout}
+                  expiresAt={clarification.expiresAt}
+                  messageId={msgId}
+                />
+              </>
+              : (eventData.content || "")
+
             dispatch({
               type: "ADD_MESSAGE",
               payload: {
-                id: generateMessageId("msg-ai"),
+                id: msgId,
                 role: "assistant",
-                content: eventData.content || "",
+                content,
                 timestamp: message.timestamp,
                 status: "completed",
+                isResult: true,  // Mark as result message so it shows in task page
+                interactions: clarification?.interactions,
               }
             })
           }
@@ -2819,6 +2998,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
           else if (eventType === "historical_data_complete") {
             isHistoricalDataLoading = false
             dispatch({ type: "SET_HISTORY_LOADING", payload: false })
+            dispatch({ type: "SYNC_PROCESSING_STATUS" })
 
             // If we're in replay mode, initialize the replay scheduler
             if (state.isReplaying && state.replayTaskId && state.replayEventCache.length > 0) {
@@ -2837,7 +3017,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
           // Default: add as trace event
           else {
             console.trace('Original message:', JSON.stringify(message), 'Handler: handleMessage (unhandled event_type:', eventType, ')')
-                        dispatch({ type: "ADD_TRACE_EVENT", payload: traceEventData })
+            dispatch({ type: "ADD_TRACE_EVENT", payload: traceEventData })
           }
         } else {
           console.trace('Original message:', JSON.stringify(message), 'Handler: handleMessage (no event_type, direct trace event)')
@@ -2867,7 +3047,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
                 step_data: traceEventData.step_data,
                 file_outputs: traceEventData.file_outputs || [],
               }
-                            dispatch({ type: "ADD_STEP", payload: step })
+              dispatch({ type: "ADD_STEP", payload: step })
             } else {
               // Add as trace event instead
               dispatch({ type: "ADD_TRACE_EVENT", payload: traceEventData })
@@ -2979,12 +3159,13 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
         break
 
       case "task_completed":
-        const taskData = message.data as { success?: boolean; result?: string; file_outputs?: string[] }
+        const taskData = message.data as { success?: boolean; result?: string | Record<string, unknown>; file_outputs?: string[] }
         dispatch({
           type: "UPDATE_TASK_STATUS",
           payload: { status: taskData.success ? "completed" : "failed" }
         })
         dispatch({ type: "TRIGGER_TASK_UPDATE" })
+        dispatch({ type: "SET_PROCESSING", payload: false })  // Stop processing on task completion
 
         // Update DAG execution status to completed
         if (state.dagExecution) {
@@ -3008,8 +3189,6 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
         if (state.taskId) {
           historicalDataRequestMap.set(state.taskId, true)
         }
-
-        // Note: Result is now handled by trace events, not included in task_completed event
 
         // Handle file outputs
         if (taskData.file_outputs && taskData.file_outputs.length > 0) {
@@ -3202,6 +3381,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
         // Historical data loading complete
         isHistoricalDataLoading = false
         dispatch({ type: "SET_HISTORY_LOADING", payload: false })
+        dispatch({ type: "SYNC_PROCESSING_STATUS" })
 
         // If we're in replay mode, initialize the replay scheduler
         if (state.isReplaying && state.replayTaskId && state.replayEventCache.length > 0) {
@@ -3380,7 +3560,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
       })
 
       // Optimistically add the user message to the UI
-      if (!isDuplicateMessage(message, 'user-message')) {
+      if (!isDuplicateMessage(message, 'user-message', config?.force)) {
         let content: React.ReactNode = message
         if (files && files.length > 0) {
           content = (
@@ -3406,7 +3586,7 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
 
         // Send chat message - backend will handle user message via trace event
         // Only send if not a duplicate
-        sendChatMessage(message, files)
+        sendChatMessage(message, files, config?.force)
       } else {
         console.log('⚠️ Duplicate message blocked from sending:', message)
       }

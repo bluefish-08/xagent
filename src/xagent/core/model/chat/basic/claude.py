@@ -24,6 +24,63 @@ from .base import BaseLLM
 logger = logging.getLogger(__name__)
 
 
+def _fix_pydantic_schema_for_claude(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fix Pydantic-generated schema for Claude API compatibility.
+
+    Claude requires:
+    1. All object types must have additionalProperties: false (not true or omitted)
+    2. Number/integer types cannot have: minimum, maximum, exclusiveMinimum, exclusiveMaximum
+    3. Empty schemas {} are not supported - must specify a concrete type
+
+    Pydantic's model_json_schema() may add these unsupported properties, so we remove them.
+
+    Args:
+        schema: The schema dictionary to fix
+
+    Returns:
+        The fixed schema dictionary
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Handle empty schema - convert to a concrete type
+    if not schema or len(schema) == 0:
+        # Default to object type with no properties
+        return {"type": "object", "properties": {}, "additionalProperties": False}
+
+    # If this is an object type, add additionalProperties: false
+    if schema.get("type") == "object":
+        # Always set to false (Claude doesn't support additionalProperties: true)
+        schema["additionalProperties"] = False
+
+    # For number type, remove unsupported properties
+    # Claude doesn't support: minimum, maximum, exclusiveMinimum, exclusiveMaximum
+    if schema.get("type") in ("number", "integer"):
+        unsupported_props = [
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+        ]
+        for prop in unsupported_props:
+            schema.pop(prop, None)
+
+    # Recursively process nested structures
+    for key, value in list(schema.items()):
+        if isinstance(value, dict):
+            schema[key] = _fix_pydantic_schema_for_claude(value)
+        elif isinstance(value, list):
+            schema[key] = [
+                _fix_pydantic_schema_for_claude(item)
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+
+    return schema
+
+
 class ClaudeLLM(BaseLLM):
     """
     Anthropic Claude LLM client using the official Anthropic SDK.
@@ -94,7 +151,12 @@ class ClaudeLLM(BaseLLM):
             }
 
             if self.base_url:
-                client_kwargs["base_url"] = self.base_url
+                # Remove trailing /v1 if present to avoid duplication
+                # The Anthropic SDK automatically appends /v1/ to the base_url
+                clean_base_url = self.base_url.rstrip("/")
+                if clean_base_url.endswith("/v1"):
+                    clean_base_url = clean_base_url[:-3]
+                client_kwargs["base_url"] = clean_base_url
 
             self._client = AsyncAnthropic(**client_kwargs)
 
@@ -337,14 +399,35 @@ class ClaudeLLM(BaseLLM):
                     completion_params["thinking"] = {"type": "disabled"}
 
             # Handle output_config for structured outputs
+            # In newer anthropic versions (>= 0.84.0), output_config is a direct parameter
+            # In older versions, it needs to be passed via extra_body
             if output_config is not None:
+                # Fix Pydantic-generated schemas for Claude API compatibility
+                format_config = output_config.get("format", {})
+                if (
+                    format_config.get("type") == "json_schema"
+                    and "schema" in format_config
+                ):
+                    # Apply schema fixes recursively
+                    fixed_schema = _fix_pydantic_schema_for_claude(
+                        format_config["schema"]
+                    )
+                    output_config = {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": fixed_schema,
+                        }
+                    }
+                # Try to pass output_config directly first (for newer SDK versions)
                 completion_params["output_config"] = output_config
 
             # Handle response_format for JSON mode
             # Anthropic doesn't have a response_format parameter, so we add instructions to system message
+            # Note: When tools are present, response_format is ignored as tools already require structured output
             if (
                 response_format is not None
                 and response_format.get("type") == "json_object"
+                and not tools
             ):
                 json_instruction = "You must respond with valid JSON only. Do not include any text outside the JSON structure."
                 if system_message:
@@ -576,14 +659,35 @@ class ClaudeLLM(BaseLLM):
                     completion_params["thinking"] = {"type": "disabled"}
 
             # Handle output_config for structured outputs
+            # In newer anthropic versions (>= 0.84.0), output_config is a direct parameter
+            # In older versions, it needs to be passed via extra_body
             if output_config is not None:
+                # Fix Pydantic-generated schemas for API compatibility
+                format_config = output_config.get("format", {})
+                if (
+                    format_config.get("type") == "json_schema"
+                    and "schema" in format_config
+                ):
+                    # Apply schema fixes recursively
+                    fixed_schema = _fix_pydantic_schema_for_claude(
+                        format_config["schema"]
+                    )
+                    output_config = {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": fixed_schema,
+                        }
+                    }
+                # Try to pass output_config directly (for newer SDK versions)
                 completion_params["output_config"] = output_config
 
             # Handle response_format for JSON mode
             # Anthropic doesn't have a response_format parameter, so we add instructions to system message
+            # Note: When tools are present, response_format is ignored as tools already require structured output
             if (
                 response_format is not None
                 and response_format.get("type") == "json_object"
+                and not tools
             ):
                 json_instruction = "You must respond with valid JSON only. Do not include any text outside the JSON structure."
                 if system_message:
@@ -719,13 +823,18 @@ class ClaudeLLM(BaseLLM):
                             if accumulated_tool_calls:
                                 tool_calls_list = []
                                 for tool_call in accumulated_tool_calls.values():
+                                    # Ensure arguments is valid JSON
+                                    arguments = tool_call["arguments"]
+                                    if not arguments or arguments == "":
+                                        arguments = "{}"
+
                                     tool_calls_list.append(
                                         {
                                             "id": tool_call["id"],
                                             "type": "function",
                                             "function": {
                                                 "name": tool_call["name"],
-                                                "arguments": tool_call["arguments"],
+                                                "arguments": arguments,
                                             },
                                         }
                                     )
@@ -906,7 +1015,12 @@ class ClaudeLLM(BaseLLM):
                     )
 
                 # Sort by created date (newest first)
-                models.sort(key=lambda x: x.get("created", 0), reverse=True)
+                models.sort(
+                    key=lambda x: (x.get("created") or 0)
+                    if x.get("created") is not None
+                    else 0,
+                    reverse=True,
+                )
                 return models
 
         except httpx.HTTPStatusError as e:

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -143,7 +144,18 @@ class OpenAILLM(BaseLLM):
             format_config = output_config.get("format", {})
             if format_config.get("type") == "json_schema":
                 # OpenAI supports json_schema through response_format
-                completion_params["response_format"] = format_config
+                # Convert to OpenAI's official format: {"type": "json_schema", "json_schema": {"name": ..., "strict": True, "schema": ...}}
+                schema = format_config.get("schema", {})
+                completion_params["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema.get("title", "response")
+                        .lower()
+                        .replace(" ", "_"),
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
             else:
                 # Pass through other output_config formats
                 completion_params["output_config"] = output_config
@@ -180,13 +192,6 @@ class OpenAILLM(BaseLLM):
                 "enable", False
             ):
                 # For hybrid models, allow disabling thinking mode
-                extra_body["enable_thinking"] = False
-        elif self.supports_thinking_mode and "thinking_mode" in self.abilities:
-            # For hybrid models with thinking_mode ability, auto-enable thinking mode only for streaming
-            if is_streaming:
-                extra_body["enable_thinking"] = True
-            else:
-                # For non-streaming calls, enable_thinking must be false
                 extra_body["enable_thinking"] = False
 
         # Helper function to process response
@@ -265,7 +270,36 @@ class OpenAILLM(BaseLLM):
         try:
             # Make the API call
             response = await _make_api_call()
-            return _process_response(response)
+            result = _process_response(response)
+
+            # Handle thinking mode models with response_format returning invalid JSON
+            # Some models (like DashScope qwen3) return garbage in content when thinking is enabled
+            # Detect this and retry with thinking disabled
+            if (
+                response_format
+                and "thinking_mode" in self.abilities
+                and result.get("type") == "text"
+                and hasattr(response, "choices")
+                and response.choices
+            ):
+                message = response.choices[0].message
+                # Check if response has reasoning_content (indicates thinking was active)
+                if hasattr(message, "reasoning_content") and message.reasoning_content:
+                    content = result.get("content", "")
+                    # Try to parse as JSON
+                    try:
+                        json.loads(content)
+                    except (json.JSONDecodeError, ValueError):
+                        # Content is not valid JSON, retry with thinking disabled
+                        logger.warning(
+                            "Model returned non-JSON content with response_format while thinking was enabled. "
+                            "Retrying with thinking disabled."
+                        )
+                        extra_body = {"enable_thinking": False}
+                        response = await _make_api_call()
+                        result = _process_response(response)
+
+            return result
 
         except openai.BadRequestError as e:
             # Handle bad request errors
@@ -401,7 +435,18 @@ class OpenAILLM(BaseLLM):
             format_config = output_config.get("format", {})
             if format_config.get("type") == "json_schema":
                 # OpenAI supports json_schema through response_format
-                completion_params["response_format"] = format_config
+                # Convert to OpenAI's official format: {"type": "json_schema", "json_schema": {"name": ..., "strict": True, "schema": ...}}
+                schema = format_config.get("schema", {})
+                completion_params["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema.get("title", "response")
+                        .lower()
+                        .replace(" ", "_"),
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
             else:
                 # Pass through other output_config formats
                 completion_params["output_config"] = output_config
@@ -633,6 +678,29 @@ class OpenAILLM(BaseLLM):
         if response_format:
             completion_params["response_format"] = response_format
 
+        # Handle output_config for structured outputs (JSON schema)
+        if output_config is not None:
+            # For OpenAI, we can pass output_config directly or convert to response_format
+            # if it's using json_schema format
+            format_config = output_config.get("format", {})
+            if format_config.get("type") == "json_schema":
+                # OpenAI supports json_schema through response_format
+                # Convert to OpenAI's official format: {"type": "json_schema", "json_schema": {"name": ..., "strict": True, "schema": ...}}
+                schema = format_config.get("schema", {})
+                completion_params["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema.get("title", "response")
+                        .lower()
+                        .replace(" ", "_"),
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
+            else:
+                # Pass through other output_config formats
+                completion_params["output_config"] = output_config
+
         # Handle thinking mode
         extra_body = {}
         is_thinking_only = (
@@ -651,7 +719,15 @@ class OpenAILLM(BaseLLM):
             ):
                 extra_body["enable_thinking"] = False
         elif self.supports_thinking_mode and "thinking_mode" in self.abilities:
-            extra_body["enable_thinking"] = True
+            # For hybrid models with thinking_mode ability
+            # If response_format is requested, disable thinking to avoid JSON corruption
+            if response_format:
+                logger.debug(
+                    "Disabling thinking mode for response_format to ensure valid JSON output"
+                )
+                extra_body["enable_thinking"] = False
+            else:
+                extra_body["enable_thinking"] = True
 
         try:
             # Create streaming response
@@ -695,6 +771,8 @@ class OpenAILLM(BaseLLM):
 
             # Accumulate tool calls (across multiple chunks)
             accumulated_tool_calls: Dict[str, Dict] = {}
+            last_raw_chunk = None  # Track last raw chunk for usage extraction
+            usage_received = False
 
             async for raw_chunk in stream:
                 current_time = time.time()
@@ -721,10 +799,49 @@ class OpenAILLM(BaseLLM):
 
                 last_token_time = current_time
 
+                # Store last raw chunk for potential usage extraction
+                last_raw_chunk = raw_chunk
+
                 # Parse chunk
                 chunk = self._parse_stream_chunk(raw_chunk, accumulated_tool_calls)
                 if chunk:
+                    if chunk.is_usage():
+                        usage_received = True
                     yield chunk
+
+            # Fallback: Ensure usage chunk is always sent
+            # If no usage chunk was received, try to extract from the last raw chunk
+            if not usage_received and last_raw_chunk is not None:
+                logger.warning(
+                    "OpenAI stream ended without usage chunk, attempting to extract from last chunk"
+                )
+                if hasattr(last_raw_chunk, "usage") and last_raw_chunk.usage:
+                    usage = last_raw_chunk.usage
+                    input_tokens = getattr(usage, "prompt_tokens", 0)
+                    output_tokens = getattr(usage, "completion_tokens", 0)
+
+                    if input_tokens > 0 or output_tokens > 0:
+                        # Record token usage
+                        add_token_usage(
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            model=self._model_name,
+                            call_type="stream_chat",
+                        )
+
+                        # Yield usage chunk
+                        yield StreamChunk(
+                            type=ChunkType.USAGE,
+                            usage={
+                                "prompt_tokens": input_tokens,
+                                "completion_tokens": output_tokens,
+                                "total_tokens": input_tokens + output_tokens,
+                            },
+                            raw=last_raw_chunk,
+                        )
+                        logger.info(
+                            f"Extracted usage from last chunk: {input_tokens} + {output_tokens} tokens"
+                        )
 
         except LLMTimeoutError:
             # Re-raise timeout errors for retry
@@ -902,7 +1019,7 @@ class OpenAILLM(BaseLLM):
     async def list_available_models(
         api_key: str, base_url: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Fetch available models from OpenAI-compatible API.
+        """Fetch available models from OpenAI-compatible API using SDK.
 
         Args:
             api_key: API key for the OpenAI-compatible service
@@ -923,37 +1040,43 @@ class OpenAILLM(BaseLLM):
             ...     base_url="https://my-proxy.com/v1"
             ... )
         """
-        import httpx
-
-        # Use official OpenAI API if base_url not provided
-        url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        # Create a client using SDK
+        client = AsyncOpenAI(
+            base_url=base_url if base_url != "https://api.openai.com/v1" else None,
+            api_key=api_key,
+            timeout=30.0,
+        )
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
+            # Use SDK's models.list() method
+            models_pager = await client.models.list()
 
-                models = []
-                for model in data.get("data", []):
-                    models.append(
-                        {
-                            "id": model.get("id"),
-                            "created": model.get("created"),
-                            "owned_by": model.get("owned_by"),
-                        }
-                    )
+            models = []
+            for model in models_pager.data:
+                models.append(
+                    {
+                        "id": model.id,
+                        "created": getattr(model, "created", None),
+                        "owned_by": getattr(model, "owned_by", None),
+                    }
+                )
 
-                # Sort by created date (newest first)
-                models.sort(key=lambda x: x.get("created", 0), reverse=True)
-                return models
+            # Sort by created date (newest first)
+            models.sort(
+                key=lambda x: (x.get("created") or 0)
+                if x.get("created") is not None
+                else 0,
+                reverse=True,
+            )
+            return models
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error fetching models: {e.response.status_code}")
-            if e.response.status_code == 401:
-                raise ValueError("Invalid API key") from e
-            raise
+        except openai.AuthenticationError as e:
+            logger.error(
+                "OpenAI authentication failed: %s", redact_sensitive_text(str(e))
+            )
+            raise ValueError("Invalid API key") from e
         except Exception as e:
             logger.error("Failed to fetch models: %s", redact_sensitive_text(str(e)))
             return []
+        finally:
+            await client.close()
