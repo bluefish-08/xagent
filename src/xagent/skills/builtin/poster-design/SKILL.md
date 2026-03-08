@@ -106,6 +106,10 @@ When **any** of these conditions are met:
 * Clear reading order and visual hierarchy
 * Final poster image generated via full-container screenshot
 
+### Critical Screenshot Requirement
+
+**When using browser screenshot tools, the viewport width MUST be explicitly set to match the layout width (default: 1080px), and the output filename MUST clearly indicate the poster's purpose.**
+
 ### Intent
 
 This strategy prioritizes:
