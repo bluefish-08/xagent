@@ -2,7 +2,7 @@ import asyncio
 import logging
 import mimetypes
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -16,6 +16,12 @@ from ..config import MAX_FILE_SIZE, UPLOADS_DIR, get_upload_path, is_allowed_fil
 from ..models.database import get_db
 from ..models.uploaded_file import UploadedFile
 from ..models.user import User
+from .legacy_file import (
+    infer_user_id_from_legacy_path,
+    is_valid_uuid,
+    resolve_legacy_file_path,
+    resolve_legacy_file_path_cross_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +229,82 @@ def _get_file_record(db: Session, file_id: str) -> UploadedFile:
     if file_record is None:
         raise HTTPException(status_code=404, detail="File not found")
     return file_record
+
+
+def _resolve_file_path(
+    db: Session, file_id_or_path: str, user_id: int
+) -> Tuple[Optional[UploadedFile], Path, int]:
+    """
+    Resolve file_id or legacy path to file record and actual path.
+
+    This function handles both:
+    - New system: UUID file_id that maps to a database record
+    - Legacy system: Relative paths like "web_task_235/output/file.jpeg"
+
+    Args:
+        db: Database session
+        file_id_or_path: Either a UUID file_id or a legacy file path
+        user_id: Current user's ID for permission checks
+
+    Returns:
+        Tuple of (file_record or None, file_path, owner_user_id)
+
+    Raises:
+        HTTPException: If file is not found
+    """
+    # If it's a valid UUID, try to find by file_id (new system)
+    if is_valid_uuid(file_id_or_path):
+        file_record = (
+            db.query(UploadedFile)
+            .filter(UploadedFile.file_id == file_id_or_path)
+            .first()
+        )
+        if file_record:
+            return (
+                file_record,
+                Path(_file_storage_path_value(file_record)),
+                _file_user_id_value(file_record),
+            )
+
+    # For legacy paths, resolve from filesystem
+    # First try to find in current user's directory
+    file_path = resolve_legacy_file_path(file_id_or_path, user_id)
+    owner_user_id = user_id
+
+    # If not found and user is admin, try to infer owner from path and search all users
+    if file_path is None:
+        # Try to infer the correct user_id from the path
+        inferred_user_id = infer_user_id_from_legacy_path(db, file_id_or_path)
+        if inferred_user_id is not None:
+            file_path = resolve_legacy_file_path(file_id_or_path, inferred_user_id)
+            if file_path is not None:
+                owner_user_id = inferred_user_id
+
+        # If still not found and user is admin, try searching in all user directories
+        if file_path is None and _is_admin_user_by_id(db, user_id):
+            result = resolve_legacy_file_path_cross_user(file_id_or_path)
+            if result is not None:
+                file_path, owner_user_id = result
+
+    if file_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Try to find a matching database record (might exist for backfilled files)
+    file_record = (
+        db.query(UploadedFile)
+        .filter(UploadedFile.storage_path == str(file_path))
+        .first()
+    )
+
+    return (file_record, file_path, owner_user_id)
+
+
+def _is_admin_user_by_id(db: Session, user_id: int) -> bool:
+    """Check if a user is admin by user ID."""
+    from ..models.user import User
+
+    user = db.query(User).filter(User.id == user_id).first()
+    return user is not None and getattr(user, "is_admin", False)
 
 
 def _check_file_access(file_record: UploadedFile, user: User) -> None:
@@ -443,17 +525,29 @@ async def list_files(
     return {"files": files, "total_count": len(files)}
 
 
-@file_router.get("/download/{file_id}", response_model=None)
+@file_router.get("/download/{file_id:path}", response_model=None)
 async def download_file(
     file_id: str,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Any:
-    file_record = _get_file_record(db, file_id)
-    _check_file_access(file_record, user)
-    file_name = _file_name_value(file_record)
-    full_path = Path(_file_storage_path_value(file_record))
-    _ensure_under_uploads(full_path, _file_user_id_value(file_record))
+    file_record, full_path, owner_user_id = _resolve_file_path(
+        db, file_id, _user_id_value(user)
+    )
+
+    # Check access permissions
+    if file_record:
+        _check_file_access(file_record, user)
+        file_name = _file_name_value(file_record)
+        media_type = _guess_media_type(file_name)
+    else:
+        # For legacy files without records, check ownership
+        if owner_user_id != _user_id_value(user) and not _is_admin_user(user):
+            raise HTTPException(status_code=403, detail="Access denied")
+        file_name = full_path.name
+        media_type = _guess_media_type(file_name)
+
+    _ensure_under_uploads(full_path, owner_user_id)
 
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -465,21 +559,33 @@ async def download_file(
     return FileResponse(
         path=str(full_path),
         filename=file_name,
-        media_type=_guess_media_type(file_name),
+        media_type=media_type,
     )
 
 
-@file_router.get("/preview/{file_id}", response_model=None)
+@file_router.get("/preview/{file_id:path}", response_model=None)
 async def preview_file(
     file_id: str,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Any:
-    file_record = _get_file_record(db, file_id)
-    _check_file_access(file_record, user)
-    file_name = _file_name_value(file_record)
-    full_path = Path(_file_storage_path_value(file_record))
-    _ensure_under_uploads(full_path, _file_user_id_value(file_record))
+    file_record, full_path, owner_user_id = _resolve_file_path(
+        db, file_id, _user_id_value(user)
+    )
+
+    # Check access permissions
+    if file_record:
+        _check_file_access(file_record, user)
+        file_name = _file_name_value(file_record)
+        media_type = _guess_media_type(file_name)
+    else:
+        # For legacy files without records, check ownership
+        if owner_user_id != _user_id_value(user) and not _is_admin_user(user):
+            raise HTTPException(status_code=403, detail="Access denied")
+        file_name = full_path.name
+        media_type = _guess_media_type(file_name)
+
+    _ensure_under_uploads(full_path, owner_user_id)
 
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -497,23 +603,43 @@ async def preview_file(
     return FileResponse(
         path=str(full_path),
         filename=file_name,
-        media_type=_guess_media_type(file_name),
+        media_type=media_type,
         headers={"Content-Disposition": "inline"},
     )
 
 
-@file_router.get("/public/preview/{file_id}", response_model=None)
+@file_router.get("/public/preview/{file_id:path}", response_model=None)
 async def public_preview_file(
     file_id: str,
     relative_path: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> Any:
-    file_record = _get_file_record(db, file_id)
-    base_path = Path(_file_storage_path_value(file_record))
+    # For public preview, we need to handle both file_id and legacy paths
+    # Try UUID first
+    file_record = None
+    base_path = None
+    owner_user_id = None
+
+    if is_valid_uuid(file_id):
+        file_record = (
+            db.query(UploadedFile).filter(UploadedFile.file_id == file_id).first()
+        )
+
+    if file_record:
+        base_path = Path(_file_storage_path_value(file_record))
+        owner_user_id = _file_user_id_value(file_record)
+    else:
+        # Try to resolve as legacy path across all user directories
+        result = resolve_legacy_file_path_cross_user(file_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        base_path, owner_user_id = result
+
     target_path = _resolve_public_preview_target(
         base_path,
         relative_path,
-        _file_user_id_value(file_record),
+        owner_user_id,
     )
 
     if not target_path.exists() or not target_path.is_file():
@@ -531,24 +657,35 @@ async def public_preview_file(
     )
 
 
-@file_router.delete("/{file_id}")
+@file_router.delete("/{file_id:path}")
 async def delete_file(
     file_id: str,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    file_record = _get_file_record(db, file_id)
-    _check_file_access(file_record, user)
-    file_name = _file_name_value(file_record)
+    file_record, file_path, owner_user_id = _resolve_file_path(
+        db, file_id, _user_id_value(user)
+    )
 
-    file_path = Path(_file_storage_path_value(file_record))
-    _ensure_under_uploads(file_path, _file_user_id_value(file_record))
+    # Check access permissions
+    if file_record:
+        _check_file_access(file_record, user)
+        file_name = _file_name_value(file_record)
+    else:
+        # For legacy files without records, check ownership
+        if owner_user_id != _user_id_value(user) and not _is_admin_user(user):
+            raise HTTPException(status_code=403, detail="Access denied")
+        file_name = file_path.name
+
+    _ensure_under_uploads(file_path, owner_user_id)
 
     if file_path.exists() and file_path.is_file():
         file_path.unlink()
 
-    db.delete(file_record)
-    db.commit()
+    # Delete database record if exists
+    if file_record:
+        db.delete(file_record)
+        db.commit()
 
     return {
         "success": True,

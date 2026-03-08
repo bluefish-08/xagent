@@ -105,11 +105,9 @@ export function MarkdownRenderer({ content, className = '', onFileClick }: Markd
         e.preventDefault()
         const filePath = img.getAttribute('data-file-path')
         if (filePath) {
-          const fileName =
-            img.getAttribute('alt') ||
-            img.getAttribute('title') ||
-            filePath.split('/').pop() ||
-            filePath
+          // Extract just the filename from the path, not the full path
+          // This ensures fileName is like "image.jpeg" not "web_task_235/output/image.jpeg"
+          const fileName = filePath.split('/').pop() || filePath
           onFileClick(filePath, fileName)
         }
       }

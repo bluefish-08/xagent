@@ -20,6 +20,11 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
   const { filePreview } = state
   const { t } = useI18n()
 
+  // Extract the base filename from filePath if fileName contains path separators
+  // This ensures we use just "image.jpeg" not "web_task_235/output/image.jpeg"
+  const baseFileName = filePreview.fileName.includes('/')
+    ? filePreview.fileName.split('/').pop() || filePreview.fileName
+    : filePreview.fileName
 
   // Load file content when dialog opens
   useEffect(() => {
@@ -56,9 +61,8 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
             if (isPptxFile) {
               // PPTX preview endpoint returns HTML
               fileContent = await response.text()
-            } else if (isDocxFile || filePreview.fileName.match(/\.(jpg|jpeg|png|gif|webp|svg|pdf)$/i)) {
+            } else if (isDocxFile || baseFileName.match(/\.(jpg|jpeg|png|gif|webp|svg|pdf)$/i)) {
               const arrayBuffer = await response.arrayBuffer()
-              console.log('Debug: ArrayBuffer size:', arrayBuffer.byteLength)
 
               // Convert binary data to base64 using chunks to avoid stack overflow
               const chunkSize = 16384; // 16KB chunks
@@ -329,11 +333,11 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
                     title={filePreview.fileName}
                   />
                 </div>
-              ) : filePreview.fileName.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i) ? (
+              ) : baseFileName.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i) ? (
                 <div className="flex items-center justify-center h-full p-4">
                   <img
-                    src={`data:image/${filePreview.fileName.split('.').pop()};base64,${filePreview.content || ''}`}
-                    alt={filePreview.fileName}
+                    src={`data:image/${baseFileName.split('.').pop()};base64,${filePreview.content || ''}`}
+                    alt={baseFileName}
                     className="max-w-full max-h-full object-contain"
                     onError={(e) => {
                       e.currentTarget.style.display = 'none'
