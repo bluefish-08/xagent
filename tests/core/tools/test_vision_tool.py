@@ -83,6 +83,7 @@ def mock_vision_model_with_unstructured_detection():
 def mock_workspace():
     """Create a mock workspace for testing"""
     import tempfile
+    from contextlib import contextmanager
 
     # Create temporary directory and files
     temp_dir = Path(tempfile.mkdtemp())
@@ -109,6 +110,15 @@ def mock_workspace():
             raise FileNotFoundError(f"File not found: {filename}")
 
     workspace.resolve_path_with_search = Mock(side_effect=mock_resolve_path_with_search)
+
+    # Mock auto_register_files to return a proper context manager
+    @contextmanager
+    def auto_register_files():
+        yield workspace
+
+    workspace.auto_register_files = auto_register_files
+    # Mock get_file_id_from_path to return a valid file_id
+    workspace.get_file_id_from_path = Mock(return_value="test-file-id")
 
     return workspace
 
