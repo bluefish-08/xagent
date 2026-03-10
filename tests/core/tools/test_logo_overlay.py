@@ -180,9 +180,25 @@ class TestLogoOverlayTool:
 
     def setup_method(self) -> None:
         """Set up test fixtures."""
+        from contextlib import contextmanager
+
         self.mock_workspace = Mock(spec=TaskWorkspace)
         self.mock_workspace.temp_dir = Path("/tmp/workspace/temp")
         self.mock_workspace.output_dir = Path("/tmp/workspace/output")
+
+        # Mock auto_register_files to return a proper context manager
+        @contextmanager
+        def auto_register_files():
+            yield self.mock_workspace
+
+        self.mock_workspace.auto_register_files = auto_register_files
+        # Mock get_file_id_from_path to return a valid file_id
+        self.mock_workspace.get_file_id_from_path = Mock(return_value="test-file-id")
+        # Mock resolve_path_with_search
+        self.mock_workspace.resolve_path_with_search = Mock(
+            return_value=Path("/tmp/test.jpg")
+        )
+
         self.tool = LogoOverlayTool(workspace=self.mock_workspace)
         self.core = LogoOverlayCore()
 

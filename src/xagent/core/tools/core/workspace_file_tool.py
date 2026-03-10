@@ -299,7 +299,9 @@ class WorkspaceFileOperations:
 
         file_id = self.workspace.get_file_id_from_path(str(resolved_path))
 
-        logger.debug("Successfully wrote file: %s", resolved_path)
+        logger.debug(
+            "Successfully wrote file: %s with file_id: %s", resolved_path, file_id
+        )
         return {
             "success": True,
             "file_id": file_id,

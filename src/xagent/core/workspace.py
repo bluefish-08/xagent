@@ -51,6 +51,8 @@ class TaskWorkspace:
         self.id = id
         self.base_dir = Path(base_dir)
         self.db_session = None  # Optional database session for file registration
+        self._recently_registered_files: Dict[str, str] = {}  # path -> file_id mapping
+        self._file_id_to_path: Dict[str, Path] = {}  # file_id -> path reverse mapping
 
         # Create workspace directory
         self.workspace_dir = self.base_dir / id
@@ -193,6 +195,21 @@ class TaskWorkspace:
         if not file_id:
             return None
 
+        # Check in-memory cache first
+        if file_id in self._file_id_to_path:
+            cached_path = self._file_id_to_path[file_id]
+            if cached_path.exists():
+                logger.debug(
+                    f"resolve_file_id: Found in cache: {file_id} -> {cached_path}"
+                )
+                return cached_path
+            else:
+                logger.warning(
+                    f"resolve_file_id: Cached path doesn't exist: {cached_path}"
+                )
+                # Remove stale cache entry
+                del self._file_id_to_path[file_id]
+
         # Query from database
         from .storage.manager import create_db_session
 
@@ -215,6 +232,7 @@ class TaskWorkspace:
                 db.close()
         except Exception as e:
             logger.warning(f"Failed to resolve file_id from database: {e}")
+            return None
             return None
 
     def _ensure_directories(self) -> None:
@@ -435,7 +453,16 @@ class TaskWorkspace:
     def _get_file_info(self, file_path: Path, location: str) -> Dict[str, Any]:
         """Get file information for a given path"""
         stat = file_path.stat()
-        file_id = self.register_file(str(file_path))
+        # Get file_id from cache or register new one
+        file_id = self.get_file_id_from_path(str(file_path))
+        if not file_id:
+            # If not in cache and DB registration failed, generate and cache a UUID
+            file_id = str(uuid4())
+            path_str = str(file_path)
+            resolved_str = str(file_path.resolve())
+            self._recently_registered_files[path_str] = file_id
+            self._recently_registered_files[resolved_str] = file_id
+            self._file_id_to_path[file_id] = file_path
 
         return {
             "file_id": file_id,
@@ -519,10 +546,24 @@ class TaskWorkspace:
 
             for file_path in new_files:
                 try:
-                    self.register_file(str(file_path))
-                    logger.debug(f"Auto-registered file: {file_path}")
+                    file_id = self.register_file(str(file_path))
+                    # Store path -> file_id mapping
+                    path_str = str(file_path)
+                    resolved_str = str(file_path.resolve())
+                    self._recently_registered_files[path_str] = file_id
+                    self._recently_registered_files[resolved_str] = file_id
+                    # Store file_id -> path reverse mapping
+                    self._file_id_to_path[file_id] = file_path
+                    logger.debug(f"Auto-registered file: {file_path} -> {file_id}")
                 except Exception as e:
                     logger.warning(f"Failed to auto-register file {file_path}: {e}")
+                    # Generate a temp file_id even if DB registration fails
+                    temp_id = str(uuid4())
+                    path_str = str(file_path)
+                    resolved_str = str(file_path.resolve())
+                    self._recently_registered_files[path_str] = temp_id
+                    self._recently_registered_files[resolved_str] = temp_id
+                    self._file_id_to_path[temp_id] = file_path
 
     def _scan_all_files(self) -> set[Path]:
         """Scan all files in workspace and return as set."""
@@ -546,12 +587,35 @@ class TaskWorkspace:
         return files
 
     def get_file_id_from_path(self, file_path: str) -> Optional[str]:
-        """Get file_id from file path using database."""
-        """Get file_id from file path using database."""
+        """Get file_id from file path using database or in-memory cache."""
         try:
             resolved_path = Path(file_path).resolve()
+            resolved_str = str(resolved_path)
+
+            # Check in-memory cache first (for files just registered)
+            logger.debug(f"get_file_id_from_path: Looking for {resolved_str}")
+            logger.debug(
+                f"get_file_id_from_path: Cache has {len(self._recently_registered_files)} entries: {list(self._recently_registered_files.keys())}"
+            )
+
+            if resolved_str in self._recently_registered_files:
+                logger.debug(
+                    f"get_file_id_from_path: Found in cache: {self._recently_registered_files[resolved_str]}"
+                )
+                return self._recently_registered_files[resolved_str]
+
+            # Also try the original path (not resolved)
+            if file_path in self._recently_registered_files:
+                logger.debug(
+                    f"get_file_id_from_path: Found in cache with original path: {self._recently_registered_files[file_path]}"
+                )
+                return self._recently_registered_files[file_path]
+
+            logger.debug("get_file_id_from_path: Not found in cache, checking DB")
+            # Fall back to database query
             return self._get_file_id_from_db(resolved_path)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"get_file_id_from_path: Exception: {e}")
             return None
 
     def __enter__(self) -> "TaskWorkspace":

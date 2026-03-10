@@ -71,12 +71,23 @@ def model_descriptions():
 @pytest.fixture
 def mock_workspace():
     """Create a mock workspace for testing"""
+    from contextlib import contextmanager
     from pathlib import Path
     from unittest.mock import Mock
 
     workspace = Mock()
     workspace.output_dir = Path("/tmp/test_workspace/output")
     workspace.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mock auto_register_files to return a proper context manager
+    @contextmanager
+    def auto_register_files():
+        yield workspace
+
+    workspace.auto_register_files = auto_register_files
+    # Mock get_file_id_from_path to return a valid file_id
+    workspace.get_file_id_from_path = Mock(return_value="test-file-id")
+
     return workspace
 
 
