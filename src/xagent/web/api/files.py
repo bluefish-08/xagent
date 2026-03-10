@@ -240,6 +240,7 @@ def _resolve_file_path(
     This function handles both:
     - New system: UUID file_id that maps to a database record
     - Legacy system: Relative paths like "web_task_235/output/file.jpeg"
+    - Workspace system: Files created by agents in workspace directories
 
     Args:
         db: Database session

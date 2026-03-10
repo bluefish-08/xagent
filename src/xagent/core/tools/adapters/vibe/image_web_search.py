@@ -86,17 +86,32 @@ class ImageWebSearchTool(AbstractBaseTool):
             search_args.save_to_workspace, search_args.workspace_id
         )
 
-        # Create core searcher instance
-        searcher = ImageWebSearchCore(save_directory)
+        # Perform search within auto_register context
+        if self._workspace and save_directory and search_args.save_to_workspace:
+            # Create core searcher instance
+            searcher = ImageWebSearchCore(save_directory)
 
-        # Perform search
-        results = await searcher.search_images(
-            query=search_args.query,
-            num_results=search_args.num_results,
-            image_size=search_args.image_size,
-            image_type=search_args.image_type,
-            save_images=search_args.save_to_workspace,
-        )
+            with self._workspace.auto_register_files():
+                # Perform search
+                results = await searcher.search_images(
+                    query=search_args.query,
+                    num_results=search_args.num_results,
+                    image_size=search_args.image_size,
+                    image_type=search_args.image_type,
+                    save_images=search_args.save_to_workspace,
+                )
+        else:
+            # Create core searcher instance
+            searcher = ImageWebSearchCore(save_directory)
+
+            # Perform search
+            results = await searcher.search_images(
+                query=search_args.query,
+                num_results=search_args.num_results,
+                image_size=search_args.image_size,
+                image_type=search_args.image_type,
+                save_images=search_args.save_to_workspace,
+            )
 
         return ImageWebSearchResult(results=results).model_dump()
 

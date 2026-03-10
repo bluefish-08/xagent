@@ -79,8 +79,12 @@ class JavaScriptExecutorTool(AbstractBaseTool):
         # Create core executor instance
         executor = JavaScriptExecutorCore(working_directory)
 
-        # Execute code
-        result = executor.execute_code(exec_args.code, packages=pkg_list)
+        # Execute code within auto_register context
+        if self._workspace and working_directory:
+            with self._workspace.auto_register_files():
+                result = executor.execute_code(exec_args.code, packages=pkg_list)
+        else:
+            result = executor.execute_code(exec_args.code, packages=pkg_list)
 
         return JavaScriptExecutorResult(**result).model_dump()
 

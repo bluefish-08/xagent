@@ -83,8 +83,12 @@ class PythonExecutorTool(AbstractBaseTool):
         else:
             full_code = exec_args.code
 
-        # Execute code
-        result = executor.execute_code(full_code, exec_args.capture_output)
+        # Execute code within auto_register context
+        if self._workspace and working_directory:
+            with self._workspace.auto_register_files():
+                result = executor.execute_code(full_code, exec_args.capture_output)
+        else:
+            result = executor.execute_code(full_code, exec_args.capture_output)
 
         return PythonExecutorResult(**result).model_dump()
 

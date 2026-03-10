@@ -21,9 +21,7 @@ class UploadedFile(Base):  # type: ignore
     user_id = Column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    task_id = Column(
-        Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
-    )
+    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=True)
     filename = Column(String(512), nullable=False)
     storage_path = Column(String(2048), nullable=False, unique=True)
     mime_type = Column(String(255), nullable=True)

@@ -170,15 +170,31 @@ class VisionTool:
         if not task:
             raise ValueError("task is required")
         resolved_images = self._resolve_images(self._coalesce_images(images, image))
-        return await self.core.detect_objects(
-            resolved_images,
-            task,
-            mark_objects,
-            box_color,
-            confidence_threshold,
-            temperature,
-            max_tokens,
-        )
+
+        # Execute within auto_register context when marking
+        if mark_objects and self.workspace:
+            with self.workspace.auto_register_files():
+                result = await self.core.detect_objects(
+                    resolved_images,
+                    task,
+                    mark_objects,
+                    box_color,
+                    confidence_threshold,
+                    temperature,
+                    max_tokens,
+                )
+        else:
+            result = await self.core.detect_objects(
+                resolved_images,
+                task,
+                mark_objects,
+                box_color,
+                confidence_threshold,
+                temperature,
+                max_tokens,
+            )
+
+        return result
 
     def get_tools(self) -> list:
         """Get all tool instances."""

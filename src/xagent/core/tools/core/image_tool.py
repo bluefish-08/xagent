@@ -454,9 +454,12 @@ Images are automatically saved to workspace.
             # Download image to workspace if workspace is available
             if image_url and self._workspace:
                 try:
-                    image_path = await self._download_image(image_url)
-                    if image_path:
-                        image_file_id = self._workspace.register_file(image_path)
+                    with self._workspace.auto_register_files():
+                        image_path = await self._download_image(image_url)
+                        if image_path:
+                            image_file_id = self._workspace.get_file_id_from_path(
+                                image_path
+                            )
                 except Exception as e:
                     logger.warning(f"Failed to download image to workspace: {e}")
                     # Continue execution even if download fails
@@ -549,9 +552,14 @@ Images are automatically saved to workspace.
                 try:
                     # Use a different filename pattern for edited images
                     filename = f"edited_image_{uuid.uuid4().hex[:8]}.png"
-                    image_path = await self._download_image(edited_image_url, filename)
-                    if image_path:
-                        image_file_id = self._workspace.register_file(image_path)
+                    with self._workspace.auto_register_files():
+                        image_path = await self._download_image(
+                            edited_image_url, filename
+                        )
+                        if image_path:
+                            image_file_id = self._workspace.get_file_id_from_path(
+                                image_path
+                            )
                 except Exception as e:
                     logger.warning(f"Failed to download edited image to workspace: {e}")
                     # Continue execution even if download fails

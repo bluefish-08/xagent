@@ -1912,9 +1912,24 @@ def generate_pptx(
             slide_data = {k: v for k, v in slide.items() if k != "type"}
             gen.add_slide(slide_type, **slide_data)
 
-    return gen.generate(
-        output_path, title=title, theme=theme, theme_config=theme_config
-    )
+    # Use auto_register_files context to automatically register the created PPTX
+    if workspace:
+        with workspace.auto_register_files():
+            result = gen.generate(
+                output_path, title=title, theme=theme, theme_config=theme_config
+            )
+            # Get file_id from the registered file
+            if result.get("success"):
+                output_file_str = result.get("output")
+                if output_file_str:
+                    file_id = workspace.get_file_id_from_path(output_file_str)
+                    if file_id:
+                        result["file_id"] = file_id
+            return result
+    else:
+        return gen.generate(
+            output_path, title=title, theme=theme, theme_config=theme_config
+        )
 
 
 def unpack_pptx(
@@ -1963,7 +1978,20 @@ def pack_pptx(
         if not output_file.is_absolute():
             output_file = workspace.output_dir / output_file
 
-    return reader.pack(str(output_file), validate=validate)
+    # Use auto_register_files context to automatically register the created PPTX
+    if workspace:
+        with workspace.auto_register_files():
+            result = reader.pack(str(output_file), validate=validate)
+            # Get file_id from the registered file
+            if result.get("success"):
+                output_path_str = result.get("output_path")
+                if output_path_str:
+                    file_id = workspace.get_file_id_from_path(output_path_str)
+                    if file_id:
+                        result["file_id"] = file_id
+            return result
+    else:
+        return reader.pack(str(output_file), validate=validate)
 
 
 def add_slide_pptx(

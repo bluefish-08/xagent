@@ -104,16 +104,28 @@ class LogoOverlayTool(AbstractBaseTool):
         # Create core instance
         core = LogoOverlayCore(output_directory=str(output_dir))
 
-        # Execute overlay
-        result = await core.overlay_logo(
-            base_image_uri=base_image_uri,
-            logo_image_uri=logo_image_uri,
-            position=overlay_args.position,
-            size_ratio=overlay_args.size_ratio,
-            opacity=overlay_args.opacity,
-            padding=overlay_args.padding,
-            output_filename=overlay_args.output_filename,
-        )
+        # Execute overlay within auto_register context
+        if self._workspace:
+            with self._workspace.auto_register_files():
+                result = await core.overlay_logo(
+                    base_image_uri=base_image_uri,
+                    logo_image_uri=logo_image_uri,
+                    position=overlay_args.position,
+                    size_ratio=overlay_args.size_ratio,
+                    opacity=overlay_args.opacity,
+                    padding=overlay_args.padding,
+                    output_filename=overlay_args.output_filename,
+                )
+        else:
+            result = await core.overlay_logo(
+                base_image_uri=base_image_uri,
+                logo_image_uri=logo_image_uri,
+                position=overlay_args.position,
+                size_ratio=overlay_args.size_ratio,
+                opacity=overlay_args.opacity,
+                padding=overlay_args.padding,
+                output_filename=overlay_args.output_filename,
+            )
 
         return LogoOverlayResult(**result).model_dump()
 

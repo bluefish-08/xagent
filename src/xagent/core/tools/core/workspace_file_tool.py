@@ -291,11 +291,13 @@ class WorkspaceFileOperations:
             logger.debug("Creating parent directories for: %s", resolved_path.parent)
             resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.debug("Writing %d bytes to: %s", len(content), resolved_path)
-        with open(resolved_path, "w", encoding=encoding) as f:
-            f.write(content)
+        # Use auto_register context to automatically register files
+        with self.workspace.auto_register_files():
+            logger.debug("Writing %d bytes to: %s", len(content), resolved_path)
+            with open(resolved_path, "w", encoding=encoding) as f:
+                f.write(content)
 
-        file_id = self.workspace.register_file(str(resolved_path))
+        file_id = self.workspace.get_file_id_from_path(str(resolved_path))
 
         logger.debug("Successfully wrote file: %s", resolved_path)
         return {
