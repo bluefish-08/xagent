@@ -194,13 +194,13 @@ interface AppState {
   taskId: number | null
   filePreview: {
     isOpen: boolean
-    filePath: string
+    fileId: string
     fileName: string
     content: string
     isLoading: boolean
     error: string | null
     // Support switching between multiple file previews
-    availableFiles: Array<{ filePath: string; fileName: string }>
+    availableFiles: Array<{ fileId: string; fileName: string }>
     currentIndex: number
   }
   isReplaying: boolean
@@ -237,9 +237,9 @@ type AppAction =
   | { type: "SET_PROCESSING"; payload: boolean }
   | { type: "CLEAR_MESSAGES" }
   | { type: "RESET_STATE" }
-  | { type: "OPEN_FILE_PREVIEW"; payload: { filePath: string; fileName: string; files?: Array<{ filePath: string; fileName: string }>; index?: number } }
+  | { type: "OPEN_FILE_PREVIEW"; payload: { fileId: string; fileName: string; files?: Array<{ fileId: string; fileName: string }>; index?: number } }
   | { type: "CLOSE_FILE_PREVIEW" }
-  | { type: "SWITCH_FILE_PREVIEW"; payload: { filePath: string; fileName: string; index: number } }
+  | { type: "SWITCH_FILE_PREVIEW"; payload: { fileId: string; fileName: string; index: number } }
   | { type: "SET_FILE_PREVIEW_CONTENT"; payload: { content: string; error: string | null } }
   | { type: "SET_FILE_PREVIEW_LOADING"; payload: boolean }
   | { type: "START_REPLAY"; payload: { taskId: number; events: TraceEvent[] } }
@@ -265,7 +265,7 @@ const initialState: AppState = {
   taskId: null,
   filePreview: {
     isOpen: false,
-    filePath: '',
+    fileId: '',
     fileName: '',
     content: '',
     isLoading: false,
@@ -401,7 +401,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case "OPEN_FILE_PREVIEW":
       // Support passing single file or multiple file list
-      const files = action.payload.files || [{ filePath: action.payload.filePath, fileName: action.payload.fileName }]
+      const files = action.payload.files || [{ fileId: action.payload.fileId, fileName: action.payload.fileName }]
       const currentIndex = action.payload.index || 0
 
       return {
@@ -409,7 +409,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         filePreview: {
           ...state.filePreview,
           isOpen: true,
-          filePath: files[currentIndex]?.filePath || action.payload.filePath,
+          fileId: files[currentIndex]?.fileId || action.payload.fileId,
           fileName: files[currentIndex]?.fileName || action.payload.fileName,
           content: '',
           isLoading: true,
@@ -434,7 +434,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         filePreview: {
           ...state.filePreview,
-          filePath: action.payload.filePath,
+          fileId: action.payload.fileId,
           fileName: action.payload.fileName,
           content: '',
           isLoading: true,
@@ -571,7 +571,7 @@ interface AppContextType {
   connectionError: Error | null
   setTaskId: (taskId: number | null) => void
   requestStatus: () => void
-  openFilePreview: (filePath: string, fileName: string, files?: Array<{ filePath: string; fileName: string }>, index?: number) => void
+  openFilePreview: (fileId: string, fileName: string, files?: Array<{ fileId: string; fileName: string }>, index?: number) => void
   switchFilePreview: (index: number) => void
   closeFilePreview: () => void
   startReplay: (taskId: number, events: TraceEvent[]) => void
@@ -3119,22 +3119,22 @@ export function AppProvider({ children, token }: { children: React.ReactNode; to
     dispatch({ type: "SET_TASK_ID", payload: taskId })
   }, [state.taskId])
 
-  const openFilePreview = useCallback((filePath: string, fileName: string, files?: Array<{ filePath: string; fileName: string }>, index?: number) => {
+  const openFilePreview = useCallback((fileId: string, fileName: string, files?: Array<{ fileId: string; fileName: string }>, index?: number) => {
     console.log('🎯 openFilePreview called:', {
-      filePath,
+      fileId,
       fileName,
       files: files,
       filesLength: files?.length,
       index
     })
-    dispatch({ type: "OPEN_FILE_PREVIEW", payload: { filePath, fileName, files, index } })
+    dispatch({ type: "OPEN_FILE_PREVIEW", payload: { fileId, fileName, files, index } })
   }, [])
 
   const switchFilePreview = useCallback((index: number) => {
     const { availableFiles } = state.filePreview
     if (index >= 0 && index < availableFiles.length) {
       const file = availableFiles[index]
-      dispatch({ type: "SWITCH_FILE_PREVIEW", payload: { filePath: file.filePath, fileName: file.fileName, index } })
+      dispatch({ type: "SWITCH_FILE_PREVIEW", payload: { fileId: file.fileId, fileName: file.fileName, index } })
     }
   }, [state.filePreview.availableFiles])
 

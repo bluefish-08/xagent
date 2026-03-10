@@ -19,7 +19,7 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
 
   // Load file content when the preview is open within container
   useEffect(() => {
-    if (open && filePreview.filePath && !filePreview.content && !filePreview.error) {
+    if (open && filePreview.fileId && !filePreview.content && !filePreview.error) {
       const loadFileContent = async () => {
         try {
           const apiUrl = getApiUrl()
@@ -29,7 +29,7 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
           const isPdf = isPptx || filePreview.fileName.match(/\.pdf$/i)
           const isDocx = filePreview.fileName.match(/\.docx$/i)
 
-          const url = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.filePath)}`
+          const url = `${apiUrl}/api/files/download/${filePreview.fileId}`
 
           const response = await apiRequest(url, {
             cache: 'no-cache',
@@ -86,7 +86,7 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
 
       loadFileContent()
     }
-  }, [open, filePreview.filePath, filePreview.content, filePreview.error, dispatch, t, filePreview.fileName])
+  }, [open, filePreview.fileId, filePreview.content, filePreview.error, dispatch, t, filePreview.fileName])
 
   const processHtmlContent = (htmlContent: string, fileId: string) => {
     if (!htmlContent || !fileId) return htmlContent
@@ -126,7 +126,7 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
               <DocxPreviewRenderer base64Content={filePreview.content || ''} />
             ) : filePreview.fileName.endsWith('.html') || filePreview.fileName.endsWith('.htm') ? (
               <iframe
-                srcDoc={processHtmlContent(filePreview.content, filePreview.filePath)}
+                srcDoc={processHtmlContent(filePreview.content, filePreview.fileId)}
                 className="w-full h-full border-0"
                 sandbox="allow-same-origin allow-scripts"
                 title={filePreview.fileName}

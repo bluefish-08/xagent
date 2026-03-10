@@ -498,8 +498,6 @@ async def upload_file(
 async def list_files(
     user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    _backfill_uploaded_file_records(db, user)
-
     query = db.query(UploadedFile)
     if not _is_admin_user(user):
         query = query.filter(UploadedFile.user_id == _user_id_value(user))
@@ -524,6 +522,65 @@ async def list_files(
         )
 
     return {"files": files, "total_count": len(files)}
+
+
+@file_router.get("/task/{task_id}")
+async def list_task_files(
+    task_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Get all files for a specific task.
+
+    More efficient than /api/files/list as it filters at database level.
+    Only returns files that are already registered in the database.
+    """
+    # Query files for this task
+    query = db.query(UploadedFile).filter(UploadedFile.task_id == task_id)
+
+    # Query files for this task
+    query = db.query(UploadedFile).filter(UploadedFile.task_id == task_id)
+
+    # Permission check: only show user's own files unless admin
+    if not _is_admin_user(user):
+        query = query.filter(UploadedFile.user_id == _user_id_value(user))
+
+    records = query.order_by(UploadedFile.created_at.desc()).all()
+
+    files = []
+    for record in records:
+        path = Path(_file_storage_path_value(record))
+        if not path.exists():
+            # Skip files that no longer exist on disk
+            continue
+
+        record_user_id = _file_user_id_value(record)
+        relative_path = _extract_relative_path(path, record_user_id)
+
+        # Categorize by directory (input/output/temp)
+        path_parts = relative_path.split("/")
+        file_category = "other"
+        if len(path_parts) >= 2:
+            subdir = path_parts[1]  # e.g., "input", "output", "temp"
+            if subdir in ["input", "output", "temp"]:
+                file_category = subdir
+
+        files.append(
+            {
+                "file_id": record.file_id,
+                "filename": _file_name_value(record),
+                "file_size": record.file_size,
+                "modified_time": _to_unix_timestamp(path, record.created_at),
+                "file_type": path.suffix.lower().lstrip("."),
+                "relative_path": relative_path,
+                "category": file_category,
+                "task_id": record.task_id,
+                "user_id": record_user_id,
+            }
+        )
+
+    return {"files": files, "total_count": len(files), "task_id": task_id}
 
 
 @file_router.get("/download/{file_id:path}", response_model=None)
@@ -656,6 +713,27 @@ async def public_preview_file(
         media_type=_guess_media_type(target_path.name),
         headers={"Content-Disposition": "inline"},
     )
+
+
+@file_router.post("/backfill")
+async def backfill_files(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Manually trigger file backfill to sync filesystem with database.
+
+    This is a maintenance operation that scans the filesystem and creates
+    database records for any unregistered files. Only available to admins.
+    """
+    if not _is_admin_user(user):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        _backfill_uploaded_file_records(db, user)
+        return {"success": True, "message": "File backfill completed successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {str(e)}") from e
 
 
 @file_router.delete("/{file_id:path}")

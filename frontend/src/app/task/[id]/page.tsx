@@ -119,9 +119,9 @@ function TaskDetailContent() {
 
   const handleDownload = async () => {
     try {
-      if (!state.filePreview.filePath) return;
+      if (!state.filePreview.fileId) return;
 
-      const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(state.filePreview.filePath)}`);
+      const response = await apiRequest(`${getApiUrl()}/api/files/download/${state.filePreview.fileId}`);
 
       if (!response.ok) {
         throw new Error(`Download failed: ${response.statusText}`);
@@ -403,7 +403,7 @@ function TaskDetailContent() {
 
               <TaskFileManager
                 taskId={state.taskId}
-                onPreview={(filePath, fileName) => openFilePreview(filePath, fileName)}
+                onPreview={(fileId, fileName) => openFilePreview(fileId, fileName)}
               >
                 <div
                   className="ml-2 inline-flex items-center gap-1 rounded-xl border bg-card/80 backdrop-blur p-2 cursor-pointer hover:bg-muted/30 transition-colors text-sm"

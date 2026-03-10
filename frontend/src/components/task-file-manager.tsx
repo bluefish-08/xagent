@@ -11,18 +11,20 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 interface FileItem {
+  file_id: string
   filename: string
   file_size: number
   modified_time: number
   file_type?: string
   workspace_id?: string
   relative_path?: string
+  category?: 'input' | 'output' | 'temp' | 'other'
 }
 
 interface TaskFileManagerProps {
   taskId: number | null
   children: React.ReactNode
-  onPreview: (filePath: string, fileName: string) => void
+  onPreview: (fileId: string, fileName: string) => void
 }
 
 export function TaskFileManager({ taskId, children, onPreview }: TaskFileManagerProps) {
@@ -36,7 +38,7 @@ export function TaskFileManager({ taskId, children, onPreview }: TaskFileManager
     if (!taskId) return;  // Don't load if no task selected
     setIsLoading(true)
     try {
-      const response = await apiRequest(`${getApiUrl()}/api/files/list`)
+      const response = await apiRequest(`${getApiUrl()}/api/files/task/${taskId}`)
       if (response.ok) {
         const data = await response.json()
         if (data && data.files) {
@@ -65,18 +67,16 @@ export function TaskFileManager({ taskId, children, onPreview }: TaskFileManager
   }
 
   const getInputFiles = () => {
-    // Input files: User uploads (files in web_task_{taskId}/input/)
-    if (!taskId) return []
-    const prefix = `web_task_${taskId}/input/`
-    return files.filter(f => f.relative_path?.startsWith(prefix))
+    // Input files: files categorized as 'input'
+    return files
+      .filter(f => f.category === 'input')
       .sort((a, b) => b.modified_time - a.modified_time)
   }
 
   const getOutputFiles = () => {
-    // Output files: Task specific files (files in web_task_{taskId}/output/)
-    if (!taskId) return []
-    const prefix = `web_task_${taskId}/output/`
-    return files.filter(f => f.relative_path?.startsWith(prefix))
+    // Output files: files categorized as 'output'
+    return files
+      .filter(f => f.category === 'output')
       .sort((a, b) => b.modified_time - a.modified_time)
   }
 
@@ -106,7 +106,7 @@ export function TaskFileManager({ taskId, children, onPreview }: TaskFileManager
             className="flex items-center justify-between p-2 rounded-lg hover:bg-accent/50 transition-all group cursor-pointer"
             onClick={() => {
               setIsOpen(false)
-              onPreview(file.relative_path || '', file.filename)
+              onPreview(file.file_id, file.filename)
             }}
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">

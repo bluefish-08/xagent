@@ -79,7 +79,7 @@ function StepDetail({ step }: { step: StepExecution }) {
         }
       }
       return null
-    }).filter(Boolean) as { filePath: string; fileName: string }[] | undefined) || [{
+    }).filter(Boolean) as { fileId: string; fileName: string }[] | undefined) || [{
       filePath: fileId,
       fileName: fileName || fileId,
     }]
@@ -87,7 +87,7 @@ function StepDetail({ step }: { step: StepExecution }) {
     openFilePreview(
       fileId,
       fileName || fileId,
-      files as { filePath: string; fileName: string }[],
+      files as { fileId: string; fileName: string }[],
       0
     )
   }
@@ -95,15 +95,15 @@ function StepDetail({ step }: { step: StepExecution }) {
   const handlePreviewAllFiles = () => {
     if (step.file_outputs && step.file_outputs.length > 0) {
       const files = step.file_outputs.map(file => ({
-        filePath: typeof file === 'object' && file !== null ? (file.file_id || '') : '',
+        fileId: typeof file === 'object' && file !== null ? (file.file_id || '') : '',
         fileName: typeof file === 'object' && file !== null ? (file.filename || 'Unknown File') : 'Unknown File'
-      })).filter(file => !!file.filePath)
+      })).filter(file => !!file.fileId)
 
-      if (files[0].filePath) {
+      if (files[0].fileId) {
         openFilePreview(
-          files[0].filePath as string,
+          files[0].fileId as string,
           files[0].fileName as string,
-          files as { filePath: string; fileName: string }[],
+          files as { fileId: string; fileName: string }[],
           0
         )
       }

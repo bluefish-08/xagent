@@ -28,7 +28,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
 
   // Load file content when dialog opens
   useEffect(() => {
-    if (open && filePreview.filePath && !filePreview.content && !filePreview.error) {
+    if (open && filePreview.fileId && !filePreview.content && !filePreview.error) {
       const loadFileContent = async () => {
         try {
           const apiUrl = getApiUrl()
@@ -40,9 +40,9 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
 
           let url: string
           if (isPptxFile) {
-            url = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.filePath)}`
+            url = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.fileId)}`
           } else {
-            url = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.filePath)}`
+            url = `${apiUrl}/api/files/download/${encodeURIComponent(filePreview.fileId)}`
           }
 
           const response = await apiRequest(url, {
@@ -110,7 +110,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
 
       loadFileContent()
     }
-  }, [open, filePreview.filePath, filePreview.content, filePreview.error, filePreview.fileName, dispatch])
+  }, [open, filePreview.fileId, filePreview.content, filePreview.error, filePreview.fileName, dispatch])
 
   // Convert relative paths in HTML to absolute paths
   const processHtmlContent = (htmlContent: string, fileId: string) => {
@@ -135,9 +135,9 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
   }
 
   const handleDownload = async () => {
-    if (filePreview.filePath) {
+    if (filePreview.fileId) {
       try {
-        const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(filePreview.filePath)}`)
+        const response = await apiRequest(`${getApiUrl()}/api/files/download/${encodeURIComponent(filePreview.fileId)}`)
 
         if (!response.ok) {
           throw new Error(`Download failed: ${response.statusText}`)
@@ -165,7 +165,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
   }
 
   const handleOpenInNewWindow = () => {
-    if (filePreview.filePath) {
+    if (filePreview.fileId) {
       // Check if this is a PPTX file
       const isPptxFile = filePreview.fileName.toLowerCase().endsWith('.pptx') ||
                         filePreview.fileName.toLowerCase().endsWith('.ppt')
@@ -173,9 +173,9 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
       let fileUrl: string
       const apiUrl = getApiUrl()
       if (isPptxFile) {
-        fileUrl = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.filePath)}`
+        fileUrl = `${apiUrl}/api/files/preview/${encodeURIComponent(filePreview.fileId)}`
       } else {
-        fileUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(filePreview.filePath)}`
+        fileUrl = `${apiUrl}/api/files/public/preview/${encodeURIComponent(filePreview.fileId)}`
       }
 
       // Open in new window/tab
@@ -320,7 +320,7 @@ export function FilePreviewDialog({ open, onOpenChange }: FilePreviewDialogProps
                 <DocxPreviewRenderer base64Content={filePreview.content || ''} />
               ) : filePreview.fileName.endsWith('.html') || filePreview.fileName.endsWith('.htm') ? (
                 <iframe
-                  srcDoc={processHtmlContent(filePreview.content, filePreview.filePath)}
+                  srcDoc={processHtmlContent(filePreview.content, filePreview.fileId)}
                   className="w-full h-full border-0"
                   sandbox="allow-same-origin allow-scripts"
                   title={filePreview.fileName}
