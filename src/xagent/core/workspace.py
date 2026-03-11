@@ -156,6 +156,7 @@ class TaskWorkspace:
             logger.error(f"Failed to create file record: {e}")
             if should_close:
                 db.rollback()
+            raise  # Re-raise so caller knows registration failed
         finally:
             if should_close:
                 db.close()
@@ -232,7 +233,6 @@ class TaskWorkspace:
                 db.close()
         except Exception as e:
             logger.warning(f"Failed to resolve file_id from database: {e}")
-            return None
             return None
 
     def _ensure_directories(self) -> None:
@@ -451,18 +451,14 @@ class TaskWorkspace:
         return result
 
     def _get_file_info(self, file_path: Path, location: str) -> Dict[str, Any]:
-        """Get file information for a given path"""
+        """Get file information for a given path.
+
+        Note: file_id will be None if the file is not registered in the database.
+        Callers should handle this case appropriately.
+        """
         stat = file_path.stat()
-        # Get file_id from cache or register new one
+        # Get file_id from cache or DB (None if not registered)
         file_id = self.get_file_id_from_path(str(file_path))
-        if not file_id:
-            # If not in cache and DB registration failed, generate and cache a UUID
-            file_id = str(uuid4())
-            path_str = str(file_path)
-            resolved_str = str(file_path.resolve())
-            self._recently_registered_files[path_str] = file_id
-            self._recently_registered_files[resolved_str] = file_id
-            self._file_id_to_path[file_id] = file_path
 
         return {
             "file_id": file_id,
@@ -556,20 +552,15 @@ class TaskWorkspace:
                     self._file_id_to_path[file_id] = file_path
                     logger.debug(f"Auto-registered file: {file_path} -> {file_id}")
                 except Exception as e:
-                    logger.warning(f"Failed to auto-register file {file_path}: {e}")
-                    # Generate a temp file_id even if DB registration fails
-                    temp_id = str(uuid4())
-                    path_str = str(file_path)
-                    resolved_str = str(file_path.resolve())
-                    self._recently_registered_files[path_str] = temp_id
-                    self._recently_registered_files[resolved_str] = temp_id
-                    self._file_id_to_path[temp_id] = file_path
+                    # Don't generate fake file_id - file will need to be backfilled later
+                    logger.error(
+                        f"Failed to auto-register file {file_path}: {e}. "
+                        f"File exists on disk but is not in database - will require backfill."
+                    )
 
     def _scan_all_files(self) -> set[Path]:
         """Scan all files in workspace and return as set."""
         files: set[Path] = set()
-        """Scan all files in workspace and return as set."""
-        files = set()
         if not self.workspace_dir.exists():
             return files
 

@@ -11,9 +11,29 @@ from xagent.core.model.chat.basic.openai import OpenAILLM
 from xagent.core.workspace import TaskWorkspace
 
 
+@pytest.fixture
+def mock_workspace_db(mocker):
+    """Mock database operations for workspace to avoid DB access in tests."""
+
+    # Mock _create_file_record to do nothing (avoid DB access)
+    def mock_create_record(self, file_id, file_path):
+        # Store file_id in cache for retrieval
+        path_str = str(file_path)
+        resolved_str = str(file_path.resolve())
+        self._recently_registered_files[path_str] = file_id
+        self._recently_registered_files[resolved_str] = file_id
+        self._file_id_to_path[file_id] = file_path
+
+    mocker.patch(
+        "xagent.core.workspace.TaskWorkspace._create_file_record", mock_create_record
+    )
+    return mocker
+
+
 class TestDAGFileOutputs:
     """Test DAG plan-execute pattern file outputs functionality."""
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_extract_file_outputs_with_workspace(self, tmp_path):
         """Test that file outputs are extracted from workspace."""
         # Create a mock LLM
@@ -86,6 +106,7 @@ class TestDAGFileOutputs:
         # Should be empty
         assert file_outputs == []
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_extract_file_outputs_mixed_sources(self, tmp_path):
         """Test that workspace files take precedence over execution results."""
         # Create a mock LLM

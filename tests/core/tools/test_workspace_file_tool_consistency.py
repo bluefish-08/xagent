@@ -8,9 +8,29 @@ from xagent.core.tools.adapters.vibe.workspace_file_tool import WorkspaceFileToo
 from xagent.core.workspace import TaskWorkspace
 
 
+@pytest.fixture
+def mock_workspace_db(mocker):
+    """Mock database operations for workspace to avoid DB access in tests."""
+
+    # Mock _create_file_record to do nothing (avoid DB access)
+    def mock_create_record(self, file_id, file_path):
+        # Store file_id in cache for retrieval
+        path_str = str(file_path)
+        resolved_str = str(file_path.resolve())
+        self._recently_registered_files[path_str] = file_id
+        self._recently_registered_files[resolved_str] = file_id
+        self._file_id_to_path[file_id] = file_path
+
+    mocker.patch(
+        "xagent.core.workspace.TaskWorkspace._create_file_record", mock_create_record
+    )
+    return mocker
+
+
 class TestWorkspaceFileToolConsistency:
     """Test that write and read operations work consistently."""
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_then_read_consistency(self, tmp_path):
         """Test that a file written can be immediately read back."""
         # Create workspace
@@ -35,9 +55,11 @@ class TestWorkspaceFileToolConsistency:
         read_content = tools.read_file(test_filename)
         assert read_content == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_then_read_with_relative_path(self, tmp_path):
         """Test that relative paths work consistently."""
         workspace = TaskWorkspace("test_task", str(tmp_path))
+        # Manually set up the cache after workspace creation (mock runs after __init__)
         tools = WorkspaceFileTools(workspace)
 
         test_content = "Relative path test"
@@ -57,6 +79,7 @@ class TestWorkspaceFileToolConsistency:
         read_content = tools.read_file(test_filename)
         assert read_content == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_then_read_with_different_default_dirs(self, tmp_path):
         """Test that write and read use consistent default directories."""
         workspace = TaskWorkspace("test_task", str(tmp_path))
@@ -89,6 +112,7 @@ class TestWorkspaceFileToolConsistency:
         ):
             tools.read_file("nonexistent.txt")
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_with_output_prefix(self, tmp_path):
         """Test that writing with 'output/' prefix doesn't create duplicate directories."""
         workspace = TaskWorkspace("test_task", str(tmp_path))
@@ -115,6 +139,7 @@ class TestWorkspaceFileToolConsistency:
         # Verify content is correct
         assert expected_file.read_text() == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_with_input_prefix(self, tmp_path):
         """Test that writing with 'input/' prefix works correctly."""
         workspace = TaskWorkspace("test_task", str(tmp_path))
@@ -132,6 +157,7 @@ class TestWorkspaceFileToolConsistency:
         assert expected_file.exists()
         assert expected_file.read_text() == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_write_with_temp_prefix(self, tmp_path):
         """Test that writing with 'temp/' prefix works correctly."""
         workspace = TaskWorkspace("test_task", str(tmp_path))
@@ -148,6 +174,7 @@ class TestWorkspaceFileToolConsistency:
         assert expected_file.exists()
         assert expected_file.read_text() == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_read_by_file_id(self, tmp_path):
         workspace = TaskWorkspace("test_task", str(tmp_path))
         tools = WorkspaceFileTools(workspace)
@@ -159,6 +186,7 @@ class TestWorkspaceFileToolConsistency:
         read_content = tools.read_file(file_id)
         assert read_content == test_content
 
+    @pytest.mark.usefixtures("mock_workspace_db")
     def test_read_by_file_link_prefix(self, tmp_path):
         workspace = TaskWorkspace("test_task", str(tmp_path))
         tools = WorkspaceFileTools(workspace)

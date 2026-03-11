@@ -539,9 +539,6 @@ async def list_task_files(
     # Query files for this task
     query = db.query(UploadedFile).filter(UploadedFile.task_id == task_id)
 
-    # Query files for this task
-    query = db.query(UploadedFile).filter(UploadedFile.task_id == task_id)
-
     # Permission check: only show user's own files unless admin
     if not _is_admin_user(user):
         query = query.filter(UploadedFile.user_id == _user_id_value(user))
