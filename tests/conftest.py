@@ -111,6 +111,32 @@ def test_security_dir(tmp_path):
     return str(security_dir)
 
 
+@pytest.fixture(autouse=True, scope="function")
+def mock_workspace_db():
+    """Mock database operations for workspace to avoid DB access in tests.
+
+    This fixture is automatically applied to all tests to prevent database
+    access during testing. Tests can override this by explicitly creating
+    real database connections if needed.
+    """
+
+    from unittest.mock import patch
+
+    from xagent.core.workspace import TaskWorkspace
+
+    # Mock _create_file_record to do nothing (avoid DB access)
+    def mock_create_record(self, file_id, file_path):
+        # Store file_id in cache for retrieval
+        path_str = str(file_path)
+        resolved_str = str(file_path.resolve())
+        self._recently_registered_files[path_str] = file_id
+        self._recently_registered_files[resolved_str] = file_id
+        self._file_id_to_path[file_id] = file_path
+
+    with patch.object(TaskWorkspace, "_create_file_record", mock_create_record):
+        yield
+
+
 @pytest.fixture
 def temp_tool_dir():
     """Create a temporary directory with a single sample tool file.
