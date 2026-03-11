@@ -89,6 +89,10 @@ class XinferenceImageModel(BaseImageModel):
         prompt: str,
         size: str = "1024*1024",
         negative_prompt: str = "",
+        resolution: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        aspect_ratio: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -98,6 +102,10 @@ class XinferenceImageModel(BaseImageModel):
             prompt: Text prompt for image generation
             size: Image size in format "width*height" (e.g., "1024*1024")
             negative_prompt: Negative prompt for image generation
+            resolution: Alternative size specification (e.g., "1920x1080")
+            width: Image width in pixels
+            height: Image height in pixels
+            aspect_ratio: Aspect ratio (e.g., "3:2", "16:9")
             **kwargs: Additional parameters specific to the model
                       - n: Number of images to generate (default: 1)
                       - response_format: Format of response ("url" or "b64_json")
@@ -113,6 +121,23 @@ class XinferenceImageModel(BaseImageModel):
         """
         if not self.has_ability("generate"):
             raise RuntimeError("This model doesn't support image generation")
+
+        # Handle alternative size parameters
+        # Xinference uses "width*height" format (e.g., "1024*1024")
+        # Priority: resolution > width+height > size
+        # Note: aspect_ratio is not directly supported, use size instead
+        if aspect_ratio:
+            # Xinference doesn't support aspect_ratio parameter directly
+            # Log a warning but continue with the base size
+            logger.warning(
+                f"aspect_ratio parameter '{aspect_ratio}' is not directly supported by Xinference API, using size '{size}' instead"
+            )
+        elif resolution:
+            # resolution format: "1920x1080" -> "1920*1080"
+            size = resolution.replace("x", "*")
+        elif width and height:
+            # width + height format: convert to "W*H" format
+            size = f"{width}*{height}"
 
         self._ensure_client()
         assert self._model_handle is not None

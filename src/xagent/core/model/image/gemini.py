@@ -208,6 +208,10 @@ class GeminiImageModel(BaseImageModel):
         prompt: str,
         size: str = "1024*1024",
         negative_prompt: str = "",
+        resolution: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        aspect_ratio: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -220,6 +224,10 @@ class GeminiImageModel(BaseImageModel):
             prompt: Text prompt for image generation
             size: Image size in format "width*height" (e.g., "1024*1024")
             negative_prompt: Negative prompt for image generation (passed in request)
+            resolution: Alternative size specification (e.g., "1920x1080")
+            width: Image width in pixels
+            height: Image height in pixels
+            aspect_ratio: Aspect ratio (e.g., "16:9", "3:2", "1:1"). Overrides size-based calculation if provided.
             **kwargs: Additional parameters (e.g., temperature, etc.)
 
         Returns:
@@ -236,6 +244,43 @@ class GeminiImageModel(BaseImageModel):
 
         if not self.has_ability("generate"):
             raise RuntimeError("This model doesn't support image generation")
+
+        # Handle alternative size parameters
+        # Priority: aspect_ratio > resolution > width+height > size
+        actual_size = size
+
+        # Log received parameters for debugging
+        if resolution or (width and height) or aspect_ratio:
+            logger.info(
+                f"Image size parameters received - size: {size}, resolution: {resolution}, "
+                f"width: {width}, height: {height}, aspect_ratio: {aspect_ratio}"
+            )
+
+            # Warn users that Gemini doesn't support exact pixel dimensions
+            logger.warning(
+                "Gemini API does not support exact pixel dimensions. "
+                "Requests will be converted to the closest aspect ratio (e.g., 4:3, 3:2, 16:9) "
+                "and size bucket (1K/2K/4K). Actual output dimensions may vary from requested dimensions."
+            )
+
+        if resolution:
+            # resolution format: "1920x1080"
+            actual_size = resolution.replace("x", "*")
+            logger.info(
+                f"Using resolution parameter: {resolution} -> actual_size={actual_size}"
+            )
+        elif width and height:
+            # width + height format
+            actual_size = f"{width}*{height}"
+            logger.info(
+                f"Using width/height parameters: {width}x{height} -> actual_size={actual_size}"
+            )
+        elif aspect_ratio:
+            logger.info(
+                f"Using aspect_ratio parameter: {aspect_ratio} with base size: {actual_size}"
+            )
+
+        # else use the default size parameter
 
         # Build the API URL using generateContent endpoint
         is_official_api = "googleapis.com" in self.base_url
@@ -259,9 +304,21 @@ class GeminiImageModel(BaseImageModel):
         gen_config: dict[str, Any] = {"responseModalities": ["Image"]}
 
         # Add image configuration based on size
-        image_config = _parse_size_to_gemini_config(size, self.model_name)
+        image_config = _parse_size_to_gemini_config(actual_size, self.model_name)
+
+        # Override aspect ratio if explicitly provided
+        if aspect_ratio:
+            if image_config:
+                image_config["aspectRatio"] = aspect_ratio
+            else:
+                image_config = {"aspectRatio": aspect_ratio}
+            logger.info(f"Using explicit aspect_ratio: {aspect_ratio}")
+
         if image_config:
             gen_config["imageConfig"] = image_config
+            logger.info(
+                f"Final image_config: aspectRatio={image_config.get('aspectRatio')}, imageSize={image_config.get('imageSize')}"
+            )
 
         if kwargs:
             if "temperature" in kwargs:
@@ -273,7 +330,7 @@ class GeminiImageModel(BaseImageModel):
             "Gemini image generation API URL: %s",
             redact_url_credentials_for_logging(api_url),
         )
-        logger.debug(f"Image config: {image_config}")
+        logger.info(f"Generation config: {gen_config}")
         logger.debug(f"Request prompt: {prompt[:100]}...")
 
         try:

@@ -78,10 +78,50 @@ class OpenAIImageModel(BaseImageModel):
         prompt: str,
         size: str = "1024*1024",
         negative_prompt: str = "",
+        resolution: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        aspect_ratio: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """
+        Generate an image using OpenAI-compatible API.
+
+        Args:
+            prompt: Text prompt for image generation
+            size: Image size in format "width*height" (e.g., "1024*1024")
+            negative_prompt: Negative prompt (not supported by all providers)
+            resolution: Alternative size specification (e.g., "1920x1080")
+            width: Image width in pixels
+            height: Image height in pixels
+            aspect_ratio: Aspect ratio (e.g., "3:2", "16:9")
+            **kwargs: Additional parameters (response_format, etc.)
+
+        Returns:
+            dict with image generation result
+        """
         if not self.has_ability("generate"):
             raise RuntimeError("This model doesn't support image generation")
+
+        # Handle alternative size parameters
+        # OpenAI API uses simple size format like "1024x1024"
+        # Priority: resolution > width+height > size
+        # Note: aspect_ratio is not directly supported, use size instead
+        if aspect_ratio:
+            # OpenAI doesn't support aspect_ratio parameter directly
+            # Log a warning but continue with the base size
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"aspect_ratio parameter '{aspect_ratio}' is not directly supported by OpenAI API, using size '{size}' instead"
+            )
+        elif resolution:
+            # resolution format: "1920x1080" -> "1920x1080" (already in correct format)
+            size = resolution.replace("x", "x")  # Normalize to use "x"
+        elif width and height:
+            # width + height format: convert to "WxH" format
+            size = f"{width}x{height}"
 
         self._ensure_client()
         assert self._client is not None

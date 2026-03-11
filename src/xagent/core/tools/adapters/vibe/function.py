@@ -91,6 +91,14 @@ class FunctionTool(AbstractBaseTool):
         sig = inspect.signature(self.func)
         fields: dict[str, Any] = {}
         for name, param in sig.parameters.items():
+            # Skip VAR_KEYWORD (**kwargs) and VAR_POSITIONAL (*args) parameters
+            # as they don't map to named fields in the tool schema
+            if param.kind in (
+                inspect.Parameter.VAR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+            ):
+                continue
+
             annotation = (
                 param.annotation if param.annotation != inspect.Parameter.empty else Any
             )

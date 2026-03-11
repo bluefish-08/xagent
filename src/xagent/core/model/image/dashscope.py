@@ -107,6 +107,10 @@ class DashScopeImageModel(BaseImageModel):
         prompt: str,
         size: str = "1024*1024",
         negative_prompt: str = "",
+        resolution: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        aspect_ratio: Optional[str] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -116,6 +120,10 @@ class DashScopeImageModel(BaseImageModel):
             prompt: Text prompt for image generation
             size: Image size in format "width*height" (e.g., "1024*1024")
             negative_prompt: Negative prompt for image generation
+            resolution: Alternative size specification (e.g., "1920x1080")
+            width: Image width in pixels
+            height: Image height in pixels
+            aspect_ratio: Aspect ratio (e.g., "3:2", "16:9") - DashScope uses size instead
             **kwargs: Additional parameters specific to the model
                      For DashScope: prompt_extend, watermark, etc.
 
@@ -133,6 +141,26 @@ class DashScopeImageModel(BaseImageModel):
 
         if not self.has_ability("generate"):
             raise RuntimeError("This model doesn't support image generation")
+
+        # Handle alternative size parameters
+        # DashScope uses simple size format like "1024*1024"
+        # Priority: resolution > width+height > size
+        # Note: aspect_ratio is not supported by DashScope, will be ignored
+        if aspect_ratio:
+            # DashScope doesn't support aspect_ratio parameter
+            # Log a warning but continue with the base size
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"aspect_ratio parameter '{aspect_ratio}' is not supported by DashScope API, using size '{size}' instead"
+            )
+        elif resolution:
+            # resolution format: "1920x1080" -> "1920*1080"
+            size = resolution.replace("x", "*")
+        elif width and height:
+            # width + height format
+            size = f"{width}*{height}"
 
         # Prepare the request payload
         # Set default values for DashScope-specific parameters
