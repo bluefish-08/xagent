@@ -121,7 +121,16 @@ class TaskWorkspace:
                 return
 
             # Extract task_id from workspace id (e.g., 'web_task_265' -> 265)
-            task_id = int(self.id.split("_")[-1])
+            # Handle test environment workspaces (e.g., 'test_task')
+            try:
+                task_id = int(self.id.split("_")[-1])
+            except (ValueError, IndexError):
+                # Not a valid task ID, likely a test workspace
+                # Skip database registration in test environments
+                logger.debug(
+                    f"Skipping database registration for test workspace '{self.id}', file_id={file_id}"
+                )
+                return
 
             # Get user_id from task
             task = db.query(Task).filter(Task.id == task_id).first()
