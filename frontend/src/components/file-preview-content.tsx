@@ -29,7 +29,7 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
           const isPdf = isPptx || filePreview.fileName.match(/\.pdf$/i)
           const isDocx = filePreview.fileName.match(/\.docx$/i)
 
-          const url = `${apiUrl}/api/files/download/${filePreview.fileId}`
+          const url = `${apiUrl}/api/files/preview/${filePreview.fileId}`
 
           const response = await apiRequest(url, {
             cache: 'no-cache',
@@ -41,26 +41,45 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
 
           if (response.ok) {
             let fileContent
-            if (isDocx || isPdf || filePreview.fileName.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
-              const arrayBuffer = await response.arrayBuffer()
 
-              const chunkSize = 16384
-              const bytes = new Uint8Array(arrayBuffer)
-              let binary = ''
+            // Get MIME type from response headers (more reliable than file extension)
+            const contentType = response.headers.get('content-type') || ''
+            const mimeType = contentType.split(';')[0].trim()
 
-              for (let i = 0; i < bytes.length; i += chunkSize) {
-                const chunk = bytes.slice(i, i + chunkSize)
-                binary += String.fromCharCode.apply(null, Array.from(chunk))
-              }
+          // Determine file type based on MIME type instead of file extension
+          const isImage = mimeType.startsWith('image/')
+          const isPdf = mimeType.startsWith('application/pdf') || mimeType === 'application/pdf'
+          const isDocx = mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
-              fileContent = btoa(binary)
+          console.log('File preview debug:', {
+            fileName: filePreview.fileName,
+            mimeType,
+            isImage,
+            isDocx,
+            isPdf,
+            contentType: response.headers.get('content-type')
+          })
+
+          if (isImage || isPdf || isDocx || filePreview.fileName.match(/\.(docx|pdf|jpg|jpeg|png|gif|webp|svg|pptx)$/i)) {
+            const arrayBuffer = await response.arrayBuffer()
+
+            // Use modern, efficient base64 conversion
+            const bytes = new Uint8Array(arrayBuffer)
+            const binaryString = Array.from(bytes, (byte) => String.fromCharCode(byte)).join('')
+            fileContent = btoa(binaryString)
+
+            console.log('Base64 conversion completed:', {
+              mimeType,
+              originalSize: arrayBuffer.byteLength,
+              base64Size: fileContent.length
+            })
             } else {
               fileContent = await response.text()
             }
 
             dispatch({
               type: "SET_FILE_PREVIEW_CONTENT",
-              payload: { content: fileContent, error: null }
+              payload: { content: fileContent, mimeType, error: null }
             })
           } else {
             dispatch({
@@ -122,30 +141,14 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
           </div>
         ) : (
           <div className="flex-1 overflow-auto bg-muted/30 rounded border">
-            {filePreview.fileName.toLowerCase().endsWith('.docx') ? (
-              <DocxPreviewRenderer base64Content={filePreview.content || ''} />
-            ) : filePreview.fileName.endsWith('.html') || filePreview.fileName.endsWith('.htm') ? (
-              <iframe
-                srcDoc={processHtmlContent(filePreview.content, filePreview.fileId)}
-                className="w-full h-full border-0"
-                sandbox="allow-same-origin allow-scripts"
-                title={filePreview.fileName}
-              />
-            ) : filePreview.fileName.toLowerCase().endsWith('.pdf') || filePreview.fileName.toLowerCase().endsWith('.pptx') ? (
-              <div className="flex items-center justify-center h-full p-4">
-                <iframe
-                  src={`data:application/pdf;base64,${filePreview.content || ''}`}
-                  className="w-full h-full border-0"
-                  title={filePreview.fileName}
-                />
-              </div>
-            ) : filePreview.fileName.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i) ? (
+            {filePreview.mimeType?.startsWith('image/') ? (
               <div className="flex items-center justify-center h-full p-4">
                 <img
-                  src={`data:image/${filePreview.fileName.split('.').pop()};base64,${filePreview.content || ''}`}
+                  src={`data:${filePreview.mimeType};base64,${filePreview.content || ''}`}
                   alt={filePreview.fileName}
                   className="max-w-full max-h-full object-contain"
                   onError={(e) => {
+                    console.error('Image load error:', e)
                     e.currentTarget.style.display = 'none'
                     const fallback = e.currentTarget.nextElementSibling as HTMLElement
                     if (fallback) fallback.style.display = 'flex'
@@ -156,6 +159,23 @@ export function FilePreviewContent({ open }: FilePreviewContentProps) {
                   <span className="text-sm">{t('files.previewDialog.imageError.hint')}</span>
                 </div>
               </div>
+            ) : filePreview.mimeType === 'application/pdf' || filePreview.fileName.toLowerCase().endsWith('.pdf') || filePreview.fileName.toLowerCase().endsWith('.pptx') ? (
+              <div className="flex items-center justify-center h-full p-4">
+                <iframe
+                  src={`data:application/pdf;base64,${filePreview.content || ''}`}
+                  className="w-full h-full border-0"
+                  title={filePreview.fileName}
+                />
+              </div>
+            ) : filePreview.mimeType?.includes('wordprocessingml') || filePreview.fileName.toLowerCase().endsWith('.docx') ? (
+              <DocxPreviewRenderer base64Content={filePreview.content || ''} />
+            ) : filePreview.fileName.endsWith('.html') || filePreview.fileName.endsWith('.htm') ? (
+              <iframe
+                srcDoc={processHtmlContent(filePreview.content, filePreview.fileId)}
+                className="w-full h-full border-0"
+                sandbox="allow-same-origin allow-scripts"
+                title={filePreview.fileName}
+              />
             ) : (
               <pre className="p-4 text-sm font-mono whitespace-pre-wrap break-words">
                 {filePreview.content || t('files.previewDialog.emptyContent')}

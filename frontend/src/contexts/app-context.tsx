@@ -197,6 +197,7 @@ interface AppState {
     fileId: string
     fileName: string
     content: string
+    mimeType?: string
     isLoading: boolean
     error: string | null
     // Support switching between multiple file previews
@@ -240,7 +241,7 @@ type AppAction =
   | { type: "OPEN_FILE_PREVIEW"; payload: { fileId: string; fileName: string; files?: Array<{ fileId: string; fileName: string }>; index?: number } }
   | { type: "CLOSE_FILE_PREVIEW" }
   | { type: "SWITCH_FILE_PREVIEW"; payload: { fileId: string; fileName: string; index: number } }
-  | { type: "SET_FILE_PREVIEW_CONTENT"; payload: { content: string; error: string | null } }
+  | { type: "SET_FILE_PREVIEW_CONTENT"; payload: { content: string; mimeType?: string; error: string | null } }
   | { type: "SET_FILE_PREVIEW_LOADING"; payload: boolean }
   | { type: "START_REPLAY"; payload: { taskId: number; events: TraceEvent[] } }
   | { type: "STOP_REPLAY" }
@@ -449,6 +450,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         filePreview: {
           ...state.filePreview,
           content: action.payload.content,
+          mimeType: action.payload.mimeType,
           error: action.payload.error,
           isLoading: false,
         }

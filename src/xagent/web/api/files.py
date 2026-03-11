@@ -614,10 +614,21 @@ async def download_file(
     if converted_pdf is not None:
         return converted_pdf
 
+    # For images and other viewable content, set Content-Disposition to inline
+    # to allow browser to display the file instead of downloading it
+    content_disposition = (
+        "inline"
+        if media_type.startswith(("image/", "video/", "audio/", "text/"))
+        else "attachment"
+    )
+
     return FileResponse(
         path=str(full_path),
         filename=file_name,
         media_type=media_type,
+        headers={
+            "Content-Disposition": f'{content_disposition}; filename="{file_name}"'
+        },
     )
 
 

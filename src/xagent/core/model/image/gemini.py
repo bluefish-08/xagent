@@ -240,12 +240,15 @@ class GeminiImageModel(BaseImageModel):
         # Build the API URL using generateContent endpoint
         is_official_api = "googleapis.com" in self.base_url
 
+        # Remove 'models/' prefix from model_name if present
+        clean_model_name = self.model_name.replace("models/", "", 1)
+
         if is_official_api:
-            api_url = f"{self.base_url}/models/{self.model_name}:generateContent?key={self.api_key}"
+            api_url = f"{self.base_url}/models/{clean_model_name}:generateContent?key={self.api_key}"
             headers = {}
         else:
             # For proxy services
-            api_url = f"{self.base_url}/models/{self.model_name}:generateContent"
+            api_url = f"{self.base_url}/models/{clean_model_name}:generateContent"
             headers = {"Authorization": f"Bearer {self.api_key}"}
 
         # Prepare request body following Gemini API format
@@ -435,11 +438,14 @@ class GeminiImageModel(BaseImageModel):
         # Build the API URL
         is_official_api = "googleapis.com" in self.base_url
 
+        # Remove 'models/' prefix from model_name if present
+        clean_model_name = self.model_name.replace("models/", "", 1)
+
         if is_official_api:
-            api_url = f"{self.base_url}/models/{self.model_name}:generateContent?key={self.api_key}"
+            api_url = f"{self.base_url}/models/{clean_model_name}:generateContent?key={self.api_key}"
             headers = {}
         else:
-            api_url = f"{self.base_url}/models/{self.model_name}:generateContent"
+            api_url = f"{self.base_url}/models/{clean_model_name}:generateContent"
             headers = {"Authorization": f"Bearer {self.api_key}"}
 
         # Prepare request body with image and prompt
