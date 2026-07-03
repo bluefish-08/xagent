@@ -1,7 +1,7 @@
 """seed built-in Google Maps (key-based) MCP connector
 
 Revision ID: 20260703_seed_google_maps_mcp_app
-Revises: 20260703_add_user_mcpserver_env
+Revises: 20260704_merge_alembic_heads
 Create Date: 2026-07-03 00:00:00.000000
 
 """
