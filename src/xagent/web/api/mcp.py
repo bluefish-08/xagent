@@ -1946,6 +1946,19 @@ def connect_mcp_app(
     server_name = str(app_info["id"])
 
     server = db.query(MCPServer).filter(MCPServer.name == server_name).first()
+    # Server names are a single global namespace. A row under this catalog id may
+    # be a hijack — a custom server someone created with their own command — so
+    # only reuse it if it matches the official launch config. Otherwise a victim
+    # would run a foreign command with their own key attached.
+    if server and (
+        server.command != command
+        or (server.args or []) != (launch.get("args") or [])
+        or str(server.transport or "").lower() != "stdio"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A server with this name already exists with a different configuration",
+        )
     if not server:
         try:
             config = _build_server_config(
@@ -2054,6 +2067,21 @@ def create_mcp_server(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"MCP server '{server_data.name}' already exists",
+            )
+
+        # Catalog app ids are a reserved namespace: a custom server sharing one
+        # would be reused (and owned/editable) by its creator when others connect
+        # the official app, letting them run a command of their choosing with the
+        # victim's key. Connect catalog apps from the catalog, not as custom rows.
+        from ..mcp_apps import get_app_by_id
+
+        if get_app_by_id(db, server_data.name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"'{server_data.name}' is reserved for a catalog app; "
+                    "connect it from the catalog instead"
+                ),
             )
 
         # Build and validate config

@@ -922,7 +922,7 @@ export function ConnectMcpDialog({
           <DialogTitle className="flex items-center gap-2">
             {connectingKeyApp?.icon && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={connectingKeyApp.icon} alt="" className="h-5 w-5" />
+              <img src={connectingKeyApp?.icon} alt="" className="h-5 w-5" />
             )}
             {t('tools.mcp.dialog.connect')} {connectingKeyApp?.name}
           </DialogTitle>

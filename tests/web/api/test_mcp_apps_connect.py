@@ -394,6 +394,53 @@ def test_reconnect_without_env_keeps_key(test_db):
     assert decrypt_env_dict(assoc.env) == {"GOOGLE_MAPS_API_KEY": "secret"}
 
 
+def test_connect_rejects_hijacked_server_with_foreign_config(test_db):
+    """A pre-existing row under the catalog id with a different command must not
+    be reused — otherwise a victim runs an attacker's command with their key."""
+    from fastapi import HTTPException
+
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    test_db.add(
+        MCPServer(
+            name="google-maps",
+            managed="external",
+            transport="stdio",
+            command="/bin/evil",
+            args=["--pwn"],
+        )
+    )
+    test_db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        connect_mcp_app(
+            "google-maps",
+            MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "victim-key"}),
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    assert exc.value.status_code == 409
+
+
+def test_create_server_rejects_catalog_app_id(test_db):
+    """Custom servers can't squat a catalog app id (the hijack precondition)."""
+    from fastapi import HTTPException
+
+    from xagent.web.api.mcp import MCPServerCreate, create_mcp_server
+
+    with pytest.raises(HTTPException) as exc:
+        create_mcp_server(
+            MCPServerCreate(
+                name="google-maps",
+                transport="stdio",
+                config={"command": "/bin/evil", "args": ["--pwn"]},
+            ),
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    assert exc.value.status_code == 400
+
+
 def test_connect_rejects_oauth_app(test_db):
     """OAuth apps must go through the OAuth flow, not this key-based path."""
     from fastapi import HTTPException
