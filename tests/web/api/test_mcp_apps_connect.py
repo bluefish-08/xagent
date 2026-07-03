@@ -207,9 +207,7 @@ def test_global_env_available_reflects_admin_configured_key(test_db):
     """The catalog exposes whether an admin-configured global key already covers
     the app's required env, so the UI can offer 'use the admin's key'."""
     from xagent.core.utils.encryption import encrypt_env_dict
-    from xagent.web.api.mcp import _app_global_env_available
-
-    from xagent.web.api.mcp import _normalize_app_key
+    from xagent.web.api.mcp import _app_global_env_available, _normalize_app_key
 
     app = {
         "id": "google-maps",
@@ -370,6 +368,29 @@ def test_reconnect_keeps_key_when_not_resupplied(test_db):
         db=test_db,
     )
     assoc = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).first()
+    assert decrypt_env_dict(assoc.env) == {"GOOGLE_MAPS_API_KEY": "secret"}
+
+
+def test_reconnect_without_env_keeps_key(test_db):
+    """An is_active-only reconnect (env omitted) must preserve the stored key
+    rather than wiping it to the global fallback."""
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    u = _user(test_db, 1)
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "secret"}),
+        current_user=u,
+        db=test_db,
+    )
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(is_active=False),
+        current_user=u,
+        db=test_db,
+    )
+    assoc = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).first()
+    assert assoc.is_active is False
     assert decrypt_env_dict(assoc.env) == {"GOOGLE_MAPS_API_KEY": "secret"}
 
 

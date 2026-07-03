@@ -956,10 +956,11 @@ export function ConnectMcpDialog({
                 type="password"
                 autoComplete="off"
                 value={keyEnvValues[k] || ""}
-                onFocus={() => {
-                  // Clear the mask on edit so a new value replaces (not appends to) it.
+                onFocus={(e) => {
+                  // Select the mask so typing replaces it, but clicking/tabbing away
+                  // keeps it — submitting the mask unchanged preserves the stored key.
                   if (keyEnvValues[k] === MASKED_SECRET_VALUE) {
-                    setKeyEnvValues(prev => ({ ...prev, [k]: "" }))
+                    e.currentTarget.select()
                   }
                 }}
                 onChange={(e) => setKeyEnvValues(prev => ({ ...prev, [k]: e.target.value }))}

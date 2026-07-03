@@ -1985,13 +1985,21 @@ def connect_mcp_app(
     # env (e.g. NODE_OPTIONS/LD_PRELOAD/PATH) into the stdio subprocess. Blank
     # values mean "use the shared/global key" and are dropped so they don't blank
     # it out. Masked entries ("********") are non-blank and keep the stored value.
-    provided = {
-        k: v
-        for k, v in (body.env or {}).items()
-        if k in allowed_env_keys and isinstance(v, str) and v.strip()
-    }
-    existing = decrypt_env_dict(getattr(assoc, "env", None)) if assoc else {}
-    merged_env = encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
+    # An omitted env (None) means "don't touch my key" (e.g. an is_active-only
+    # reconnect) — preserve the stored value. An explicit empty dict means "clear
+    # my key, fall back to the global one" (the "use admin key" button).
+    if body.env is None:
+        merged_env = getattr(assoc, "env", None) if assoc else None
+    else:
+        provided = {
+            k: v
+            for k, v in body.env.items()
+            if k in allowed_env_keys and isinstance(v, str) and v.strip()
+        }
+        existing = decrypt_env_dict(getattr(assoc, "env", None)) if assoc else {}
+        merged_env = (
+            encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
+        )
 
     if assoc:
         assoc.env = merged_env
