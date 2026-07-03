@@ -102,6 +102,24 @@ class MCPServerUpdate(BaseModel):
     )
 
 
+class MCPAppConnectRequest(BaseModel):
+    """Connect a key-based (non-oauth) catalog app with the caller's own secrets.
+
+    OAuth apps use the OAuth popup flow; this path is for apps like Google Maps
+    that authenticate with a static API key. The key is stored as a per-user env
+    override on a shared server row (see PR #750), so each user brings their own.
+    """
+
+    env: Optional[dict] = Field(
+        None, description="Per-user env overrides (e.g. the API key)"
+    )
+    is_active: Optional[bool] = Field(
+        None,
+        description="Whether the connection is active (defaults to True on first "
+        "connect; left unchanged on reconnect when omitted)",
+    )
+
+
 class MCPServerResponse(BaseModel):
     """Response model for MCP server."""
 
@@ -1472,6 +1490,59 @@ def _build_active_non_oauth_server_lookup(
     return lookup
 
 
+def _env_covers_required(env: Any, required: list) -> bool:
+    from ...core.utils.encryption import decrypt_env_dict
+
+    decrypted = decrypt_env_dict(env) or {}
+    return all(str(decrypted.get(k) or "").strip() for k in required)
+
+
+def _shared_server_for_app(
+    app: dict, server_by_key: dict[str, MCPServer]
+) -> Optional[MCPServer]:
+    """Resolve an app's shared server via the same normalized id/name keys the
+    connected-state lookup uses, so key-source flags stay consistent with it."""
+    for app_key in _app_lookup_keys(app.get("id"), app.get("name")):
+        server = server_by_key.get(app_key)
+        if server is not None:
+            return server
+    return None
+
+
+def _app_global_env_available(app: dict, server_by_key: dict[str, MCPServer]) -> bool:
+    """Whether an admin-configured global env already covers this app's required
+    keys, so the connector can offer "use the admin's key" instead of asking for
+    one. Only meaningful for key-based (non-oauth) apps.
+    """
+    required = (app.get("launch_config") or {}).get("required_env") or []
+    if not required:
+        return False
+    server = _shared_server_for_app(app, server_by_key)
+    if not server:
+        return False
+    return _env_covers_required(getattr(server, "env", None), required)
+
+
+def _app_user_env_configured(
+    app: dict,
+    server_by_key: dict[str, MCPServer],
+    user_mcp_by_server_id: dict[int, UserMCPServer],
+) -> bool:
+    """Whether this user has their own per-user key covering the app's required
+    env (vs falling back to the admin's global key). Non-oauth apps only.
+    """
+    required = (app.get("launch_config") or {}).get("required_env") or []
+    if not required:
+        return False
+    server = _shared_server_for_app(app, server_by_key)
+    if not server:
+        return False
+    assoc = user_mcp_by_server_id.get(cast(int, server.id))
+    if not assoc:
+        return False
+    return _env_covers_required(getattr(assoc, "env", None), required)
+
+
 def _connected_non_oauth_server_for_app(
     app: dict, non_oauth_server_lookup: dict[tuple[str, str], MCPServer]
 ) -> Optional[int]:
@@ -1530,17 +1601,40 @@ def list_mcp_apps(
     oauth_server_lookup = _build_active_oauth_server_lookup(user_mcps)
     non_oauth_server_lookup = _build_active_non_oauth_server_lookup(user_mcps)
 
+    # Prefetch shared servers for key-based apps in one query (the row exists even
+    # when the current user isn't associated, e.g. an admin-only global key), and
+    # index the user's associations, to compute key-source flags without an N+1.
+    non_oauth_keys = {
+        key
+        for app in library_apps
+        if str(app.get("transport") or "").lower() != "oauth"
+        for key in _app_lookup_keys(app.get("id"), app.get("name"))
+    }
+    server_by_key: dict[str, MCPServer] = {}
+    if non_oauth_keys:
+        for srv in db.query(MCPServer).filter(MCPServer.name.in_(non_oauth_keys)).all():
+            norm = _normalize_app_key(srv.name)
+            if norm:
+                server_by_key.setdefault(norm, srv)
+    user_mcp_by_server_id = {cast(int, srv.id): um for srv, um in user_mcps}
+
     if location in ["remote", "all"]:
         for app in library_apps:
             if app.get("transport") == "oauth":
                 server_id, connected_account = _connected_oauth_server_for_app(
                     app, oauth_server_lookup, oauth_account_lookup
                 )
+                app_global_env = False
+                app_user_env = False
             else:
                 server_id = _connected_non_oauth_server_for_app(
                     app, non_oauth_server_lookup
                 )
                 connected_account = None
+                app_global_env = _app_global_env_available(app, server_by_key)
+                app_user_env = _app_user_env_configured(
+                    app, server_by_key, user_mcp_by_server_id
+                )
             is_connected = server_id is not None
             is_visible_in_connector = app.get("is_visible_in_connector", True)
 
@@ -1563,6 +1657,8 @@ def list_mcp_apps(
 
             app_copy = app.copy()
             app_copy["is_connected"] = is_connected
+            app_copy["global_env_available"] = app_global_env
+            app_copy["user_env_configured"] = app_user_env
 
             if is_connected:
                 app_copy["server_id"] = server_id
@@ -1806,6 +1902,127 @@ def get_mcp_server(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get MCP server",
         )
+
+
+@mcp_router.post("/apps/{app_id}/connect", response_model=MCPServerResponse)
+def connect_mcp_app(
+    app_id: str,
+    body: MCPAppConnectRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MCPServerResponse:
+    """Connect a key-based (non-oauth) catalog app for the current user.
+
+    One shared server row backs the app for all users; each user gets their own
+    per-user env (their key). Connecting again updates the caller's key.
+    """
+    from xagent.core.utils.encryption import decrypt_env_dict, encrypt_env_dict
+
+    from ..mcp_apps import get_app_by_id
+
+    app_info = get_app_by_id(db, app_id)
+    if not app_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="MCP app not found"
+        )
+    if str(app_info.get("transport") or "").lower() == "oauth":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OAuth apps must be connected via the OAuth flow",
+        )
+
+    launch = app_info.get("launch_config") or {}
+    command = launch.get("command")
+    if not command:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This app cannot be connected with an API key",
+        )
+    allowed_env_keys = set(launch.get("required_env") or [])
+
+    manager = DatabaseMCPServerManager(db)
+    # app_id is the stable catalog key: it passes the server-name validator and
+    # is what the connector uses to detect an app as connected.
+    server_name = str(app_info["id"])
+
+    server = db.query(MCPServer).filter(MCPServer.name == server_name).first()
+    if not server:
+        try:
+            config = _build_server_config(
+                MCPServerCreate(
+                    name=server_name,
+                    transport="stdio",
+                    description=app_info.get("description"),
+                    config={"command": command, "args": launch.get("args") or []},
+                )
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid app configuration: {str(e)}",
+            )
+        try:
+            manager.add_server(config)
+        except (ValueError, IntegrityError):
+            # Concurrent first-connect: another request created the shared row.
+            db.rollback()
+        server = db.query(MCPServer).filter(MCPServer.name == server_name).first()
+        if not server:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create server",
+            )
+
+    assoc: Any = (
+        db.query(UserMCPServer)
+        .filter(
+            UserMCPServer.user_id == current_user.id,
+            UserMCPServer.mcpserver_id == server.id,
+        )
+        .first()
+    )
+    # Only the app's declared keys may be set — never let a caller inject extra
+    # env (e.g. NODE_OPTIONS/LD_PRELOAD/PATH) into the stdio subprocess. Blank
+    # values mean "use the shared/global key" and are dropped so they don't blank
+    # it out. Masked entries ("********") are non-blank and keep the stored value.
+    provided = {
+        k: v
+        for k, v in (body.env or {}).items()
+        if k in allowed_env_keys and isinstance(v, str) and v.strip()
+    }
+    existing = decrypt_env_dict(getattr(assoc, "env", None)) if assoc else {}
+    merged_env = encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
+
+    if assoc:
+        assoc.env = merged_env
+        # Only toggle activation when explicitly requested; a reconnect to update
+        # the key must not silently re-enable a connection the user turned off.
+        if body.is_active is not None:
+            assoc.is_active = body.is_active
+    else:
+        # Connect users never own the shared global config (no editing global env),
+        # but can disconnect their own association.
+        assoc = UserMCPServer(
+            user_id=current_user.id,
+            mcpserver_id=server.id,
+            is_active=True if body.is_active is None else body.is_active,
+            is_owner=False,
+            can_edit=False,
+            can_delete=True,
+            env=merged_env,
+        )
+        db.add(assoc)
+
+    db.commit()
+    db.refresh(assoc)
+    logger.info(f"User {current_user.id} connected MCP app '{server_name}'")
+    return _db_server_to_response(
+        server,
+        assoc,
+        manager,
+        app_id=str(app_info["id"]),
+        is_admin=getattr(current_user, "is_admin", False),
+    )
 
 
 @mcp_router.post(

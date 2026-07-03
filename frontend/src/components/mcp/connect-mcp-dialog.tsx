@@ -37,26 +37,14 @@ import { Select } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { useEffect } from "react"
-import { MCPServer } from "@/app/tools/page"
 
 import { isValidMcpName, buildCustomApiPayload } from "@/lib/mcp-utils"
 
-export interface AppIntegration {
-  id: string
-  name: string
-  description: string
-  icon: string
-  is_connected?: boolean
-  users?: string
-  provider?: string
-  category?: string
-  is_local?: boolean
-  server_id?: number
-  transport?: string
-  connected_account?: string
-  is_custom?: boolean
-  server?: MCPServer
-}
+// Matches the backend mask; a masked value submitted unchanged keeps the stored secret.
+const MASKED_SECRET_VALUE = "********"
+
+export type { AppIntegration } from "./types"
+import type { AppIntegration } from "./types"
 
 import { OfficialMcpSettingsDialog } from "./official-mcp-settings-dialog"
 import { CustomApiForm, MCPServerFormData } from "./custom-api-form"
@@ -95,6 +83,10 @@ export function ConnectMcpDialog({
   const [activeStatus, setActiveStatus] = useState("all")
   const [apps, setApps] = useState<AppIntegration[]>([])
   const [selectedApp, setSelectedApp] = useState<AppIntegration | null>(null)
+  // Key-based (non-oauth) catalog connect: only the required secret(s) are editable.
+  const [connectingKeyApp, setConnectingKeyApp] = useState<AppIntegration | null>(null)
+  const [keyEnvValues, setKeyEnvValues] = useState<Record<string, string>>({})
+  const [isConnectingKey, setIsConnectingKey] = useState(false)
   const [localSelectedServers, setLocalSelectedServers] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState("library")
   const [editingCustomServerId, setEditingCustomServerId] = useState<number | null>(null)
@@ -259,10 +251,61 @@ export function ConnectMcpDialog({
 
   const isSelectMode = !!onConnectSelected;
 
+  // Key-based (non-oauth) catalog app: collect only the required secret(s), then
+  // POST to the connect endpoint (command/args/description come from the catalog,
+  // not the user). Users can never edit the shared server config this way.
+  const openKeyConnect = (app: AppIntegration) => {
+    const required = app.launch_config?.required_env || []
+    const initial: Record<string, string> = {}
+    // Pre-fill masked when the user already has a key, so submitting without
+    // retyping preserves it (the backend restores masked values) instead of
+    // silently clearing it.
+    required.forEach((k) => { initial[k] = app.user_env_configured ? MASKED_SECRET_VALUE : "" })
+    setKeyEnvValues(initial)
+    setConnectingKeyApp(app)
+  }
+
+  const submitKeyConnect = async (autoSelect: boolean, env: Record<string, string> = keyEnvValues) => {
+    if (!connectingKeyApp) return
+    // Key is optional: an empty env falls back to the admin-configured global key.
+    setIsConnectingKey(true)
+    try {
+      const response = await apiRequest(`${getApiUrl()}/api/mcp/apps/${connectingKeyApp.id}/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ env })
+      })
+      if (response.ok) {
+        toast.success(t('tools.mcp.buttons.save'))
+        if (autoSelect && onConnectSelected) {
+          setLocalSelectedServers(prev => prev.includes(connectingKeyApp.name) ? prev : [...prev, connectingKeyApp.name])
+        }
+        if (onSuccess) onSuccess()
+        loadApps()
+        setConnectingKeyApp(null)
+        setSelectedApp(null)
+      } else {
+        const error = await response.json()
+        toast.error(error.detail || t('tools.mcp.alerts.saveFailed'))
+      }
+    } catch (error) {
+      console.error("Failed to connect app:", error)
+      toast.error(t('tools.mcp.alerts.saveFailed'))
+    } finally {
+      setIsConnectingKey(false)
+    }
+  }
+
   const handleConnectApp = (app: AppIntegration, autoSelect: boolean = false) => {
     const provider = app.provider;
     if (!provider) {
-      toast.error("Error: App provider is not defined");
+      // Key-based (non-oauth) catalog app: collect the key. Only these declare
+      // required_env; any other provider-less app is not connectable this way.
+      if (app.launch_config?.required_env?.length) {
+        openKeyConnect(app);
+      } else {
+        toast.error("Error: App provider is not defined");
+      }
       return;
     }
 
@@ -372,6 +415,7 @@ export function ConnectMcpDialog({
   const selectedLocalCount = localSelectedServers.length - selectedRemoteCount;
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-5xl md:max-w-6xl w-[95vw] h-[85vh] flex flex-col p-0 overflow-hidden gap-0 bg-slate-50">
         <DialogHeader className="px-6 py-4 border-b bg-white shrink-0 pr-10">
@@ -821,6 +865,10 @@ export function ConnectMcpDialog({
           });
         }}
         onConnectStart={(appToConnect) => handleConnectApp(appToConnect, isSelectMode)}
+        onManageKey={(appToManage) => {
+          setSelectedApp(null);
+          openKeyConnect(appToManage);
+        }}
         onConfigure={(appToConfigure) => {
           if (appToConfigure.is_custom && appToConfigure.server) {
             setSelectedApp(null);
@@ -866,5 +914,74 @@ export function ConnectMcpDialog({
         }}
       />
     </Dialog>
+
+    {/* Key-based (non-oauth) connect: only the required secret(s) are editable. */}
+    <Dialog open={!!connectingKeyApp} onOpenChange={(o) => { if (!o) setConnectingKeyApp(null) }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {connectingKeyApp?.icon && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={connectingKeyApp.icon} alt="" className="h-5 w-5" />
+            )}
+            {t('tools.mcp.dialog.connect')} {connectingKeyApp?.name}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-2">
+          {/* Current key source, so the user knows what's in effect. */}
+          {connectingKeyApp?.user_env_configured ? (
+            <p className="text-sm text-slate-600">{t('tools.mcp.dialog.currentlyUsingOwnKey')}</p>
+          ) : connectingKeyApp?.global_env_available ? (
+            <p className="text-sm text-emerald-700">{t('tools.mcp.dialog.currentlyUsingAdminKey')}</p>
+          ) : null}
+
+          {/* Offer the admin key unless it's already in effect. */}
+          {connectingKeyApp?.global_env_available && !(connectingKeyApp?.is_connected && !connectingKeyApp?.user_env_configured) && (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
+              <p className="text-sm text-emerald-800">{t('tools.mcp.dialog.adminKeyConfigured')}</p>
+              <Button
+                size="sm"
+                onClick={() => submitKeyConnect(isSelectMode, {})}
+                disabled={isConnectingKey}
+              >
+                {t('tools.mcp.dialog.useAdminKey')}
+              </Button>
+            </div>
+          )}
+          {(connectingKeyApp?.launch_config?.required_env || []).map((k) => (
+            <div key={k} className="space-y-1.5">
+              <Label htmlFor={`key-${k}`}>{k}</Label>
+              <Input
+                id={`key-${k}`}
+                type="password"
+                autoComplete="off"
+                value={keyEnvValues[k] || ""}
+                onFocus={() => {
+                  // Clear the mask on edit so a new value replaces (not appends to) it.
+                  if (keyEnvValues[k] === MASKED_SECRET_VALUE) {
+                    setKeyEnvValues(prev => ({ ...prev, [k]: "" }))
+                  }
+                }}
+                onChange={(e) => setKeyEnvValues(prev => ({ ...prev, [k]: e.target.value }))}
+              />
+            </div>
+          ))}
+          <p className="text-xs text-slate-500">
+            {connectingKeyApp?.global_env_available
+              ? t('tools.mcp.dialog.apiKeyOverrideHint')
+              : t('tools.mcp.dialog.apiKeyOptionalHint')}
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => setConnectingKeyApp(null)} disabled={isConnectingKey}>
+            {t('common.cancel')}
+          </Button>
+          <Button onClick={() => submitKeyConnect(isSelectMode)} disabled={isConnectingKey}>
+            {isConnectingKey ? t('tools.mcp.dialog.connecting') : t('tools.mcp.dialog.connect')}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }
