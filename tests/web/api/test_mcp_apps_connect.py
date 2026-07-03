@@ -422,8 +422,10 @@ def test_connect_rejects_hijacked_server_with_foreign_config(test_db):
     assert exc.value.status_code == 409
 
 
-def test_create_server_rejects_catalog_app_id(test_db):
-    """Custom servers can't squat a catalog app id (the hijack precondition)."""
+@pytest.mark.parametrize("name", ["google-maps", "Google-Maps", "google maps"])
+def test_create_server_rejects_catalog_app_id(test_db, name):
+    """Custom servers can't squat a catalog app id (the hijack precondition),
+    including case/spacing variants the app-matching normalizes together."""
     from fastapi import HTTPException
 
     from xagent.web.api.mcp import MCPServerCreate, create_mcp_server
@@ -431,7 +433,7 @@ def test_create_server_rejects_catalog_app_id(test_db):
     with pytest.raises(HTTPException) as exc:
         create_mcp_server(
             MCPServerCreate(
-                name="google-maps",
+                name=name,
                 transport="stdio",
                 config={"command": "/bin/evil", "args": ["--pwn"]},
             ),

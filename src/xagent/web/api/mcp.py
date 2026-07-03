@@ -2069,13 +2069,20 @@ def create_mcp_server(
                 detail=f"MCP server '{server_data.name}' already exists",
             )
 
-        # Catalog app ids are a reserved namespace: a custom server sharing one
+        # Catalog apps are a reserved namespace: a custom server sharing one
         # would be reused (and owned/editable) by its creator when others connect
         # the official app, letting them run a command of their choosing with the
-        # victim's key. Connect catalog apps from the catalog, not as custom rows.
-        from ..mcp_apps import get_app_by_id
+        # victim's key. The connected-state and shared-server lookups match
+        # servers to apps by NORMALIZED id/name (see _normalize_app_key), so
+        # reserve the same way — otherwise a variant like "Google-Maps" slips
+        # past and is still treated as the official "google-maps" app elsewhere.
+        from ..mcp_apps import get_all_mcp_apps
 
-        if get_app_by_id(db, server_data.name):
+        requested_key = _normalize_app_key(server_data.name)
+        if requested_key and any(
+            requested_key in _app_lookup_keys(app.get("id"), app.get("name"))
+            for app in get_all_mcp_apps(db)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
