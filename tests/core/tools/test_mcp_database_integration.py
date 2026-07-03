@@ -553,6 +553,8 @@ class TestMCPServerModel:
         assert server.transport == "stdio"
         assert server.command == "python"
         assert server.args == ["server.py"]
-        assert server.env == {"API_KEY": "secret"}
+        # env is encrypted at rest but decrypts back for consumption
+        assert server.env["API_KEY"].startswith("gAAAAAB")
+        assert server.to_connection_dict()["env"] == {"API_KEY": "secret"}
         assert server.managed == "external"
         assert server.description == "Test server"

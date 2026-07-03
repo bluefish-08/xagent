@@ -169,7 +169,9 @@ export function ConnectMcpDialog({
         name: "",
         transport: "stdio",
         description: "",
-        config: {}
+        config: {},
+        user_env: {},
+        can_edit_global: true
       })
       setLocalSelectedServers(selectedMcpServers || [])
       setActiveTab("library")
@@ -273,7 +275,7 @@ export function ConnectMcpDialog({
       }
 
       setEditingCustomServerId(null)
-      setMcpFormData({ name: "", transport: "stdio", description: "", config: {} })
+      setMcpFormData({ name: "", transport: "stdio", description: "", config: {}, user_env: {}, can_edit_global: true })
     } else {
       const error = await response.json()
       toast.error(error.detail || t('tools.mcp.alerts.saveFailed'))
@@ -442,7 +444,9 @@ export function ConnectMcpDialog({
                       name: "",
                       transport: "stdio",
                       description: "",
-                      config: {}
+                      config: {},
+                      user_env: {},
+                      can_edit_global: true
                     })
                   }
                 }}
@@ -753,6 +757,7 @@ export function ConnectMcpDialog({
 
                 <div className="space-y-4">
                   <CustomMcpForm
+                    key={editingCustomServerId || 'new'}
                     mcpFormData={mcpFormData}
                     setMcpFormData={setMcpFormData}
                     transports={transports}
@@ -876,7 +881,9 @@ export function ConnectMcpDialog({
                 name: appToConfigure.server.name,
                 transport: appToConfigure.server.transport,
                 description: appToConfigure.server.description || "",
-                config: appToConfigure.server.config || {}
+                config: appToConfigure.server.config || {},
+                user_env: appToConfigure.server.user_env || {},
+                can_edit_global: appToConfigure.server.can_edit_global ?? true
               });
             }
             setActiveTab(appToConfigure.server.transport === "custom_api" ? "custom_api" : "custom");

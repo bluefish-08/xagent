@@ -564,6 +564,29 @@ class ToolFactory:
                     ).filter(UserMCPServer.user_id == user_id, UserMCPServer.is_active)
 
                 all_connections = manager.get_connections(filter_by_user)
+
+                # Merge per-user env overrides on top of the global env
+                # (global env acts as fallback; user values win).
+                user_env_rows = (
+                    db.query(MCPServer.name, UserMCPServer.env)
+                    .join(UserMCPServer, MCPServer.id == UserMCPServer.mcpserver_id)
+                    .filter(
+                        UserMCPServer.user_id == user_id,
+                        UserMCPServer.is_active,
+                        UserMCPServer.env.isnot(None),
+                    )
+                    .all()
+                )
+                from .....core.utils.encryption import decrypt_env_dict
+
+                user_env_by_name = {name: env for name, env in user_env_rows if env}
+                for name, config in all_connections.items():
+                    # env only applies to stdio (mirrors to_connection_dict).
+                    if config.get("transport") != "stdio":
+                        continue
+                    user_env = decrypt_env_dict(user_env_by_name.get(name))
+                    if user_env:
+                        config["env"] = {**(config.get("env") or {}), **user_env}
             else:
                 all_connections = manager.get_connections()
 
