@@ -75,3 +75,14 @@ def test_shared_env_hook_none_user_returns_empty():
         assert mcp_runtime.load_shared_env_overrides("db", None) == {}
     finally:
         mcp_runtime.set_mcp_shared_env_hook(None)
+
+
+def test_shared_env_hook_failure_degrades_to_empty():
+    def boom(db, user_id):
+        raise RuntimeError("hook exploded")
+
+    mcp_runtime.set_mcp_shared_env_hook(boom)
+    try:
+        assert mcp_runtime.load_shared_env_overrides("db", 7) == {}
+    finally:
+        mcp_runtime.set_mcp_shared_env_hook(None)

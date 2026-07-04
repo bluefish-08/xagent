@@ -87,7 +87,15 @@ def load_shared_env_overrides(db: Any, user_id: int | None) -> dict[int, dict]:
     """
     if _get_mcp_shared_env_hook is None or not isinstance(user_id, int) or db is None:
         return {}
-    return _get_mcp_shared_env_hook(db, user_id) or {}
+    # The hook is external application code; a failure there must not take down
+    # MCP tool loading or the catalog endpoint. Degrade to no shared layer.
+    try:
+        return _get_mcp_shared_env_hook(db, user_id) or {}
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("shared env hook failed")
+        return {}
 
 
 def merge_stdio_env(
