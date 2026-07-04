@@ -203,12 +203,16 @@ def test_connect_with_blank_key_uses_global_fallback(test_db):
     assert assoc2.env is None
 
 
-def test_shared_env_available_from_platform_global_or_injected_layer(test_db):
-    """The catalog exposes whether a shared key covers the app's required env —
-    either the platform-global env on the server row, or an app-injected shared
-    layer (e.g. a team key) — so the UI can offer 'use the shared key'."""
+def test_platform_and_shared_env_available_flags(test_db):
+    """The catalog exposes two distinct shared-key flags: the platform-global env
+    on the server row (platform_env_available) and an app-injected shared layer,
+    e.g. a team key (shared_env_available), so the UI can offer either source."""
     from xagent.core.utils.encryption import encrypt_env_dict
-    from xagent.web.api.mcp import _app_shared_env_available, _normalize_app_key
+    from xagent.web.api.mcp import (
+        _app_platform_env_available,
+        _app_shared_env_available,
+        _normalize_app_key,
+    )
 
     app = {
         "id": "google-maps",
@@ -220,7 +224,8 @@ def test_shared_env_available_from_platform_global_or_injected_layer(test_db):
     def _by_key(server):
         return {_normalize_app_key(server.name): server} if server else {}
 
-    # No server row yet -> not available.
+    # No server row yet -> neither available.
+    assert _app_platform_env_available(app, {}) is False
     assert _app_shared_env_available(app, {}, {}) is False
 
     server = MCPServer(
@@ -229,16 +234,19 @@ def test_shared_env_available_from_platform_global_or_injected_layer(test_db):
     test_db.add(server)
     test_db.commit()
 
-    # Server exists but no shared env anywhere -> not available.
+    # Server exists but no shared env anywhere -> neither available.
+    assert _app_platform_env_available(app, _by_key(server)) is False
     assert _app_shared_env_available(app, _by_key(server), {}) is False
 
-    # Platform-global env covers the required key -> available.
+    # Platform-global env on the row covers the required key -> platform available,
+    # shared (injected layer) still not.
     server.env = encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "platform"})
     test_db.commit()
-    assert _app_shared_env_available(app, _by_key(server), {}) is True
+    assert _app_platform_env_available(app, _by_key(server)) is True
+    assert _app_shared_env_available(app, _by_key(server), {}) is False
 
-    # No platform env, but an injected shared layer (decrypted, keyed by server
-    # id) covers it -> available.
+    # An injected shared layer (decrypted, keyed by server id) covers it ->
+    # shared available.
     server.env = None
     test_db.commit()
     injected = {server.id: {"GOOGLE_MAPS_API_KEY": "team"}}
