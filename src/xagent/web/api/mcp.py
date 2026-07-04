@@ -1498,6 +1498,8 @@ def _build_active_non_oauth_server_lookup(
 
 
 def _env_covers_required(env: Any, required: list) -> bool:
+    if not env:
+        return False
     from ...core.utils.encryption import decrypt_env_dict
 
     decrypted = decrypt_env_dict(env) or {}
@@ -1636,15 +1638,21 @@ def list_mcp_apps(
     # Prefetch shared servers for key-based apps in one query (the row exists even
     # when the current user isn't associated, e.g. an admin-only global key), and
     # index the user's associations, to compute key-source flags without an N+1.
-    non_oauth_keys = {
-        key
+    # Filter by the raw id/name the row is actually stored under (server.name is
+    # the raw catalog app_id, not its normalized key), then normalize in Python
+    # so mixed-case app ids match the same way the connected-state lookups do.
+    non_oauth_names = {
+        str(name)
         for app in library_apps
         if str(app.get("transport") or "").lower() != "oauth"
-        for key in _app_lookup_keys(app.get("id"), app.get("name"))
+        for name in (app.get("id"), app.get("name"))
+        if name
     }
     server_by_key: dict[str, MCPServer] = {}
-    if non_oauth_keys:
-        for srv in db.query(MCPServer).filter(MCPServer.name.in_(non_oauth_keys)).all():
+    if non_oauth_names:
+        for srv in (
+            db.query(MCPServer).filter(MCPServer.name.in_(non_oauth_names)).all()
+        ):
             norm = _normalize_app_key(srv.name)
             if norm:
                 server_by_key.setdefault(norm, srv)
