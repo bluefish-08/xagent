@@ -21,7 +21,18 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _columns(table_name: str) -> set[str]:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if table_name not in inspector.get_table_names():
+        return set()
+    return {col["name"] for col in inspector.get_columns(table_name)}
+
+
 def upgrade() -> None:
+    columns = _columns("user_mcpservers")
+    if not columns or "env_source" in columns:
+        return
     op.add_column(
         "user_mcpservers",
         sa.Column("env_source", sa.String(length=16), nullable=True),
@@ -29,4 +40,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("user_mcpservers", "env_source")
+    if "env_source" in _columns("user_mcpservers"):
+        op.drop_column("user_mcpservers", "env_source")
