@@ -19,6 +19,34 @@ def test_merge_stdio_env_two_arg_unchanged():
     assert mcp_runtime.merge_stdio_env({"A": "g"}, None) == {"A": "g"}
 
 
+def test_resolve_stdio_env_by_source():
+    """env_source selects which layer to apply over the global env."""
+    g = {"A": "g", "B": "g"}
+    shared = {"B": "team"}
+    user = {"B": "own"}
+    assert mcp_runtime.resolve_stdio_env("platform", g, shared, user) == g
+    assert mcp_runtime.resolve_stdio_env("shared", g, shared, user) == {
+        "A": "g",
+        "B": "team",
+    }
+    assert mcp_runtime.resolve_stdio_env("own", g, shared, user) == {
+        "A": "g",
+        "B": "own",
+    }
+    # None keeps the legacy fallback: global < shared < user (most specific wins).
+    assert mcp_runtime.resolve_stdio_env(None, g, shared, user) == {
+        "A": "g",
+        "B": "own",
+    }
+
+
+def test_resolve_stdio_env_missing_chosen_layer_falls_to_global():
+    """A pick whose layer is empty falls back to global, never a blank key."""
+    g = {"A": "g"}
+    assert mcp_runtime.resolve_stdio_env("shared", g, None, {"A": "own"}) == g
+    assert mcp_runtime.resolve_stdio_env("own", g, {"A": "team"}, None) == g
+
+
 def test_shared_env_hook_default_is_noop():
     mcp_runtime.set_mcp_shared_env_hook(None)
     assert mcp_runtime.load_shared_env_overrides(object(), 1) == {}

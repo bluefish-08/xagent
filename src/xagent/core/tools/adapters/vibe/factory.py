@@ -554,6 +554,7 @@ class ToolFactory:
                 build_mcp_runtime_connection,
                 load_shared_env_overrides,
                 load_user_env_overrides,
+                load_user_env_sources,
             )
             from .mcp_adapter import load_mcp_tools_as_agent_tools
 
@@ -565,6 +566,7 @@ class ToolFactory:
 
             user_env_overrides = load_user_env_overrides(db, user_id)
             shared_env_overrides = load_shared_env_overrides(db, user_id)
+            env_source_overrides = load_user_env_sources(db, user_id)
 
             connections = {}
             for server in query.all():
@@ -576,6 +578,7 @@ class ToolFactory:
                     user_id=user_id,
                     user_env_overrides=user_env_overrides,
                     shared_env_overrides=shared_env_overrides,
+                    env_source_overrides=env_source_overrides,
                 )
                 if build.connection is not None:
                     connections[str(server.name)] = build.connection
