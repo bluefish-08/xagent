@@ -203,11 +203,12 @@ def test_connect_with_blank_key_uses_global_fallback(test_db):
     assert assoc2.env is None
 
 
-def test_global_env_available_reflects_admin_configured_key(test_db):
-    """The catalog exposes whether an admin-configured global key already covers
-    the app's required env, so the UI can offer 'use the admin's key'."""
+def test_shared_env_available_from_platform_global_or_injected_layer(test_db):
+    """The catalog exposes whether a shared key covers the app's required env —
+    either the platform-global env on the server row, or an app-injected shared
+    layer (e.g. a team key) — so the UI can offer 'use the shared key'."""
     from xagent.core.utils.encryption import encrypt_env_dict
-    from xagent.web.api.mcp import _app_global_env_available, _normalize_app_key
+    from xagent.web.api.mcp import _app_shared_env_available, _normalize_app_key
 
     app = {
         "id": "google-maps",
@@ -220,29 +221,33 @@ def test_global_env_available_reflects_admin_configured_key(test_db):
         return {_normalize_app_key(server.name): server} if server else {}
 
     # No server row yet -> not available.
-    assert _app_global_env_available(app, {}) is False
+    assert _app_shared_env_available(app, {}, {}) is False
 
     server = MCPServer(
-        name="google-maps",
-        transport="stdio",
-        managed="external",
-        command="npx",
+        name="google-maps", transport="stdio", managed="external", command="npx"
     )
     test_db.add(server)
     test_db.commit()
 
-    # Server exists but no global env -> not available.
-    assert _app_global_env_available(app, _by_key(server)) is False
+    # Server exists but no shared env anywhere -> not available.
+    assert _app_shared_env_available(app, _by_key(server), {}) is False
 
-    # Global env missing the required key -> not available.
-    server.env = encrypt_env_dict({"OTHER": "x"})
+    # Platform-global env covers the required key -> available.
+    server.env = encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "platform"})
     test_db.commit()
-    assert _app_global_env_available(app, _by_key(server)) is False
+    assert _app_shared_env_available(app, _by_key(server), {}) is True
 
-    # Global env covers the required key -> available.
-    server.env = encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "admin-key"})
+    # No platform env, but an injected shared layer (decrypted, keyed by server
+    # id) covers it -> available.
+    server.env = None
     test_db.commit()
-    assert _app_global_env_available(app, _by_key(server)) is True
+    injected = {server.id: {"GOOGLE_MAPS_API_KEY": "team"}}
+    assert _app_shared_env_available(app, _by_key(server), injected) is True
+    # Injected layer missing the key -> not available.
+    assert (
+        _app_shared_env_available(app, _by_key(server), {server.id: {"X": "y"}})
+        is False
+    )
 
 
 def test_user_env_configured_reflects_own_key(test_db):

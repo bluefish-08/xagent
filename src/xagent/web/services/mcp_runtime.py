@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .mcp_oauth import MCPOAuthRuntimeError, resolve_mcp_oauth_runtime_auth
 
@@ -44,13 +44,46 @@ def load_user_env_overrides(db: Any, user_id: int | None) -> dict[int, dict]:
     return overrides
 
 
+# Hook signature: (db, user_id) -> {mcpserver_id: {env}}. An application layer
+# (e.g. a multi-tenant deployment) can inject a shared env layer that sits between
+# the global and per-user env via set_mcp_shared_env_hook(). The core is agnostic
+# to what "shared" means (team, org, ...); default: no shared layer.
+_get_mcp_shared_env_hook: Callable[[Any, int | None], dict[int, dict]] | None = None
+
+
+def set_mcp_shared_env_hook(
+    hook: Callable[[Any, int | None], dict[int, dict]] | None,
+) -> None:
+    global _get_mcp_shared_env_hook
+    _get_mcp_shared_env_hook = hook
+
+
+def load_shared_env_overrides(db: Any, user_id: int | None) -> dict[int, dict]:
+    """Batch-load a user's shared (app-injected) env overrides, keyed by server id.
+
+    Empty unless an application layer registered a hook (see set_mcp_shared_env_hook).
+    """
+    if _get_mcp_shared_env_hook is None or not isinstance(user_id, int) or db is None:
+        return {}
+    return _get_mcp_shared_env_hook(db, user_id) or {}
+
+
 def merge_stdio_env(
-    global_env: dict[str, Any] | None, user_env: dict[str, Any] | None
+    global_env: dict[str, Any] | None,
+    *layers: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Merge a user's per-user env over the global env (global = fallback, user wins)."""
-    if not user_env:
-        return global_env
-    return {**(global_env or {}), **user_env}
+    """Merge env layers over the global env; later layers win (global is fallback).
+
+    Two-arg form keeps the original meaning (global, user). A middle shared layer
+    is passed as (global, shared, user) so precedence is global < shared < user.
+    """
+    result = dict(global_env or {})
+    changed = False
+    for layer in layers:
+        if layer:
+            result.update(layer)
+            changed = True
+    return result if changed else global_env
 
 
 async def build_mcp_runtime_connection(
@@ -60,6 +93,7 @@ async def build_mcp_runtime_connection(
     user_id: int | None,
     mcp_auth_context: dict[str, Any] | None = None,
     user_env_overrides: dict[int, dict] | None = None,
+    shared_env_overrides: dict[int, dict] | None = None,
 ) -> MCPRuntimeConnectionBuild:
     """Build an executable MCP connection for a specific user runtime.
 
@@ -71,11 +105,15 @@ async def build_mcp_runtime_connection(
     # Merge this user's per-user env override on top of the global env (stdio
     # only; global env acts as the fallback, user values win). Overrides are
     # prefetched by the caller (see load_user_env_overrides) to avoid N+1.
-    if connection.get("transport") == "stdio" and user_env_overrides:
+    if connection.get("transport") == "stdio" and (
+        user_env_overrides or shared_env_overrides
+    ):
         server_id = getattr(server, "id", None)
         if isinstance(server_id, int):
             merged = merge_stdio_env(
-                connection.get("env"), user_env_overrides.get(server_id)
+                connection.get("env"),
+                (shared_env_overrides or {}).get(server_id),
+                (user_env_overrides or {}).get(server_id),
             )
             if merged:
                 connection["env"] = merged

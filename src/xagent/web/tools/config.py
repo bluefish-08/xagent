@@ -710,9 +710,13 @@ class WebToolConfig(BaseToolConfig):
 
             # Per-user env overrides (decrypted), merged over each server's global
             # env at runtime. Prefetched once to avoid an N+1 per-server lookup.
-            from ..services.mcp_runtime import load_user_env_overrides
+            from ..services.mcp_runtime import (
+                load_shared_env_overrides,
+                load_user_env_overrides,
+            )
 
             user_env_by_id = load_user_env_overrides(self.db, self._user_id)
+            shared_env_by_id = load_shared_env_overrides(self.db, self._user_id)
 
             for server in servers:
                 # Build config dict from server model
@@ -860,6 +864,7 @@ class WebToolConfig(BaseToolConfig):
 
                     merged_env = merge_stdio_env(
                         decrypt_env_dict(getattr(server, "env", None)),
+                        shared_env_by_id.get(server.id),
                         user_env_by_id.get(server.id),
                     )
                     if merged_env:

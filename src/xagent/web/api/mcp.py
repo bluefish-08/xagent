@@ -1509,10 +1509,18 @@ def _shared_server_for_app(
     return None
 
 
-def _app_global_env_available(app: dict, server_by_key: dict[str, MCPServer]) -> bool:
-    """Whether an admin-configured global env already covers this app's required
-    keys, so the connector can offer "use the admin's key" instead of asking for
-    one. Only meaningful for key-based (non-oauth) apps.
+def _app_shared_env_available(
+    app: dict,
+    server_by_key: dict[str, MCPServer],
+    shared_env_by_id: dict[int, dict],
+) -> bool:
+    """Whether a shared key already covers this app's required keys, so the
+    connector can offer "use the shared key" instead of asking for one.
+
+    "Shared" is either the platform-global env on the server row or an
+    application-injected layer (e.g. a team key) supplied via the shared-env
+    hook. The core stays agnostic to what the injected layer represents. Only
+    meaningful for key-based (non-oauth) apps.
     """
     required = (app.get("launch_config") or {}).get("required_env") or []
     if not required:
@@ -1520,7 +1528,11 @@ def _app_global_env_available(app: dict, server_by_key: dict[str, MCPServer]) ->
     server = _shared_server_for_app(app, server_by_key)
     if not server:
         return False
-    return _env_covers_required(getattr(server, "env", None), required)
+    if _env_covers_required(getattr(server, "env", None), required):
+        return True
+    # App-injected shared layer is already decrypted, keyed by server id.
+    shared = shared_env_by_id.get(cast(int, server.id)) or {}
+    return all(str(shared.get(k) or "").strip() for k in required)
 
 
 def _app_user_env_configured(
@@ -1618,20 +1630,26 @@ def list_mcp_apps(
                 server_by_key.setdefault(norm, srv)
     user_mcp_by_server_id = {cast(int, srv.id): um for srv, um in user_mcps}
 
+    from ..services.mcp_runtime import load_shared_env_overrides
+
+    shared_env_by_id = load_shared_env_overrides(db, cast(int, current_user.id))
+
     if location in ["remote", "all"]:
         for app in library_apps:
             if app.get("transport") == "oauth":
                 server_id, connected_account = _connected_oauth_server_for_app(
                     app, oauth_server_lookup, oauth_account_lookup
                 )
-                app_global_env = False
+                app_shared_env = False
                 app_user_env = False
             else:
                 server_id = _connected_non_oauth_server_for_app(
                     app, non_oauth_server_lookup
                 )
                 connected_account = None
-                app_global_env = _app_global_env_available(app, server_by_key)
+                app_shared_env = _app_shared_env_available(
+                    app, server_by_key, shared_env_by_id
+                )
                 app_user_env = _app_user_env_configured(
                     app, server_by_key, user_mcp_by_server_id
                 )
@@ -1657,7 +1675,7 @@ def list_mcp_apps(
 
             app_copy = app.copy()
             app_copy["is_connected"] = is_connected
-            app_copy["global_env_available"] = app_global_env
+            app_copy["shared_env_available"] = app_shared_env
             app_copy["user_env_configured"] = app_user_env
 
             if is_connected:

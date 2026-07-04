@@ -22,8 +22,9 @@ export interface AppIntegration {
     args?: string[]
     required_env?: string[]
   }
-  // Key-based apps: an admin-configured global key already covers required_env.
-  global_env_available?: boolean
+  // Key-based apps: a shared key (platform-admin or app-injected, e.g. team)
+  // already covers required_env, so the user can connect without their own.
+  shared_env_available?: boolean
   // Key-based apps: this user has set their own per-user key.
   user_env_configured?: boolean
 }

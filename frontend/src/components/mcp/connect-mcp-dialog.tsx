@@ -931,20 +931,20 @@ export function ConnectMcpDialog({
           {/* Current key source, so the user knows what's in effect. */}
           {connectingKeyApp?.user_env_configured ? (
             <p className="text-sm text-slate-600">{t('tools.mcp.dialog.currentlyUsingOwnKey')}</p>
-          ) : connectingKeyApp?.global_env_available ? (
-            <p className="text-sm text-emerald-700">{t('tools.mcp.dialog.currentlyUsingAdminKey')}</p>
+          ) : connectingKeyApp?.shared_env_available ? (
+            <p className="text-sm text-emerald-700">{t('tools.mcp.dialog.currentlyUsingSharedKey')}</p>
           ) : null}
 
-          {/* Offer the admin key unless it's already in effect. */}
-          {connectingKeyApp?.global_env_available && !(connectingKeyApp?.is_connected && !connectingKeyApp?.user_env_configured) && (
+          {/* Offer the shared key unless it's already in effect. */}
+          {connectingKeyApp?.shared_env_available && !(connectingKeyApp?.is_connected && !connectingKeyApp?.user_env_configured) && (
             <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
-              <p className="text-sm text-emerald-800">{t('tools.mcp.dialog.adminKeyConfigured')}</p>
+              <p className="text-sm text-emerald-800">{t('tools.mcp.dialog.sharedKeyConfigured')}</p>
               <Button
                 size="sm"
                 onClick={() => submitKeyConnect(isSelectMode, {})}
                 disabled={isConnectingKey}
               >
-                {t('tools.mcp.dialog.useAdminKey')}
+                {t('tools.mcp.dialog.useSharedKey')}
               </Button>
             </div>
           )}
@@ -968,7 +968,7 @@ export function ConnectMcpDialog({
             </div>
           ))}
           <p className="text-xs text-slate-500">
-            {connectingKeyApp?.global_env_available
+            {connectingKeyApp?.shared_env_available
               ? t('tools.mcp.dialog.apiKeyOverrideHint')
               : t('tools.mcp.dialog.apiKeyOptionalHint')}
           </p>
