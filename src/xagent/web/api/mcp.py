@@ -2057,7 +2057,9 @@ def connect_mcp_app(
     from xagent.core.utils.encryption import decrypt_env_dict, encrypt_env_dict
 
     server, app_info = _ensure_catalog_app_server(db, app_id)
-    allowed_env_keys = set((app_info.get("launch_config") or {}).get("required_env") or [])
+    allowed_env_keys = set(
+        (app_info.get("launch_config") or {}).get("required_env") or []
+    )
     manager = DatabaseMCPServerManager(db)
     server_name = str(app_info["id"])
 
