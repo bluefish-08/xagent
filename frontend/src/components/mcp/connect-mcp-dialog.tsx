@@ -264,10 +264,14 @@ export function ConnectMcpDialog({
     // silently clearing it.
     required.forEach((k) => { initial[k] = app.user_env_configured ? MASKED_SECRET_VALUE : "" })
     setKeyEnvValues(initial)
-    // Default the source selector to the user's current pick, else whichever
-    // option is actually usable, preferring "own" when they already have a key.
+    // Default the source selector to the user's current pick — but only if that
+    // source is still available (a stored "shared"/"platform" can go away when
+    // its key is removed, and its radio would then not render). Else fall back to
+    // whichever option is usable, preferring "own" when they already have a key.
     const defaultSource: "own" | "shared" | "platform" =
-      app.env_source
+      (app.env_source === "shared" && app.shared_env_available ? "shared" : null)
+        || (app.env_source === "platform" && app.platform_env_available ? "platform" : null)
+        || (app.env_source === "own" ? "own" : null)
         || (app.user_env_configured ? "own" : null)
         || (app.shared_env_available ? "shared" : null)
         || (app.platform_env_available ? "platform" : null)
