@@ -36,6 +36,7 @@ import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { useEffect } from "react"
 
 import { isValidMcpName, buildCustomApiPayload } from "@/lib/mcp-utils"
@@ -86,6 +87,7 @@ export function ConnectMcpDialog({
   // Key-based (non-oauth) catalog connect: only the required secret(s) are editable.
   const [connectingKeyApp, setConnectingKeyApp] = useState<AppIntegration | null>(null)
   const [keyEnvValues, setKeyEnvValues] = useState<Record<string, string>>({})
+  const [keyEnvSource, setKeyEnvSource] = useState<"own" | "shared" | "platform">("own")
   const [isConnectingKey, setIsConnectingKey] = useState(false)
   const [localSelectedServers, setLocalSelectedServers] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState("library")
@@ -262,18 +264,28 @@ export function ConnectMcpDialog({
     // silently clearing it.
     required.forEach((k) => { initial[k] = app.user_env_configured ? MASKED_SECRET_VALUE : "" })
     setKeyEnvValues(initial)
+    // Default the source selector to the user's current pick, else whichever
+    // option is actually usable, preferring "own" when they already have a key.
+    const defaultSource: "own" | "shared" | "platform" =
+      app.env_source
+        || (app.user_env_configured ? "own" : null)
+        || (app.shared_env_available ? "shared" : null)
+        || (app.platform_env_available ? "platform" : null)
+        || "own"
+    setKeyEnvSource(defaultSource)
     setConnectingKeyApp(app)
   }
 
-  const submitKeyConnect = async (autoSelect: boolean, env: Record<string, string> = keyEnvValues) => {
+  const submitKeyConnect = async (autoSelect: boolean) => {
     if (!connectingKeyApp) return
-    // Key is optional: an empty env falls back to the admin-configured global key.
+    // Only the "own" source sends a per-user key; shared/platform store no key.
+    const env = keyEnvSource === "own" ? keyEnvValues : {}
     setIsConnectingKey(true)
     try {
       const response = await apiRequest(`${getApiUrl()}/api/mcp/apps/${connectingKeyApp.id}/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ env })
+        body: JSON.stringify({ env, env_source: keyEnvSource })
       })
       if (response.ok) {
         toast.success(t('tools.mcp.buttons.save'))
@@ -928,50 +940,59 @@ export function ConnectMcpDialog({
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4 py-2">
-          {/* Current key source, so the user knows what's in effect. */}
-          {connectingKeyApp?.user_env_configured ? (
-            <p className="text-sm text-slate-600">{t('tools.mcp.dialog.currentlyUsingOwnKey')}</p>
-          ) : connectingKeyApp?.shared_env_available ? (
-            <p className="text-sm text-emerald-700">{t('tools.mcp.dialog.currentlyUsingSharedKey')}</p>
-          ) : null}
+          {/* Source selector: only show options that are actually usable. */}
+          <RadioGroup
+            value={keyEnvSource}
+            onValueChange={(v) => setKeyEnvSource(v as "own" | "shared" | "platform")}
+          >
+            <div className="flex items-center space-x-2">
+              <RadioGroupItem value="own" id="env-source-own" />
+              <Label htmlFor="env-source-own" className="font-normal cursor-pointer">
+                {t('tools.mcp.dialog.envSource.own')}
+              </Label>
+            </div>
+            {connectingKeyApp?.shared_env_available && (
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="shared" id="env-source-shared" />
+                <Label htmlFor="env-source-shared" className="font-normal cursor-pointer">
+                  {t('tools.mcp.dialog.envSource.shared')}
+                </Label>
+              </div>
+            )}
+            {connectingKeyApp?.platform_env_available && (
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="platform" id="env-source-platform" />
+                <Label htmlFor="env-source-platform" className="font-normal cursor-pointer">
+                  {t('tools.mcp.dialog.envSource.platform')}
+                </Label>
+              </div>
+            )}
+          </RadioGroup>
 
-          {/* Offer the shared key unless it's already in effect. */}
-          {connectingKeyApp?.shared_env_available && !(connectingKeyApp?.is_connected && !connectingKeyApp?.user_env_configured) && (
-            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
-              <p className="text-sm text-emerald-800">{t('tools.mcp.dialog.sharedKeyConfigured')}</p>
-              <Button
-                size="sm"
-                onClick={() => submitKeyConnect(isSelectMode, {})}
-                disabled={isConnectingKey}
-              >
-                {t('tools.mcp.dialog.useSharedKey')}
-              </Button>
-            </div>
+          {keyEnvSource === "own" && (
+            <>
+              {(connectingKeyApp?.launch_config?.required_env || []).map((k) => (
+                <div key={k} className="space-y-1.5">
+                  <Label htmlFor={`key-${k}`}>{k}</Label>
+                  <Input
+                    id={`key-${k}`}
+                    type="password"
+                    autoComplete="off"
+                    value={keyEnvValues[k] || ""}
+                    onFocus={(e) => {
+                      // Select the mask so typing replaces it, but clicking/tabbing away
+                      // keeps it — submitting the mask unchanged preserves the stored key.
+                      if (keyEnvValues[k] === MASKED_SECRET_VALUE) {
+                        e.currentTarget.select()
+                      }
+                    }}
+                    onChange={(e) => setKeyEnvValues(prev => ({ ...prev, [k]: e.target.value }))}
+                  />
+                </div>
+              ))}
+              <p className="text-xs text-slate-500">{t('tools.mcp.dialog.apiKeyOptionalHint')}</p>
+            </>
           )}
-          {(connectingKeyApp?.launch_config?.required_env || []).map((k) => (
-            <div key={k} className="space-y-1.5">
-              <Label htmlFor={`key-${k}`}>{k}</Label>
-              <Input
-                id={`key-${k}`}
-                type="password"
-                autoComplete="off"
-                value={keyEnvValues[k] || ""}
-                onFocus={(e) => {
-                  // Select the mask so typing replaces it, but clicking/tabbing away
-                  // keeps it — submitting the mask unchanged preserves the stored key.
-                  if (keyEnvValues[k] === MASKED_SECRET_VALUE) {
-                    e.currentTarget.select()
-                  }
-                }}
-                onChange={(e) => setKeyEnvValues(prev => ({ ...prev, [k]: e.target.value }))}
-              />
-            </div>
-          ))}
-          <p className="text-xs text-slate-500">
-            {connectingKeyApp?.shared_env_available
-              ? t('tools.mcp.dialog.apiKeyOverrideHint')
-              : t('tools.mcp.dialog.apiKeyOptionalHint')}
-          </p>
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => setConnectingKeyApp(null)} disabled={isConnectingKey}>
