@@ -278,8 +278,11 @@ export function ConnectMcpDialog({
 
   const submitKeyConnect = async (autoSelect: boolean) => {
     if (!connectingKeyApp) return
-    // Only the "own" source sends a per-user key; shared/platform store no key.
-    const env = keyEnvSource === "own" ? keyEnvValues : {}
+    // Only the "own" source sends a per-user key. For shared/platform we omit
+    // env entirely (undefined drops from the JSON) so the backend leaves the
+    // stored own key untouched — an empty {} would clear it, forcing re-entry
+    // when switching back to "own".
+    const env = keyEnvSource === "own" ? keyEnvValues : undefined
     setIsConnectingKey(true)
     try {
       const response = await apiRequest(`${getApiUrl()}/api/mcp/apps/${connectingKeyApp.id}/connect`, {
