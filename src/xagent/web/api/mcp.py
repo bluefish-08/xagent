@@ -1954,20 +1954,14 @@ def get_mcp_server(
         )
 
 
-@mcp_router.post("/apps/{app_id}/connect", response_model=MCPServerResponse)
-def connect_mcp_app(
-    app_id: str,
-    body: MCPAppConnectRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> MCPServerResponse:
-    """Connect a key-based (non-oauth) catalog app for the current user.
+def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dict]:
+    """Idempotently ensure the shared server row for a key-based catalog app
+    exists, without creating any per-user association. Returns (server, app_info).
 
-    One shared server row backs the app for all users; each user gets their own
-    per-user env (their key). Connecting again updates the caller's key.
+    Used by connect (before attaching the caller's env) and by the standalone
+    provision endpoint (so an admin can attach a shared/team key to an app that
+    nobody has connected yet). Raises the same 400/404/409 as connect.
     """
-    from xagent.core.utils.encryption import decrypt_env_dict, encrypt_env_dict
-
     from ..mcp_apps import get_app_by_id
 
     app_info = get_app_by_id(db, app_id)
@@ -1980,7 +1974,6 @@ def connect_mcp_app(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OAuth apps must be connected via the OAuth flow",
         )
-
     launch = app_info.get("launch_config") or {}
     command = launch.get("command")
     if not command:
@@ -1988,8 +1981,6 @@ def connect_mcp_app(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This app cannot be connected with an API key",
         )
-    allowed_env_keys = set(launch.get("required_env") or [])
-
     manager = DatabaseMCPServerManager(db)
     # app_id is the stable catalog key: it passes the server-name validator and
     # is what the connector uses to detect an app as connected.
@@ -2027,7 +2018,7 @@ def connect_mcp_app(
         try:
             manager.add_server(config)
         except (ValueError, IntegrityError):
-            # Concurrent first-connect: another request created the shared row.
+            # Concurrent first-provision: another request created the shared row.
             db.rollback()
         server = db.query(MCPServer).filter(MCPServer.name == server_name).first()
         if not server:
@@ -2035,6 +2026,40 @@ def connect_mcp_app(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create server",
             )
+    return server, app_info
+
+
+@mcp_router.post("/apps/{app_id}/server")
+def provision_mcp_app_server(
+    app_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Ensure a key-based catalog app's shared server row exists, without
+    connecting the caller. Lets a shared/team key be attached to an app that
+    nobody has connected yet. Idempotent; returns the server id."""
+    server, _ = _ensure_catalog_app_server(db, app_id)
+    return {"server_id": server.id, "name": server.name}
+
+
+@mcp_router.post("/apps/{app_id}/connect", response_model=MCPServerResponse)
+def connect_mcp_app(
+    app_id: str,
+    body: MCPAppConnectRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MCPServerResponse:
+    """Connect a key-based (non-oauth) catalog app for the current user.
+
+    One shared server row backs the app for all users; each user gets their own
+    per-user env (their key). Connecting again updates the caller's key.
+    """
+    from xagent.core.utils.encryption import decrypt_env_dict, encrypt_env_dict
+
+    server, app_info = _ensure_catalog_app_server(db, app_id)
+    allowed_env_keys = set((app_info.get("launch_config") or {}).get("required_env") or [])
+    manager = DatabaseMCPServerManager(db)
+    server_name = str(app_info["id"])
 
     assoc: Any = (
         db.query(UserMCPServer)
