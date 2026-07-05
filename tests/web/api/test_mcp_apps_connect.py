@@ -211,7 +211,6 @@ def test_platform_and_shared_env_available_flags(test_db):
     from xagent.web.api.mcp import (
         _app_platform_env_available,
         _app_shared_env_available,
-        _normalize_app_key,
     )
 
     app = {
@@ -221,12 +220,9 @@ def test_platform_and_shared_env_available_flags(test_db):
         "launch_config": {"required_env": ["GOOGLE_MAPS_API_KEY"]},
     }
 
-    def _by_key(server):
-        return {_normalize_app_key(server.name): server} if server else {}
-
     # No server row yet -> neither available.
-    assert _app_platform_env_available(app, {}) is False
-    assert _app_shared_env_available(app, {}, {}) is False
+    assert _app_platform_env_available(app, None) is False
+    assert _app_shared_env_available(app, None, {}) is False
 
     server = MCPServer(
         name="google-maps", transport="stdio", managed="external", command="npx"
@@ -235,27 +231,24 @@ def test_platform_and_shared_env_available_flags(test_db):
     test_db.commit()
 
     # Server exists but no shared env anywhere -> neither available.
-    assert _app_platform_env_available(app, _by_key(server)) is False
-    assert _app_shared_env_available(app, _by_key(server), {}) is False
+    assert _app_platform_env_available(app, server) is False
+    assert _app_shared_env_available(app, server, {}) is False
 
     # Platform-global env on the row covers the required key -> platform available,
     # shared (injected layer) still not.
     server.env = encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "platform"})
     test_db.commit()
-    assert _app_platform_env_available(app, _by_key(server)) is True
-    assert _app_shared_env_available(app, _by_key(server), {}) is False
+    assert _app_platform_env_available(app, server) is True
+    assert _app_shared_env_available(app, server, {}) is False
 
     # An injected shared layer (decrypted, keyed by server id) covers it ->
     # shared available.
     server.env = None
     test_db.commit()
     injected = {server.id: {"GOOGLE_MAPS_API_KEY": "team"}}
-    assert _app_shared_env_available(app, _by_key(server), injected) is True
+    assert _app_shared_env_available(app, server, injected) is True
     # Injected layer missing the key -> not available.
-    assert (
-        _app_shared_env_available(app, _by_key(server), {server.id: {"X": "y"}})
-        is False
-    )
+    assert _app_shared_env_available(app, server, {server.id: {"X": "y"}}) is False
 
 
 def test_user_env_configured_reflects_own_key(test_db):
@@ -264,7 +257,6 @@ def test_user_env_configured_reflects_own_key(test_db):
     from xagent.web.api.mcp import (
         MCPAppConnectRequest,
         _app_user_env_configured,
-        _normalize_app_key,
         connect_mcp_app,
     )
 
@@ -275,15 +267,16 @@ def test_user_env_configured_reflects_own_key(test_db):
         "launch_config": {"required_env": ["GOOGLE_MAPS_API_KEY"]},
     }
 
-    def _lookups():
-        server = (
-            test_db.query(MCPServer).filter(MCPServer.name == "google-maps").first()
-        )
-        server_by_key = {_normalize_app_key(server.name): server} if server else {}
-        user_mcp_by_id = {
-            um.mcpserver_id: um for um in test_db.query(UserMCPServer).all()
+    def _server():
+        return test_db.query(MCPServer).filter(MCPServer.name == "google-maps").first()
+
+    def _um_by_id(uid):
+        return {
+            um.mcpserver_id: um
+            for um in test_db.query(UserMCPServer)
+            .filter(UserMCPServer.user_id == uid)
+            .all()
         }
-        return server_by_key, user_mcp_by_id
 
     # Connected with a blank key (using admin global) -> no own key.
     connect_mcp_app(
@@ -292,12 +285,7 @@ def test_user_env_configured_reflects_own_key(test_db):
         current_user=_user(test_db, 1),
         db=test_db,
     )
-    sbk, _ = _lookups()
-    um_by_id = {
-        um.mcpserver_id: um
-        for um in test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).all()
-    }
-    assert _app_user_env_configured(app, sbk, um_by_id) is False
+    assert _app_user_env_configured(app, _server(), _um_by_id(1)) is False
 
     # Connected with own key -> configured.
     connect_mcp_app(
@@ -306,12 +294,7 @@ def test_user_env_configured_reflects_own_key(test_db):
         current_user=_user(test_db, 2),
         db=test_db,
     )
-    sbk, _ = _lookups()
-    um_by_id = {
-        um.mcpserver_id: um
-        for um in test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 2).all()
-    }
-    assert _app_user_env_configured(app, sbk, um_by_id) is True
+    assert _app_user_env_configured(app, _server(), _um_by_id(2)) is True
 
 
 def test_connect_only_stores_required_env_keys(test_db):
@@ -580,6 +563,130 @@ def test_concurrent_same_user_connect_is_idempotent(test_db):
     )
     assert len(assocs) == 1  # idempotent: one row, no duplicate, no 500
     assert decrypt_env_dict(assocs[0].env) == {"GOOGLE_MAPS_API_KEY": "alice-key"}
+
+
+def test_concurrent_connect_recovery_keeps_winners_key(test_db):
+    """The dangerous direction of the race: an env=None request (e.g. activation
+    toggle) loses to a concurrent request that stored a real key. Recovery must
+    merge against the winner's *current* row, not overwrite it with the loser's
+    stale pre-race merged_env (which is None on the insert path)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from xagent.core.utils.encryption import encrypt_env_dict
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    test_db.add(
+        MCPServer(
+            name="google-maps",
+            transport="stdio",
+            managed="external",
+            command="npx",
+            args=["-y", "@cablate/mcp-google-map", "--stdio"],
+        )
+    )
+    test_db.commit()
+    server_id = (
+        test_db.query(MCPServer).filter(MCPServer.name == "google-maps").first().id
+    )
+
+    real_commit = test_db.commit
+    state = {"raced": False}
+
+    def racing_commit():
+        # The winner commits a real key; then our (env=None) insert loses.
+        if not state["raced"]:
+            state["raced"] = True
+            for obj in list(test_db.new):
+                test_db.expunge(obj)
+            test_db.add(
+                UserMCPServer(
+                    user_id=1,
+                    mcpserver_id=server_id,
+                    is_owner=False,
+                    env=encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "winner-key"}),
+                )
+            )
+            real_commit()
+            raise IntegrityError("raced", {}, Exception("duplicate"))
+        return real_commit()
+
+    test_db.commit = racing_commit
+    try:
+        connect_mcp_app(
+            "google-maps",
+            MCPAppConnectRequest(env=None),  # "don't touch my key" toggle
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    finally:
+        test_db.commit = real_commit
+
+    assert state["raced"] is True
+    assoc = (
+        test_db.query(UserMCPServer)
+        .filter(UserMCPServer.user_id == 1, UserMCPServer.mcpserver_id == server_id)
+        .first()
+    )
+    # The winner's key must survive — not be wiped by the loser's stale env=None.
+    assert decrypt_env_dict(assoc.env) == {"GOOGLE_MAPS_API_KEY": "winner-key"}
+
+
+def test_own_source_with_blank_key_not_persisted_as_own(test_db):
+    """Selecting env_source="own" but submitting no usable key must not persist a
+    misleading "own" label: at runtime the connection falls back to the platform/
+    global key, so the stored source should be cleared, not left saying "own".
+    A real own key still persists "own"."""
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    # "own" + blank key -> no key stored, source not persisted as "own".
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "   "}, env_source="own"),
+        current_user=_user(test_db, 1),
+        db=test_db,
+    )
+    assoc = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).first()
+    assert assoc.env is None
+    assert assoc.env_source is None
+
+    # "own" + a real key -> source legitimately persisted as "own".
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "mine"}, env_source="own"),
+        current_user=_user(test_db, 2),
+        db=test_db,
+    )
+    assoc2 = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 2).first()
+    assert assoc2.env_source == "own"
+
+
+def test_reconnect_clearing_own_key_drops_stale_own_source(test_db):
+    """A reconnect that clears the key (explicit {}) without restating the source
+    must not leave a stale env_source="own": the row would silently run on the
+    global key while still claiming the user's own. The invariant is enforced on
+    the resulting row state, not just the incoming request."""
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    u = _user(test_db, 1)
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "mine"}, env_source="own"),
+        current_user=u,
+        db=test_db,
+    )
+    assoc = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).first()
+    assert assoc.env_source == "own"
+
+    # Clear the key without restating env_source (env_source left untouched).
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={}),
+        current_user=u,
+        db=test_db,
+    )
+    test_db.refresh(assoc)
+    assert assoc.env is None
+    assert assoc.env_source is None  # stale "own" dropped
 
 
 def test_provision_surfaces_genuine_config_error_as_400(test_db, monkeypatch):

@@ -1520,7 +1520,7 @@ def _shared_server_for_app(
 
 def _app_shared_env_available(
     app: dict,
-    server_by_key: dict[str, MCPServer],
+    server: Optional[MCPServer],
     shared_env_by_id: dict[int, dict],
 ) -> bool:
     """Whether an application-injected shared layer (e.g. a team key, supplied
@@ -1528,12 +1528,11 @@ def _app_shared_env_available(
     can offer "use the shared key". The core stays agnostic to what the layer
     represents. Distinct from the platform-global env (see
     _app_platform_env_available). Only meaningful for key-based (non-oauth) apps.
+
+    `server` is the app's already-resolved shared row (see _shared_server_for_app).
     """
     required = (app.get("launch_config") or {}).get("required_env") or []
-    if not required:
-        return False
-    server = _shared_server_for_app(app, server_by_key)
-    if not server:
+    if not required or not server:
         return False
     # App-injected shared layer is already decrypted, keyed by server id.
     shared = shared_env_by_id.get(cast(int, server.id)) or {}
@@ -1542,34 +1541,30 @@ def _app_shared_env_available(
 
 def _app_platform_env_available(
     app: dict,
-    server_by_key: dict[str, MCPServer],
+    server: Optional[MCPServer],
 ) -> bool:
     """Whether the platform-global env on the shared server row covers this
     app's required keys, so the connector can offer "use the platform key".
-    Only meaningful for key-based (non-oauth) apps.
+    Only meaningful for key-based (non-oauth) apps. `server` is the app's
+    already-resolved shared row (see _shared_server_for_app).
     """
     required = (app.get("launch_config") or {}).get("required_env") or []
-    if not required:
-        return False
-    server = _shared_server_for_app(app, server_by_key)
-    if not server:
+    if not required or not server:
         return False
     return _env_covers_required(getattr(server, "env", None), required)
 
 
 def _app_user_env_configured(
     app: dict,
-    server_by_key: dict[str, MCPServer],
+    server: Optional[MCPServer],
     user_mcp_by_server_id: dict[int, UserMCPServer],
 ) -> bool:
     """Whether this user has their own per-user key covering the app's required
     env (vs falling back to the admin's global key). Non-oauth apps only.
+    `server` is the app's already-resolved shared row (see _shared_server_for_app).
     """
     required = (app.get("launch_config") or {}).get("required_env") or []
-    if not required:
-        return False
-    server = _shared_server_for_app(app, server_by_key)
-    if not server:
+    if not required or not server:
         return False
     assoc = user_mcp_by_server_id.get(cast(int, server.id))
     if not assoc:
@@ -1677,17 +1672,18 @@ def list_mcp_apps(
                     app, non_oauth_server_lookup
                 )
                 connected_account = None
+                # Resolve the shared row once and reuse it for all key-source flags.
+                shared_server = _shared_server_for_app(app, server_by_key)
                 app_shared_env = _app_shared_env_available(
-                    app, server_by_key, shared_env_by_id
+                    app, shared_server, shared_env_by_id
                 )
-                app_platform_env = _app_platform_env_available(app, server_by_key)
+                app_platform_env = _app_platform_env_available(app, shared_server)
                 app_user_env = _app_user_env_configured(
-                    app, server_by_key, user_mcp_by_server_id
+                    app, shared_server, user_mcp_by_server_id
                 )
-                _shared_server = _shared_server_for_app(app, server_by_key)
                 _assoc = (
-                    user_mcp_by_server_id.get(cast(int, _shared_server.id))
-                    if _shared_server
+                    user_mcp_by_server_id.get(cast(int, shared_server.id))
+                    if shared_server
                     else None
                 )
                 app_env_source = getattr(_assoc, "env_source", None)
@@ -2049,19 +2045,6 @@ def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dic
     return server, app_info
 
 
-@mcp_router.post("/apps/{app_id}/server")
-def provision_mcp_app_server(
-    app_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Ensure a key-based catalog app's shared server row exists, without
-    connecting the caller. Lets a shared/team key be attached to an app that
-    nobody has connected yet. Idempotent; returns the server id."""
-    server, _ = _ensure_catalog_app_server(db, app_id)
-    return {"server_id": server.id, "name": server.name}
-
-
 @mcp_router.post("/apps/{app_id}/connect", response_model=MCPServerResponse)
 def connect_mcp_app(
     app_id: str,
@@ -2091,6 +2074,7 @@ def connect_mcp_app(
         )
         .first()
     )
+
     # Only the app's declared keys may be set — never let a caller inject extra
     # env (e.g. NODE_OPTIONS/LD_PRELOAD/PATH) into the stdio subprocess. Blank
     # values mean "use the shared/global key" and are dropped so they don't blank
@@ -2098,18 +2082,20 @@ def connect_mcp_app(
     # An omitted env (None) means "don't touch my key" (e.g. an is_active-only
     # reconnect) — preserve the stored value. An explicit empty dict means "clear
     # my key, fall back to the global one" (the "use admin key" button).
-    if body.env is None:
-        merged_env = getattr(assoc, "env", None) if assoc else None
-    else:
+    def _merged_env_for(a: Any) -> Any:
+        # Recompute against the row's *current* env every time, never a cached
+        # value: the concurrent-connect recovery below re-reads a different row
+        # than the initial (None) read, and must merge against that row's real
+        # stored key rather than overwrite it with a stale pre-race value.
+        if body.env is None:
+            return getattr(a, "env", None) if a else None
         provided = {
             k: v
             for k, v in body.env.items()
             if k in allowed_env_keys and isinstance(v, str) and v.strip()
         }
-        existing = decrypt_env_dict(getattr(assoc, "env", None)) if assoc else {}
-        merged_env = (
-            encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
-        )
+        existing = decrypt_env_dict(getattr(a, "env", None)) if a else {}
+        return encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
 
     # Which env layer to use at runtime. Omitted (None) leaves the current pick
     # untouched on reconnect; an explicit value must be one of the known layers.
@@ -2123,10 +2109,19 @@ def connect_mcp_app(
             detail="env_source must be 'own', 'shared', or 'platform'",
         )
 
+    def _honest_env_source(source: Any, merged: Any) -> Any:
+        # Never persist "own" with no own key stored — the connection would
+        # silently run on the platform/global key, mislabeling the record. Enforced
+        # on the resulting row state, so it also drops a stale "own" left by a prior
+        # connect when a reconnect clears the key without restating the source.
+        return None if (source == "own" and not merged) else source
+
     def _apply_updates(a: Any) -> None:
-        a.env = merged_env
-        if body.env_source is not None:
-            a.env_source = body.env_source
+        merged = _merged_env_for(a)
+        a.env = merged
+        # An explicit source overrides; otherwise keep the row's current pick.
+        source = body.env_source if body.env_source is not None else a.env_source
+        a.env_source = _honest_env_source(source, merged)
         # Only toggle activation when explicitly requested; a reconnect to update
         # the key must not silently re-enable a connection the user turned off.
         if body.is_active is not None:
@@ -2138,6 +2133,7 @@ def connect_mcp_app(
     else:
         # Connect users never own the shared global config (no editing global env),
         # but can disconnect their own association.
+        merged = _merged_env_for(None)
         assoc = UserMCPServer(
             user_id=current_user.id,
             mcpserver_id=server.id,
@@ -2145,8 +2141,8 @@ def connect_mcp_app(
             is_owner=False,
             can_edit=False,
             can_delete=True,
-            env=merged_env,
-            env_source=body.env_source,
+            env=merged,
+            env_source=_honest_env_source(body.env_source, merged),
         )
         db.add(assoc)
         try:
