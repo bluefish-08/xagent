@@ -2111,14 +2111,18 @@ def connect_mcp_app(
             detail="env_source must be 'own', 'shared', or 'platform'",
         )
 
-    if assoc:
-        assoc.env = merged_env
+    def _apply_updates(a: UserMCPServer) -> None:
+        a.env = merged_env
         if body.env_source is not None:
-            assoc.env_source = body.env_source
+            a.env_source = body.env_source
         # Only toggle activation when explicitly requested; a reconnect to update
         # the key must not silently re-enable a connection the user turned off.
         if body.is_active is not None:
-            assoc.is_active = body.is_active
+            a.is_active = body.is_active
+
+    if assoc:
+        _apply_updates(assoc)
+        db.commit()
     else:
         # Connect users never own the shared global config (no editing global env),
         # but can disconnect their own association.
@@ -2133,8 +2137,26 @@ def connect_mcp_app(
             env_source=body.env_source,
         )
         db.add(assoc)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Concurrent same-user connect (double-click/client retry): another
+            # request already inserted the (user_id, mcpserver_id) association.
+            # Re-read it and apply this request's values idempotently.
+            db.rollback()
+            assoc = (
+                db.query(UserMCPServer)
+                .filter(
+                    UserMCPServer.user_id == current_user.id,
+                    UserMCPServer.mcpserver_id == server.id,
+                )
+                .first()
+            )
+            if assoc is None:
+                raise
+            _apply_updates(assoc)
+            db.commit()
 
-    db.commit()
     db.refresh(assoc)
     logger.info(f"User {current_user.id} connected MCP app '{server_name}'")
     return _db_server_to_response(
@@ -2365,6 +2387,33 @@ def update_mcp_server(
         )
 
 
+def _catalog_server_has_platform_key(db: Session, server: MCPServer) -> bool:
+    """Whether this shared row backs a key-based (non-oauth) catalog app AND
+    carries the admin's platform fallback key in `env` (see
+    _app_platform_env_available).
+
+    Such a row is reused by every future connect, so the per-user disconnect
+    cascade must not hard-delete it — that would silently wipe the platform key
+    with no signal to the admin. A catalog row with no platform key is not
+    special and cascades away as before.
+    """
+    if str(getattr(server, "transport", "") or "").lower() == "oauth":
+        return False
+    env = getattr(server, "env", None)
+    if not env:
+        return False
+    from ..mcp_apps import get_all_mcp_apps
+
+    key = _normalize_app_key(getattr(server, "name", None))
+    if not key:
+        return False
+    for app in get_all_mcp_apps(db):
+        if key in _app_lookup_keys(app.get("id"), app.get("name")):
+            required = (app.get("launch_config") or {}).get("required_env") or []
+            return _env_covers_required(env, required)
+    return False
+
+
 @mcp_router.delete("/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_mcp_server(
     server_id: int,
@@ -2435,8 +2484,17 @@ def delete_mcp_server(
 
         # Only remove from manager and delete if no other users
         if not other_users:
-            manager.remove_server(server_name)
-            logger.info(f"Deleted MCP server '{server_name}'")
+            if _catalog_server_has_platform_key(db, server):
+                # Keep the shared catalog row: it holds the admin's platform
+                # fallback key and is reused by future connects. Deleting it would
+                # silently wipe the platform key with no signal to the admin.
+                logger.info(
+                    f"Kept shared catalog server '{server_name}' after last user "
+                    "disconnect (preserves platform fallback key)"
+                )
+            else:
+                manager.remove_server(server_name)
+                logger.info(f"Deleted MCP server '{server_name}'")
         else:
             logger.info(f"Removed user {user_id} access to MCP server '{server_name}'")
 

@@ -477,3 +477,106 @@ def test_connect_rejects_oauth_app(test_db):
             db=test_db,
         )
     assert exc.value.status_code == 400
+
+
+def test_last_disconnect_keeps_row_with_platform_key(test_db):
+    """When a shared catalog row carries the admin's platform fallback key, the
+    last user's disconnect must NOT hard-delete the row — that would silently
+    wipe the platform key with no signal to the admin. (A row with no platform
+    key still cascades away, see test_disconnect_keeps_shared_server_for_other_users.)
+    """
+    from xagent.core.utils.encryption import encrypt_env_dict
+    from xagent.web.api.mcp import (
+        MCPAppConnectRequest,
+        connect_mcp_app,
+        delete_mcp_server,
+    )
+
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "alice-key"}),
+        current_user=_user(test_db, 1),
+        db=test_db,
+    )
+    server = test_db.query(MCPServer).filter(MCPServer.name == "google-maps").first()
+    # Admin attaches a platform fallback key on the shared row.
+    server.env = encrypt_env_dict({"GOOGLE_MAPS_API_KEY": "platform-fallback"})
+    test_db.commit()
+    server_id = server.id
+
+    # The last (only) connected user disconnects.
+    delete_mcp_server(server_id, current_user=_user(test_db, 1), db=test_db)
+
+    kept = test_db.query(MCPServer).filter(MCPServer.id == server_id).first()
+    assert kept is not None  # row survives
+    assert decrypt_env_dict(kept.env) == {"GOOGLE_MAPS_API_KEY": "platform-fallback"}
+    assert (
+        test_db.query(UserMCPServer)
+        .filter(UserMCPServer.mcpserver_id == server_id)
+        .count()
+        == 0
+    )
+
+
+def test_concurrent_same_user_connect_is_idempotent(test_db):
+    """Two racing connect requests from the same user both pass the initial
+    "no association yet" SELECT and try to insert; the loser trips the
+    (user_id, mcpserver_id) unique constraint. It must recover as an idempotent
+    update, not surface an unhandled 500."""
+    from sqlalchemy.exc import IntegrityError
+
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    # Shared row already exists so _ensure_catalog_app_server does not commit;
+    # the only commit inside connect_mcp_app is then our association insert.
+    test_db.add(
+        MCPServer(
+            name="google-maps",
+            transport="stdio",
+            managed="external",
+            command="npx",
+            args=["-y", "@cablate/mcp-google-map", "--stdio"],
+        )
+    )
+    test_db.commit()
+    server_id = (
+        test_db.query(MCPServer).filter(MCPServer.name == "google-maps").first().id
+    )
+
+    real_commit = test_db.commit
+    state = {"raced": False}
+
+    def racing_commit():
+        # On the association insert, simulate the winning concurrent request:
+        # drop our own pending insert, commit an identical row so the recovery
+        # re-query finds it, then signal that our insert lost the race.
+        if not state["raced"]:
+            state["raced"] = True
+            for obj in list(test_db.new):
+                test_db.expunge(obj)
+            test_db.add(
+                UserMCPServer(user_id=1, mcpserver_id=server_id, is_owner=False)
+            )
+            real_commit()
+            raise IntegrityError("raced", {}, Exception("duplicate"))
+        return real_commit()
+
+    test_db.commit = racing_commit
+    try:
+        connect_mcp_app(
+            "google-maps",
+            MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "alice-key"}),
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    finally:
+        test_db.commit = real_commit
+
+    assert state["raced"] is True  # the race path was actually exercised
+    assocs = (
+        test_db.query(UserMCPServer)
+        .filter(UserMCPServer.user_id == 1, UserMCPServer.mcpserver_id == server_id)
+        .all()
+    )
+    assert len(assocs) == 1  # idempotent: one row, no duplicate, no 500
+    assert decrypt_env_dict(assocs[0].env) == {"GOOGLE_MAPS_API_KEY": "alice-key"}
