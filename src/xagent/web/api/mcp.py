@@ -2023,13 +2023,25 @@ def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dic
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid app configuration: {str(e)}",
             )
+        add_error: Exception | None = None
         try:
             manager.add_server(config)
-        except (ValueError, IntegrityError):
-            # Concurrent first-provision: another request created the shared row.
+        except (ValueError, IntegrityError) as exc:
+            # A concurrent first-provision loses to the other request: add_server's
+            # own duplicate-name check raises ValueError, or the commit trips the
+            # unique constraint (IntegrityError). Either way the row now exists, so
+            # recover by re-reading it below. Any other failure leaves no row.
             db.rollback()
+            add_error = exc
         server = db.query(MCPServer).filter(MCPServer.name == server_name).first()
         if not server:
+            # No row after the failure => it was not a race but a genuine error.
+            # Surface it instead of masking it as an opaque 500.
+            if add_error is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid app configuration: {add_error}",
+                ) from add_error
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create server",

@@ -580,3 +580,27 @@ def test_concurrent_same_user_connect_is_idempotent(test_db):
     )
     assert len(assocs) == 1  # idempotent: one row, no duplicate, no 500
     assert decrypt_env_dict(assocs[0].env) == {"GOOGLE_MAPS_API_KEY": "alice-key"}
+
+
+def test_provision_surfaces_genuine_config_error_as_400(test_db, monkeypatch):
+    """A non-race failure from add_server leaves no shared row behind, so it must
+    surface as a 400 carrying the real message — not the race path's opaque 500."""
+    from fastapi import HTTPException
+
+    from xagent.web.api import mcp as mcp_api
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    def boom(self, config):
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(mcp_api.DatabaseMCPServerManager, "add_server", boom)
+
+    with pytest.raises(HTTPException) as exc:
+        connect_mcp_app(
+            "google-maps",
+            MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "alice-key"}),
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    assert exc.value.status_code == 400
+    assert "bad config" in str(exc.value.detail)
