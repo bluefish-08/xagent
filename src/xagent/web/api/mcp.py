@@ -2123,7 +2123,7 @@ def connect_mcp_app(
             detail="env_source must be 'own', 'shared', or 'platform'",
         )
 
-    def _apply_updates(a: UserMCPServer) -> None:
+    def _apply_updates(a: Any) -> None:
         a.env = merged_env
         if body.env_source is not None:
             a.env_source = body.env_source
