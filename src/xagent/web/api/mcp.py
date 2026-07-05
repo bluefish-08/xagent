@@ -1978,9 +1978,7 @@ def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dic
     """Idempotently ensure the shared server row for a key-based catalog app
     exists, without creating any per-user association. Returns (server, app_info).
 
-    Used by connect (before attaching the caller's env) and by the standalone
-    provision endpoint (so an admin can attach a shared/team key to an app that
-    nobody has connected yet). Raises the same 400/404/409 as connect.
+    Used by connect before attaching the caller's env. Raises 400/404/409.
     """
     from ..mcp_apps import get_app_by_id
 
@@ -2128,8 +2126,12 @@ def connect_mcp_app(
         provided = {
             k: str(v).strip()
             for k, v in body.env.items()
+            # Accept string or numeric scalars (coerced to str); exclude bool,
+            # which is an int subclass — storing "True"/"False" as an API key is
+            # worse than dropping it (a dropped key falls back to the global one).
             if k in allowed_env_keys
-            and isinstance(v, (str, int, float, bool))
+            and isinstance(v, (str, int, float))
+            and not isinstance(v, bool)
             and str(v).strip()
         }
         existing = decrypt_env_dict(getattr(a, "env", None)) if a else {}
