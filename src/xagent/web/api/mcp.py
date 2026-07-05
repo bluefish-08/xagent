@@ -13,7 +13,7 @@ import logging
 import secrets
 import shlex
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Callable, Dict, List, Optional, Union, cast
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -113,7 +113,7 @@ class MCPAppConnectRequest(BaseModel):
     env: Optional[dict] = Field(
         None, description="Per-user env overrides (e.g. the API key)"
     )
-    env_source: Optional[str] = Field(
+    env_source: Optional[Literal["own", "shared", "platform"]] = Field(
         None,
         description="Which env layer to use: 'own' | 'shared' | 'platform'. "
         "None leaves the legacy fallback (global < shared < user).",
@@ -137,7 +137,7 @@ class MCPServerResponse(BaseModel):
     is_active: bool
     is_default: bool
     user_env: Optional[dict] = None
-    env_source: Optional[str] = None
+    env_source: Optional[Literal["own", "shared", "platform"]] = None
     can_edit_global: bool = False
     transport_display: str
     created_at: Optional[str]
@@ -2117,18 +2117,8 @@ def connect_mcp_app(
         existing = decrypt_env_dict(getattr(a, "env", None)) if a else {}
         return encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
 
-    # Which env layer to use at runtime. Omitted (None) leaves the current pick
-    # untouched on reconnect; an explicit value must be one of the known layers.
-    if body.env_source is not None and body.env_source not in (
-        "own",
-        "shared",
-        "platform",
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="env_source must be 'own', 'shared', or 'platform'",
-        )
-
+    # env_source is validated at the API boundary by the request model's Literal
+    # (own | shared | platform | None); no manual check needed here.
     def _honest_env_source(source: Any, merged: Any) -> Any:
         # Never persist "own" with no own key stored — the connection would
         # silently run on the platform/global key, mislabeling the record. Enforced
