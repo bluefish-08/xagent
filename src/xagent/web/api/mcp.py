@@ -1357,6 +1357,22 @@ def _app_lookup_keys(*values: object) -> list[str]:
     return keys
 
 
+def _is_reserved_catalog_name(db: Session, name: object) -> bool:
+    """Whether a server name collides (normalized) with a catalog app id/name.
+
+    Custom servers must not squat a catalog id — connect matches servers to apps
+    by normalized id/name, so a squatter would shadow the official shared row (or
+    at least DoS legitimate connects). Enforced on both create and rename.
+    """
+    key = _normalize_app_key(name)
+    if not key:
+        return False
+    return any(
+        key in _app_lookup_keys(app.get("id"), app.get("name"))
+        for app in get_all_mcp_apps(db)
+    )
+
+
 def _oauth_account_can_connect(oauth_account: object) -> bool:
     access_token = getattr(oauth_account, "access_token", None)
     if not access_token:
@@ -2110,9 +2126,11 @@ def connect_mcp_app(
         if body.env is None:
             return getattr(a, "env", None) if a else None
         provided = {
-            k: v
+            k: str(v).strip()
             for k, v in body.env.items()
-            if k in allowed_env_keys and isinstance(v, str) and v.strip()
+            if k in allowed_env_keys
+            and isinstance(v, (str, int, float, bool))
+            and str(v).strip()
         }
         existing = decrypt_env_dict(getattr(a, "env", None)) if a else {}
         return encrypt_env_dict(_merge_masked_env(provided, existing or {})) or None
@@ -2212,17 +2230,9 @@ def create_mcp_server(
         # Catalog apps are a reserved namespace: a custom server sharing one
         # would be reused (and owned/editable) by its creator when others connect
         # the official app, letting them run a command of their choosing with the
-        # victim's key. The connected-state and shared-server lookups match
-        # servers to apps by NORMALIZED id/name (see _normalize_app_key), so
-        # reserve the same way — otherwise a variant like "Google-Maps" slips
-        # past and is still treated as the official "google-maps" app elsewhere.
-        from ..mcp_apps import get_all_mcp_apps
-
-        requested_key = _normalize_app_key(server_data.name)
-        if requested_key and any(
-            requested_key in _app_lookup_keys(app.get("id"), app.get("name"))
-            for app in get_all_mcp_apps(db)
-        ):
+        # victim's key. Match the way connect resolves apps (normalized id/name),
+        # so a variant like "Google-Maps" can't slip past.
+        if _is_reserved_catalog_name(db, server_data.name):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
@@ -2334,6 +2344,16 @@ def update_mcp_server(
 
         # Check for name conflicts if updating name
         if can_edit_global and server_data.name and server_data.name != server.name:
+            # Same catalog-namespace reservation as create — otherwise a rename
+            # would bypass it and squat a catalog id (e.g. "google-maps").
+            if _is_reserved_catalog_name(db, server_data.name):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"'{server_data.name}' is reserved for a catalog app; "
+                        "connect it from the catalog instead"
+                    ),
+                )
             existing = (
                 db.query(MCPServer)
                 .filter(MCPServer.name == server_data.name, MCPServer.id != server_id)

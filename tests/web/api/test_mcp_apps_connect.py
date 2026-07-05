@@ -748,3 +748,51 @@ def test_provision_surfaces_genuine_config_error_as_400(test_db, monkeypatch):
         )
     assert exc.value.status_code == 400
     assert "bad config" in str(exc.value.detail)
+
+
+def test_rename_to_catalog_id_is_rejected(test_db):
+    """The catalog-namespace reservation must also apply on rename, not only on
+    create — otherwise a user could create an arbitrary server and rename it to a
+    reserved catalog id (e.g. "google-maps"), squatting the namespace."""
+    from fastapi import HTTPException
+
+    from xagent.web.api.mcp import (
+        MCPServerCreate,
+        MCPServerUpdate,
+        create_mcp_server,
+        update_mcp_server,
+    )
+
+    created = create_mcp_server(
+        MCPServerCreate(
+            name="my-custom",
+            transport="stdio",
+            config={"command": "npx", "args": ["--stdio"]},
+        ),
+        current_user=_user(test_db, 1),
+        db=test_db,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        update_mcp_server(
+            created.id,
+            MCPServerUpdate(name="Google-Maps"),  # case variant of the reserved id
+            current_user=_user(test_db, 1),
+            db=test_db,
+        )
+    assert exc.value.status_code == 400
+
+
+def test_connect_coerces_scalar_env_values(test_db):
+    """Non-string scalar env values (e.g. a numeric key) are coerced to trimmed
+    strings rather than silently dropped."""
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    connect_mcp_app(
+        "google-maps",
+        MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": 12345}),
+        current_user=_user(test_db, 1),
+        db=test_db,
+    )
+    assoc = test_db.query(UserMCPServer).filter(UserMCPServer.user_id == 1).first()
+    assert decrypt_env_dict(assoc.env) == {"GOOGLE_MAPS_API_KEY": "12345"}
