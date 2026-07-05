@@ -418,6 +418,43 @@ def test_connect_rejects_hijacked_server_with_foreign_config(test_db):
     assert exc.value.status_code == 409
 
 
+def test_connect_rejects_user_owned_server_even_with_matching_config(test_db):
+    """A row under the catalog id that a user OWNS is a custom server squatting
+    the id (creatable only before the app was seeded). Even with a config that
+    matches the official launch, it must not be adopted as the shared row: the
+    owner keeps edit rights and could later swap in a foreign command that every
+    connected user runs."""
+    from fastapi import HTTPException
+
+    from xagent.web.api.mcp import MCPAppConnectRequest, connect_mcp_app
+
+    # Matching official config, but owned by user 1 (the attacker).
+    server = MCPServer(
+        name="google-maps",
+        managed="external",
+        transport="stdio",
+        command="npx",
+        args=["-y", "@cablate/mcp-google-map", "--stdio"],
+    )
+    test_db.add(server)
+    test_db.commit()
+    test_db.add(
+        UserMCPServer(user_id=1, mcpserver_id=server.id, is_owner=True, can_edit=True)
+    )
+    test_db.commit()
+
+    # A different user connecting via the catalog must be rejected, not handed the
+    # attacker-owned row.
+    with pytest.raises(HTTPException) as exc:
+        connect_mcp_app(
+            "google-maps",
+            MCPAppConnectRequest(env={"GOOGLE_MAPS_API_KEY": "victim-key"}),
+            current_user=_user(test_db, 2),
+            db=test_db,
+        )
+    assert exc.value.status_code == 409
+
+
 @pytest.mark.parametrize("name", ["google-maps", "Google-Maps", "google maps"])
 def test_create_server_rejects_catalog_app_id(test_db, name):
     """Custom servers can't squat a catalog app id (the hijack precondition),

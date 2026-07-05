@@ -1995,15 +1995,35 @@ def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dic
     # be a hijack — a custom server someone created with their own command — so
     # only reuse it if it matches the official launch config. Otherwise a victim
     # would run a foreign command with their own key attached.
-    if server and (
-        server.command != command
-        or (server.args or []) != (launch.get("args") or [])
-        or str(server.transport or "").lower() != "stdio"
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A server with this name already exists with a different configuration",
+    if server:
+        if (
+            server.command != command
+            or (server.args or []) != (launch.get("args") or [])
+            or str(server.transport or "").lower() != "stdio"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A server with this name already exists with a different configuration",
+            )
+        # A matching config is not enough: a row owned by a user is a custom server
+        # squatting this catalog id (creatable only before the app was seeded, since
+        # create_mcp_server now reserves catalog ids). Its owner keeps edit rights and
+        # could later swap in a foreign command that every connected user then runs —
+        # refuse to adopt it as the official shared row. The legitimate shared row is
+        # created without any association, so it never has an is_owner=True owner.
+        owned = (
+            db.query(UserMCPServer)
+            .filter(
+                UserMCPServer.mcpserver_id == server.id,
+                UserMCPServer.is_owner.is_(True),
+            )
+            .first()
         )
+        if owned is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A user-owned server already exists under this catalog id",
+            )
     if not server:
         try:
             config = _build_server_config(
