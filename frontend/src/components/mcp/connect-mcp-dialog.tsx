@@ -935,7 +935,7 @@ export function ConnectMcpDialog({
     </Dialog>
 
     {/* Key-based (non-oauth) connect: only the required secret(s) are editable. */}
-    <Dialog open={!!connectingKeyApp} onOpenChange={(o) => { if (!o) setConnectingKeyApp(null) }}>
+    <Dialog open={!!connectingKeyApp} onOpenChange={(o) => { if (!o && !isConnectingKey) setConnectingKeyApp(null) }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
