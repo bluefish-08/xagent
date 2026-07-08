@@ -23,6 +23,9 @@ async def test_trigger_dispatcher_skips_gmail_scan_when_watch_disabled(
     def fake_scan_due_gmail_watch_renewals(_db) -> int:
         return 0
 
+    def fake_scan_due_scheduled_triggers(_db):
+        return []
+
     async def fake_dispatch_pending_trigger_runs(_db, *, limit: int) -> int:
         raise asyncio.CancelledError
 
@@ -43,6 +46,10 @@ async def test_trigger_dispatcher_skips_gmail_scan_when_watch_disabled(
         fake_scan_due_gmail_watch_renewals,
     )
     monkeypatch.setattr(
+        "xagent.web.services.triggers.scan_due_scheduled_triggers",
+        fake_scan_due_scheduled_triggers,
+    )
+    monkeypatch.setattr(
         "xagent.web.services.triggers.dispatch_pending_trigger_runs",
         fake_dispatch_pending_trigger_runs,
     )
@@ -53,4 +60,7 @@ async def test_trigger_dispatcher_skips_gmail_scan_when_watch_disabled(
             batch_size=25,
         )
 
-    assert calls == []
+    # Scheduled triggers are scanned in-process every tick (no Celery needed),
+    # but the Gmail watch-renewal scan stays gated off when watch is disabled.
+    assert "_scan_due_scheduled_triggers_tick" in calls
+    assert "_scan_due_gmail_watch_renewals_tick" not in calls

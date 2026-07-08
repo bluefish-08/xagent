@@ -1221,6 +1221,62 @@ def test_scheduled_scan_fires_due_trigger_and_advances_next_run(
     assert mock_bg_scheduler.call_count == 1
 
 
+def test_trigger_dispatcher_loop_scans_due_scheduled_trigger(mock_bg_scheduler) -> None:
+    """End-to-end: the in-process dispatcher loop itself scans a due scheduled
+    trigger (no Celery) and creates a PENDING run on its first tick."""
+    from xagent.web import app as app_module
+
+    headers = _admin_headers()
+    agent_id = _create_agent(headers)
+    created = client.post(
+        f"/api/agents/{agent_id}/triggers",
+        headers=headers,
+        json={
+            "type": "scheduled",
+            "name": "Loop scan",
+            "config": {"interval_seconds": 60},
+        },
+    )
+    assert created.status_code == 200, created.text
+    trigger_id = created.json()["id"]
+
+    due_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    db = _direct_db_session()
+    try:
+        trigger = db.query(AgentTrigger).filter(AgentTrigger.id == trigger_id).one()
+        trigger.next_run_at = due_at
+        db.add(trigger)
+        db.commit()
+    finally:
+        db.close()
+
+    async def fake_dispatch(_db, *, limit):
+        # Stop the loop right after the (real) scan tick so the agent runner
+        # never actually spins; we only assert the scan wired up correctly.
+        raise asyncio.CancelledError
+
+    with (
+        patch("xagent.web.app.get_gmail_watch_enabled", return_value=False),
+        patch(
+            "xagent.web.services.triggers.dispatch_pending_trigger_runs",
+            new=fake_dispatch,
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(
+            app_module._run_trigger_dispatcher(poll_interval_seconds=60, batch_size=25)
+        )
+
+    db = _direct_db_session()
+    try:
+        runs = db.query(TriggerRun).filter(TriggerRun.trigger_id == trigger_id).all()
+        assert len(runs) == 1
+        assert runs[0].status == TriggerRunStatus.PENDING.value
+        assert runs[0].task_id is not None
+    finally:
+        db.close()
+
+
 def test_trigger_config_rejects_persisted_runtime_secrets() -> None:
     headers = _admin_headers()
     agent_id = _create_agent(headers)
