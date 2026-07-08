@@ -1151,6 +1151,15 @@ def _ensure_user_mcp_server(
 
     from ..models.mcp import MCPServer, UserMCPServer
 
+    # Symmetric with the key-based gate in _ensure_catalog_app_server: only apps
+    # classified as builtin_oauth may land here. Otherwise a key-based app routed
+    # through OAuth would get a token injected but never its required_env API key.
+    if app_info.get("auth_type") != "builtin_oauth":
+        raise ValueError(
+            f"App '{app_info.get('name')}' is not an OAuth app and cannot be "
+            "connected via the OAuth flow."
+        )
+
     def _oauth_auth_metadata() -> dict[str, str]:
         metadata = {"app_id": str(app_info["id"])}
         provider = app_info.get("provider")

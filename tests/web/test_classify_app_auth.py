@@ -5,6 +5,8 @@ so its edge cases matter: oauth wins over any launch_config, key-based needs
 BOTH required_env and command, everything else is unconnectable.
 """
 
+import pytest
+
 from xagent.web.mcp_apps import classify_app_auth
 
 
@@ -32,3 +34,17 @@ def test_inconsistent_entries_are_unconnectable_not_misrouted():
     assert classify_app_auth("stdio", {"command": "npx"}) == "unconnectable"
     assert classify_app_auth("stdio", None) == "unconnectable"
     assert classify_app_auth(None, None) == "unconnectable"
+
+
+def test_oauth_landing_rejects_non_oauth_app():
+    # Symmetric guard: a key-based app must not be connectable via the OAuth
+    # flow (it would get a token, never its required_env API key). The guard
+    # runs before any DB access, so db=None is fine.
+    from xagent.web.api.auth import _ensure_user_mcp_server
+
+    with pytest.raises(ValueError, match="not an OAuth app"):
+        _ensure_user_mcp_server(
+            None,
+            "1",
+            {"id": "google-maps", "name": "Google Maps", "auth_type": "api_key"},
+        )

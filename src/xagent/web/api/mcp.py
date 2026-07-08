@@ -1714,7 +1714,7 @@ def list_mcp_apps(
     non_oauth_names = {
         str(name)
         for app in library_apps
-        if str(app.get("transport") or "").lower() != "oauth"
+        if app.get("auth_type") != "builtin_oauth"
         for name in (app.get("id"), app.get("name"))
         if name
     }
@@ -1734,7 +1734,7 @@ def list_mcp_apps(
 
     if location in ["remote", "all"]:
         for app in library_apps:
-            if app.get("transport") == "oauth":
+            if app.get("auth_type") == "builtin_oauth":
                 server_id, connected_account = _connected_oauth_server_for_app(
                     app, oauth_server_lookup, oauth_account_lookup
                 )

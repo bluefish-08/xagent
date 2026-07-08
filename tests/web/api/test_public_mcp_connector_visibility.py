@@ -439,6 +439,7 @@ def test_oauth_connection_does_not_reuse_same_name_custom_stdio_mcp() -> None:
                         "name": "Teams",
                         "description": "Connect to Microsoft Teams.",
                         "provider": "microsoft",
+                        "auth_type": "builtin_oauth",
                     },
                 )
         finally:
