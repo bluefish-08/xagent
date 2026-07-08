@@ -1377,7 +1377,17 @@ def generic_oauth_callback(
                     if app.get("provider") == provider
                 ]
                 for app_info in apps:
-                    _ensure_user_mcp_server(db, user_id, app_info)
+                    # A mis-tagged non-oauth app sharing this provider must not
+                    # abort the whole batch login: skip it and keep connecting
+                    # the legitimate oauth apps under the same provider.
+                    try:
+                        _ensure_user_mcp_server(db, user_id, app_info)
+                    except ValueError:
+                        logger.warning(
+                            "Skipping non-oauth app %s during %s OAuth batch connect",
+                            app_info.get("id"),
+                            provider,
+                        )
 
             db.commit()
             if (app_id or provider) == "gmail":
@@ -1419,9 +1429,7 @@ def generic_oauth_callback(
         )
     except Exception as e:
         import html
-        import logging
 
-        logger = logging.getLogger(__name__)
         logger.exception("Generic OAuth callback failed")
         return HTMLResponse(
             content=f"<h1>Authentication Failed</h1><p>{html.escape(str(e))}</p>",

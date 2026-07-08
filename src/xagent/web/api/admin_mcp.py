@@ -74,18 +74,22 @@ class PublicMCPAppBase(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_auth_classification(self) -> "PublicMCPAppBase":
-        # Enforce the invariant classify_app_auth (mcp_apps.py) assumes, so a
-        # key-based entry can't be authored in a shape that silently classifies
-        # as "unconnectable". This is the write-time constraint issue #764 asked
-        # for, keeping the four read sites' single source of truth consistent.
-        if str(self.transport or "").lower() != "oauth":
-            launch = self.launch_config or {}
-            if launch.get("command") and not launch.get("required_env"):
-                raise ValueError(
-                    "A key-based catalog app with launch_config.command must also "
-                    "declare launch_config.required_env, otherwise it cannot be "
-                    "connected."
-                )
+        # Reuse the single source of truth (classify_app_auth) rather than
+        # re-deriving the rule here. Reject an entry that declares a partial
+        # launch_config (command or required_env) yet still classifies as
+        # "unconnectable" — the write-time constraint issue #764 asked for. This
+        # covers both asymmetric shapes: command-without-required_env and
+        # required_env-without-command.
+        from ..mcp_apps import classify_app_auth
+
+        launch = self.launch_config or {}
+        if (launch.get("command") or launch.get("required_env")) and (
+            classify_app_auth(self.transport, self.launch_config) == "unconnectable"
+        ):
+            raise ValueError(
+                "A key-based catalog app must declare both launch_config.command "
+                "and launch_config.required_env, otherwise it cannot be connected."
+            )
         return self
 
 

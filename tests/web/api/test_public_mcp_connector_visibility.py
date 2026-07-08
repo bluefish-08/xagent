@@ -752,6 +752,7 @@ def test_admin_create_app_rejects_keyless_command_entry() -> None:
         _setup_admin()
         admin_headers = _login("admin", "admin123")
 
+        # Shape 1: command without required_env.
         resp = client.post(
             "/api/admin/mcp/apps",
             headers=admin_headers,
@@ -763,6 +764,61 @@ def test_admin_create_app_rejects_keyless_command_entry() -> None:
             },
         )
         assert resp.status_code == 422
+
+        # Shape 2 (the reverse asymmetric shape): required_env without command.
+        resp = client.post(
+            "/api/admin/mcp/apps",
+            headers=admin_headers,
+            json={
+                "app_id": "bad-nocommand",
+                "name": "BadNoCommand",
+                "transport": "stdio",
+                "launch_config": {"required_env": ["KEY"]},
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        Base.metadata.drop_all(bind=get_engine())
+        try:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass
+
+
+def test_admin_update_app_enforces_auth_classification() -> None:
+    """The write-time constraint fires on PUT too, not just POST (both use the
+    same PublicMCPAppCreate model)."""
+    temp_dir = _setup_test_db()
+    try:
+        _setup_admin()
+        admin_headers = _login("admin", "admin123")
+
+        created = client.post(
+            "/api/admin/mcp/apps",
+            headers=admin_headers,
+            json={
+                "app_id": "good-keyed",
+                "name": "GoodKeyed",
+                "transport": "stdio",
+                "launch_config": {"command": "npx", "required_env": ["KEY"]},
+            },
+        )
+        assert created.status_code == 200
+        app_pk = created.json()["id"]
+
+        updated = client.put(
+            f"/api/admin/mcp/apps/{app_pk}",
+            headers=admin_headers,
+            json={
+                "app_id": "good-keyed",
+                "name": "GoodKeyed",
+                "transport": "stdio",
+                "launch_config": {"command": "npx"},
+            },
+        )
+        assert updated.status_code == 422
     finally:
         Base.metadata.drop_all(bind=get_engine())
         try:
