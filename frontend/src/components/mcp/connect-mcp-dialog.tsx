@@ -325,17 +325,18 @@ export function ConnectMcpDialog({
   }
 
   const handleConnectApp = (app: AppIntegration, autoSelect: boolean = false) => {
-    const provider = app.provider;
-    if (!provider) {
-      // Key-based (non-oauth) catalog app: collect the key. Only these declare
-      // required_env; any other provider-less app is not connectable this way.
-      if (app.launch_config?.required_env?.length) {
+    if (app.auth_type !== "builtin_oauth") {
+      // Key-based catalog app: collect the key. Anything not connectable this
+      // way (no key, no provider) is a mis-authored entry.
+      if (app.auth_type === "api_key") {
         openKeyConnect(app);
       } else {
         toast.error("Error: App provider is not defined");
       }
       return;
     }
+
+    const provider = app.provider;
 
     setLoadingApp(app.id)
     // Open OAuth in a popup window to handle the callback smoothly

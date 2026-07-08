@@ -2059,18 +2059,18 @@ def _ensure_catalog_app_server(db: Session, app_id: str) -> tuple[MCPServer, dic
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="MCP app not found"
         )
-    if str(app_info.get("transport") or "").lower() == "oauth":
+    if app_info.get("auth_type") == "builtin_oauth":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OAuth apps must be connected via the OAuth flow",
         )
-    launch = app_info.get("launch_config") or {}
-    command = launch.get("command")
-    if not command:
+    if app_info.get("auth_type") != "api_key":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This app cannot be connected with an API key",
         )
+    launch = app_info.get("launch_config") or {}
+    command = launch.get("command")
     manager = DatabaseMCPServerManager(db)
     # app_id is the stable catalog key: it passes the server-name validator and
     # is what the connector uses to detect an app as connected.
