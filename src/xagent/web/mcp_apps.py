@@ -22,7 +22,7 @@ def classify_app_auth(transport: Any, launch_config: Any) -> str:
     """
     if str(transport or "").lower() == "oauth":
         return "builtin_oauth"
-    launch = launch_config or {}
+    launch = launch_config if isinstance(launch_config, dict) else {}
     if launch.get("required_env") and launch.get("command"):
         return "api_key"
     return "unconnectable"

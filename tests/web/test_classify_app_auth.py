@@ -34,6 +34,9 @@ def test_inconsistent_entries_are_unconnectable_not_misrouted():
     assert classify_app_auth("stdio", {"command": "npx"}) == "unconnectable"
     assert classify_app_auth("stdio", None) == "unconnectable"
     assert classify_app_auth(None, None) == "unconnectable"
+    # malformed launch_config (non-dict) must not raise AttributeError
+    assert classify_app_auth("stdio", ["not", "a", "dict"]) == "unconnectable"
+    assert classify_app_auth("stdio", "garbage") == "unconnectable"
 
 
 def test_oauth_landing_rejects_non_oauth_app():
