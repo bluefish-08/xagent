@@ -655,3 +655,119 @@ def test_connected_hidden_public_mcp_app_is_excluded_in_strong_hide_mode() -> No
             shutil.rmtree(temp_dir)
         except OSError:
             pass
+
+
+def test_mixed_case_oauth_transport_app_is_marked_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the mixed-case transport fix: list_mcp_apps now routes on
+    auth_type (which lowercases), so a "OAuth"-cased catalog entry is treated as
+    builtin_oauth. Before, the exact-case `transport == "oauth"` branch stranded
+    it in the non-oauth path, leaving is_connected always False."""
+    temp_dir = _setup_test_db()
+    try:
+        _setup_admin()
+        admin_headers = _login("admin", "admin123")
+
+        register_response = client.post(
+            "/api/auth/register",
+            json={
+                "username": "regular",
+                "email": "regular@example.com",
+                "password": "password123",
+            },
+        )
+        assert register_response.status_code == 200
+        regular_headers = _login("regular", "password123")
+
+        # Admin API accepts arbitrary transport casing.
+        resp = client.post(
+            "/api/admin/mcp/apps",
+            headers=admin_headers,
+            json={
+                "app_id": "mixed-oauth",
+                "name": "MixedOauth",
+                "description": "",
+                "icon": "",
+                "transport": "OAuth",
+                "provider_name": "microsoft",
+                "category": "Communication",
+                "oauth_scopes": [],
+                "is_visible_in_connector": True,
+                "launch_config": {},
+            },
+        )
+        assert resp.status_code == 200
+
+        _connect_oauth_account_for_user("regular", "microsoft")
+        monkeypatch.setattr(mcp_api, "_oauth_account_can_connect", lambda _a: True)
+
+        db = next(get_db())
+        try:
+            user = db.query(User).filter(User.username == "regular").first()
+            assert user is not None
+            server = MCPServer(
+                name="MixedOauth",
+                description="",
+                managed="external",
+                transport="oauth",
+                auth={"app_id": "mixed-oauth"},
+            )
+            db.add(server)
+            db.flush()
+            db.add(
+                UserMCPServer(
+                    user_id=user.id,
+                    mcpserver_id=server.id,
+                    is_owner=True,
+                    can_edit=True,
+                    can_delete=True,
+                    is_active=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        response = client.get("/api/mcp/apps?location=remote", headers=regular_headers)
+        assert response.status_code == 200
+        app = next(a for a in response.json() if a["id"] == "mixed-oauth")
+        assert app["is_connected"] is True
+    finally:
+        Base.metadata.drop_all(bind=get_engine())
+        try:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass
+
+
+def test_admin_create_app_rejects_keyless_command_entry() -> None:
+    """Write-time constraint (#764): a non-oauth entry with a launch command but
+    no required_env would classify as "unconnectable", so the admin API rejects
+    it instead of silently persisting an unconnectable row."""
+    temp_dir = _setup_test_db()
+    try:
+        _setup_admin()
+        admin_headers = _login("admin", "admin123")
+
+        resp = client.post(
+            "/api/admin/mcp/apps",
+            headers=admin_headers,
+            json={
+                "app_id": "bad-keyless",
+                "name": "BadKeyless",
+                "transport": "stdio",
+                "launch_config": {"command": "npx", "args": ["-y", "x"]},
+            },
+        )
+        assert resp.status_code == 422
+    finally:
+        Base.metadata.drop_all(bind=get_engine())
+        try:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass

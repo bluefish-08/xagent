@@ -331,7 +331,7 @@ export function ConnectMcpDialog({
       if (app.auth_type === "api_key") {
         openKeyConnect(app);
       } else {
-        toast.error(t('tools.mcp.alerts.notConfigured') || "This app is not configured for connection");
+        toast.error(t('tools.mcp.alerts.notConfigured'));
       }
       return;
     }
@@ -340,7 +340,7 @@ export function ConnectMcpDialog({
     if (!provider) {
       // Mis-authored OAuth entry: transport says oauth but no provider to
       // build the auth URL. Fail clearly instead of opening a broken popup.
-      toast.error(t('tools.mcp.alerts.providerNotDefined') || "App provider is not defined");
+      toast.error(t('tools.mcp.alerts.providerNotDefined'));
       return;
     }
 

@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,22 @@ class PublicMCPAppBase(BaseModel):
     oauth_scopes: Optional[List[str]] = None
     is_visible_in_connector: bool = True
     launch_config: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _enforce_auth_classification(self) -> "PublicMCPAppBase":
+        # Enforce the invariant classify_app_auth (mcp_apps.py) assumes, so a
+        # key-based entry can't be authored in a shape that silently classifies
+        # as "unconnectable". This is the write-time constraint issue #764 asked
+        # for, keeping the four read sites' single source of truth consistent.
+        if str(self.transport or "").lower() != "oauth":
+            launch = self.launch_config or {}
+            if launch.get("command") and not launch.get("required_env"):
+                raise ValueError(
+                    "A key-based catalog app with launch_config.command must also "
+                    "declare launch_config.required_env, otherwise it cannot be "
+                    "connected."
+                )
+        return self
 
 
 class PublicMCPAppCreate(PublicMCPAppBase):
