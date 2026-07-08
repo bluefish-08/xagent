@@ -261,9 +261,11 @@ async def _run_trigger_dispatcher(
                         now + get_gmail_watch_renewal_interval_seconds()
                     )
 
-            prepared = await asyncio.to_thread(_scan_due_scheduled_triggers_tick)
-            if prepared:
-                logger.info("Trigger dispatcher prepared %s scheduled run(s)", prepared)
+            processed = await asyncio.to_thread(_scan_due_scheduled_triggers_tick)
+            if processed:
+                logger.info(
+                    "Trigger dispatcher processed %s due schedule(s)", processed
+                )
 
             SessionLocal = get_session_local()
             db = SessionLocal()

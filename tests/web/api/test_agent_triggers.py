@@ -1277,6 +1277,105 @@ def test_trigger_dispatcher_loop_scans_due_scheduled_trigger(mock_bg_scheduler) 
         db.close()
 
 
+class _FirstNoneQuery:
+    """Query wrapper whose ``.first()`` returns None, delegating everything else."""
+
+    def __init__(self, query):
+        self._query = query
+
+    def filter(self, *args, **kwargs):
+        return _FirstNoneQuery(self._query.filter(*args, **kwargs))
+
+    def first(self):
+        return None
+
+    def __getattr__(self, name):
+        return getattr(self._query, name)
+
+
+class _PrecheckMissSession:
+    """Delegate to a real session but force the first ``TriggerRun`` lookup to
+    miss, simulating a scanner whose idempotency pre-check ran before a
+    concurrent insert committed. The following insert then collides on the
+    unique key, driving the IntegrityError recovery branch."""
+
+    def __init__(self, db):
+        self._db = db
+        self._missed = False
+
+    def query(self, *args, **kwargs):
+        query = self._db.query(*args, **kwargs)
+        if not self._missed and args and args[0] is TriggerRun:
+            self._missed = True
+            return _FirstNoneQuery(query)
+        return query
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def test_get_or_create_trigger_run_recovers_from_racing_insert(
+    mock_bg_scheduler,
+) -> None:
+    """Dedup safety the in-process scan relies on: if a concurrent scan commits
+    the run between this call's pre-check and its own insert, the insert hits
+    the unique idempotency key and recovers the existing run rather than
+    creating a duplicate or raising."""
+    from xagent.web.services import triggers as triggers_mod
+
+    headers = _admin_headers()
+    agent_id = _create_agent(headers)
+    created = client.post(
+        f"/api/agents/{agent_id}/triggers",
+        headers=headers,
+        json={
+            "type": "scheduled",
+            "name": "Racing",
+            "config": {"interval_seconds": 60},
+        },
+    )
+    assert created.status_code == 200, created.text
+    trigger_id = created.json()["id"]
+
+    event_payload = {"trigger_id": trigger_id, "scheduled_at": "t"}
+    source_event_id = f"scheduled:{trigger_id}:once"
+
+    db = _direct_db_session()
+    try:
+        trigger = db.query(AgentTrigger).filter(AgentTrigger.id == trigger_id).one()
+
+        first_run, first_created = triggers_mod._get_or_create_trigger_run(
+            db,
+            trigger=trigger,
+            event_payload=event_payload,
+            source_event_id=source_event_id,
+            background_job_id=None,
+            test=False,
+        )
+        assert first_created is True
+
+        # Second scan's pre-check misses; its insert collides on the unique key.
+        racing_session = _PrecheckMissSession(db)
+        second_run, second_created = triggers_mod._get_or_create_trigger_run(
+            racing_session,
+            trigger=trigger,
+            event_payload=event_payload,
+            source_event_id=source_event_id,
+            background_job_id=None,
+            test=False,
+        )
+        # The forced pre-check miss means created=False could only come from the
+        # IntegrityError recovery branch, not an early pre-check return.
+        assert racing_session._missed is True
+        assert second_created is False
+        assert second_run.id == first_run.id
+
+        rows = db.query(TriggerRun).filter(TriggerRun.trigger_id == trigger_id).all()
+        assert len(rows) == 1
+    finally:
+        db.close()
+
+
 def test_trigger_config_rejects_persisted_runtime_secrets() -> None:
     headers = _admin_headers()
     agent_id = _create_agent(headers)
