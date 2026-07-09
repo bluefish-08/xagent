@@ -42,10 +42,11 @@ def test_inconsistent_entries_are_unconnectable_not_misrouted():
 def test_oauth_landing_rejects_non_oauth_app():
     # Symmetric guard: a key-based app must not be connectable via the OAuth
     # flow (it would get a token, never its required_env API key). The guard
-    # runs before any DB access, so db=None is fine.
-    from xagent.web.api.auth import _ensure_user_mcp_server
+    # runs before any DB access, so db=None is fine. It raises the dedicated
+    # AppNotOAuthError so the batch loop can skip only this case.
+    from xagent.web.api.auth import AppNotOAuthError, _ensure_user_mcp_server
 
-    with pytest.raises(ValueError, match="not an OAuth app"):
+    with pytest.raises(AppNotOAuthError, match="not an OAuth app"):
         _ensure_user_mcp_server(
             None,
             "1",

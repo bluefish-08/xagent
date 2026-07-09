@@ -1143,6 +1143,15 @@ def generic_oauth_login(
     return RedirectResponse(full_auth_url)
 
 
+class AppNotOAuthError(ValueError):
+    """Raised when an app routed through the OAuth flow is not builtin_oauth.
+
+    A dedicated subclass so the batch-connect loop can skip only this case while
+    still surfacing the genuine metadata-conflict ValueErrors _ensure_user_mcp_server
+    raises for legitimate OAuth apps.
+    """
+
+
 def _ensure_user_mcp_server(
     db: Session, user_id: str, app_info: Dict[str, Any]
 ) -> None:
@@ -1155,7 +1164,7 @@ def _ensure_user_mcp_server(
     # classified as builtin_oauth may land here. Otherwise a key-based app routed
     # through OAuth would get a token injected but never its required_env API key.
     if app_info.get("auth_type") != "builtin_oauth":
-        raise ValueError(
+        raise AppNotOAuthError(
             f"App '{app_info.get('name')}' is not an OAuth app and cannot be "
             "connected via the OAuth flow."
         )
@@ -1379,10 +1388,12 @@ def generic_oauth_callback(
                 for app_info in apps:
                     # A mis-tagged non-oauth app sharing this provider must not
                     # abort the whole batch login: skip it and keep connecting
-                    # the legitimate oauth apps under the same provider.
+                    # the legitimate oauth apps under the same provider. Only the
+                    # not-oauth case is skipped; genuine metadata-conflict
+                    # ValueErrors still propagate as before.
                     try:
                         _ensure_user_mcp_server(db, user_id, app_info)
-                    except ValueError:
+                    except AppNotOAuthError:
                         logger.warning(
                             "Skipping non-oauth app %s during %s OAuth batch connect",
                             app_info.get("id"),

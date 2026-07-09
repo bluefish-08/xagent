@@ -72,8 +72,13 @@ class PublicMCPAppBase(BaseModel):
     is_visible_in_connector: bool = True
     launch_config: Optional[Dict[str, Any]] = None
 
+
+class PublicMCPAppCreate(PublicMCPAppBase):
+    # Validator lives on the write model only, not PublicMCPAppBase — otherwise
+    # PublicMCPAppResponse would inherit it and re-run on response serialization,
+    # turning one legacy/partial DB row into a full-list 500 on read.
     @model_validator(mode="after")
-    def _enforce_auth_classification(self) -> "PublicMCPAppBase":
+    def _enforce_auth_classification(self) -> "PublicMCPAppCreate":
         # Reuse the single source of truth (classify_app_auth) rather than
         # re-deriving the rule here. Reject an entry that declares a partial
         # launch_config (command or required_env) yet still classifies as
@@ -91,10 +96,6 @@ class PublicMCPAppBase(BaseModel):
                 "and launch_config.required_env, otherwise it cannot be connected."
             )
         return self
-
-
-class PublicMCPAppCreate(PublicMCPAppBase):
-    pass
 
 
 class PublicMCPAppResponse(PublicMCPAppBase):

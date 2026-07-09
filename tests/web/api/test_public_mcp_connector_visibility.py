@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 import xagent.web.api.mcp as mcp_api
 from xagent.web.api.admin_mcp import admin_mcp_router
-from xagent.web.api.auth import _ensure_user_mcp_server, auth_router
+from xagent.web.api.auth import (
+    AppNotOAuthError,
+    _ensure_user_mcp_server,
+    auth_router,
+)
 from xagent.web.api.mcp import mcp_router
 from xagent.web.models.database import Base, get_db, get_engine
 from xagent.web.models.mcp import MCPServer, UserMCPServer
@@ -430,7 +434,7 @@ def test_oauth_connection_does_not_reuse_same_name_custom_stdio_mcp() -> None:
 
             with pytest.raises(
                 ValueError, match="conflicts with an existing MCP server"
-            ):
+            ) as exc:
                 _ensure_user_mcp_server(
                     db,
                     str(user.id),
@@ -442,6 +446,10 @@ def test_oauth_connection_does_not_reuse_same_name_custom_stdio_mcp() -> None:
                         "auth_type": "builtin_oauth",
                     },
                 )
+            # A genuine metadata conflict on a real OAuth app is a plain
+            # ValueError, NOT AppNotOAuthError — so the batch loop's narrowed
+            # except surfaces it instead of misreporting it as "non-oauth".
+            assert not isinstance(exc.value, AppNotOAuthError)
         finally:
             db.close()
     finally:
@@ -819,6 +827,43 @@ def test_admin_update_app_enforces_auth_classification() -> None:
             },
         )
         assert updated.status_code == 422
+    finally:
+        Base.metadata.drop_all(bind=get_engine())
+        try:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass
+
+
+def test_admin_list_apps_does_not_500_on_partial_launch_config_row() -> None:
+    """The write-time validator lives on the create model only, so listing must
+    not re-validate on response serialization. A legacy/direct-DB row with a
+    partial launch_config (classifies "unconnectable") must be returned, not turn
+    the whole admin list into a 500."""
+    temp_dir = _setup_test_db()
+    try:
+        _setup_admin()
+        admin_headers = _login("admin", "admin123")
+
+        db = next(get_db())
+        try:
+            db.add(
+                PublicMCPApp(
+                    app_id="legacy-bad",
+                    name="LegacyBad",
+                    transport="stdio",
+                    launch_config={"command": "npx"},
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.get("/api/admin/mcp/apps", headers=admin_headers)
+        assert resp.status_code == 200
+        assert any(a["app_id"] == "legacy-bad" for a in resp.json())
     finally:
         Base.metadata.drop_all(bind=get_engine())
         try:
