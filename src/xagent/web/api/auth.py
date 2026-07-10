@@ -1378,7 +1378,21 @@ def generic_oauth_callback(
             if app_id:
                 app_info = get_app_by_id(db, app_id)
                 if app_info:
-                    _ensure_user_mcp_server(db, user_id, app_info)
+                    # A stale/crafted app_id in the OAuth state can point at a
+                    # non-oauth app. Fail with a clear error instead of a generic
+                    # 500 after the user already completed provider consent —
+                    # symmetric with the batch branch's AppNotOAuthError catch.
+                    try:
+                        _ensure_user_mcp_server(db, user_id, app_info)
+                    except AppNotOAuthError:
+                        db.rollback()
+                        return HTMLResponse(
+                            content=(
+                                "<h1>Cannot Connect</h1>"
+                                "<p>This app is not an OAuth app.</p>"
+                            ),
+                            status_code=400,
+                        )
             else:
                 apps = [
                     app
