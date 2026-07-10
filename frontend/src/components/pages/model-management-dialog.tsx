@@ -236,6 +236,8 @@ export function ModelManagementDialog({
         base_url: initialEditingModel.base_url || "",
         temperature: initialEditingModel.temperature,
         context_window: initialEditingModel.context_window,
+        input_usd_per_1m: initialEditingModel.input_usd_per_1m,
+        output_usd_per_1m: initialEditingModel.output_usd_per_1m,
         dimension: initialEditingModel.dimension,
         abilities: initialEditingModel.abilities || [],
         default_config_types: currentDefaults,
@@ -360,6 +362,8 @@ export function ModelManagementDialog({
       base_url: model.base_url || "",
       temperature: model.temperature,
       context_window: model.context_window,
+      input_usd_per_1m: model.input_usd_per_1m,
+      output_usd_per_1m: model.output_usd_per_1m,
       dimension: model.dimension,
       abilities: model.abilities || [],
       default_config_types: currentDefaults,
@@ -1018,6 +1022,42 @@ export function ModelManagementDialog({
                           <p className="text-xs text-muted-foreground">{t('models.form.contextWindowHint')}</p>
                         </div>
                       )}
+                      {formData.category === 'llm' && (
+                        <div className="space-y-2">
+                          <Label htmlFor="connect_input_usd_per_1m" className="text-base font-medium">{t('models.form.inputPricePerM')}</Label>
+                          <Input
+                            id="connect_input_usd_per_1m"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={formData.input_usd_per_1m ?? ""}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value)
+                              setFormData({ ...formData, input_usd_per_1m: Number.isNaN(val) ? undefined : val })
+                            }}
+                            placeholder={t('models.form.pricePlaceholder')}
+                          />
+                          <p className="text-xs text-muted-foreground">{t('models.form.priceHint')}</p>
+                        </div>
+                      )}
+                      {formData.category === 'llm' && (
+                        <div className="space-y-2">
+                          <Label htmlFor="connect_output_usd_per_1m" className="text-base font-medium">{t('models.form.outputPricePerM')}</Label>
+                          <Input
+                            id="connect_output_usd_per_1m"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={formData.output_usd_per_1m ?? ""}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value)
+                              setFormData({ ...formData, output_usd_per_1m: Number.isNaN(val) ? undefined : val })
+                            }}
+                            placeholder={t('models.form.pricePlaceholder')}
+                          />
+                          <p className="text-xs text-muted-foreground">{t('models.form.priceHint')}</p>
+                        </div>
+                      )}
 
                       <div className="flex justify-between mt-4">
                         <Button variant="outline" onClick={() => setConnectStep(2)}>&larr; {t('common.back')}</Button>
@@ -1397,6 +1437,44 @@ export function ModelManagementDialog({
                     placeholder={t('models.form.contextWindowPlaceholder')}
                   />
                   <p className="text-xs text-muted-foreground mt-1">{t('models.form.contextWindowHint')}</p>
+                </div>
+              )}
+
+              {formData.category === 'llm' && (
+                <div>
+                  <Label htmlFor="input_usd_per_1m">{t('models.form.inputPricePerM')}</Label>
+                  <Input
+                    id="input_usd_per_1m"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={formData.input_usd_per_1m ?? ""}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value)
+                      setFormData({ ...formData, input_usd_per_1m: Number.isNaN(val) ? undefined : val })
+                    }}
+                    placeholder={t('models.form.pricePlaceholder')}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">{t('models.form.priceHint')}</p>
+                </div>
+              )}
+
+              {formData.category === 'llm' && (
+                <div>
+                  <Label htmlFor="output_usd_per_1m">{t('models.form.outputPricePerM')}</Label>
+                  <Input
+                    id="output_usd_per_1m"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={formData.output_usd_per_1m ?? ""}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value)
+                      setFormData({ ...formData, output_usd_per_1m: Number.isNaN(val) ? undefined : val })
+                    }}
+                    placeholder={t('models.form.pricePlaceholder')}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">{t('models.form.priceHint')}</p>
                 </div>
               )}
 

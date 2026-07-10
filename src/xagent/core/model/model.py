@@ -39,6 +39,8 @@ class ChatModelConfig(ModelConfig):
     default_temperature: Optional[float] = None
     default_max_tokens: Optional[int] = None
     context_window: Optional[int] = None  # Total context window in tokens
+    input_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M input
+    output_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M output
     thinking_mode: bool = False
 
 

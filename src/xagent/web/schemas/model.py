@@ -97,6 +97,8 @@ class ModelCreate(BaseModel):
     base_url: Optional[str] = None
     temperature: Optional[float] = None
     context_window: Optional[int] = None  # LLM total context window in tokens
+    input_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M input tokens
+    output_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M output tokens
     dimension: Optional[int] = None
     abilities: Optional[List[str]] = None
     description: Optional[str] = None
@@ -141,6 +143,8 @@ class ModelUpdate(BaseModel):
     base_url: Optional[str] = None
     temperature: Optional[float] = None
     context_window: Optional[int] = None  # LLM total context window in tokens
+    input_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M input tokens
+    output_usd_per_1m: Optional[float] = None  # Optional cost: USD / 1M output tokens
     dimension: Optional[int] = None
     description: Optional[str] = None
     abilities: Optional[List[str]] = None
@@ -332,6 +336,8 @@ class ModelWithAccessInfo(BaseModel):
     base_url: Optional[str]
     temperature: Optional[float]
     context_window: Optional[int] = None
+    input_usd_per_1m: Optional[float] = None
+    output_usd_per_1m: Optional[float] = None
     dimension: Optional[int]
     abilities: Optional[List[str]]
     description: Optional[str]

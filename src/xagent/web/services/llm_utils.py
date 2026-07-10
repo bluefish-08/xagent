@@ -107,6 +107,8 @@ class CoreStorage:
                 default_temperature=db_model.temperature,
                 default_max_tokens=db_model.max_tokens,
                 context_window=db_model.context_window,
+                input_usd_per_1m=db_model.input_usd_per_1m,
+                output_usd_per_1m=db_model.output_usd_per_1m,
             )
         elif db_model.category == "image":
             from ...core.model.model import ImageModelConfig
@@ -175,6 +177,8 @@ class CoreStorage:
                     "temperature": model.default_temperature,
                     "max_tokens": model.default_max_tokens,
                     "context_window": model.context_window,
+                    "input_usd_per_1m": model.input_usd_per_1m,
+                    "output_usd_per_1m": model.output_usd_per_1m,
                     "category": "llm",
                 }
             )

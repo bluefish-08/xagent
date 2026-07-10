@@ -714,6 +714,32 @@ class TestModelAPI:
         data = response.json()
         assert data["abilities"] == ["chat", "tool_calling", "vision"]
 
+    def test_create_model_with_usd_pricing(
+        self, test_db, regular_user, regular_headers, sample_model_data
+    ):
+        """Optional per-model USD pricing round-trips through create -> response."""
+        sample_model_data["input_usd_per_1m"] = 1.5
+        sample_model_data["output_usd_per_1m"] = 6.0
+        response = client.post(
+            "/api/models/", json=sample_model_data, headers=regular_headers
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["input_usd_per_1m"] == 1.5
+        assert data["output_usd_per_1m"] == 6.0
+
+    def test_create_model_without_usd_pricing_is_allowed(
+        self, test_db, regular_user, regular_headers, sample_model_data
+    ):
+        """Pricing is optional: omitting it still creates the model."""
+        response = client.post(
+            "/api/models/", json=sample_model_data, headers=regular_headers
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("input_usd_per_1m") is None
+        assert data.get("output_usd_per_1m") is None
+
     def test_reject_embedding_model_as_general_default(
         self,
         test_db,

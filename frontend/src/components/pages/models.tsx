@@ -67,6 +67,8 @@ export interface Model {
   base_url?: string
   temperature?: number
   context_window?: number
+  input_usd_per_1m?: number
+  output_usd_per_1m?: number
   dimension?: number
   abilities?: string[]
   description?: string
@@ -88,6 +90,8 @@ export interface ModelCreate {
   base_url?: string
   temperature?: number
   context_window?: number
+  input_usd_per_1m?: number
+  output_usd_per_1m?: number
   dimension?: number
   abilities?: string[]
   share_with_users?: boolean

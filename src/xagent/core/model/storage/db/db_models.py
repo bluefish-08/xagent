@@ -39,6 +39,12 @@ def create_model_table(Base: Type[Any]) -> Type[Any]:
         context_window = Column(
             Integer, nullable=True
         )  # Total context window in tokens
+        input_usd_per_1m = Column(
+            Float, nullable=True
+        )  # Optional cost metadata: USD per 1M input tokens
+        output_usd_per_1m = Column(
+            Float, nullable=True
+        )  # Optional cost metadata: USD per 1M output tokens
         dimension = Column(
             Integer, nullable=True
         )  # Vector dimension for embedding models
