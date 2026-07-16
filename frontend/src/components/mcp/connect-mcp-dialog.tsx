@@ -93,7 +93,7 @@ export function ConnectMcpDialog({
   onSuccess
 }: ConnectMcpDialogProps) {
   const { t } = useI18n()
-  const { token } = useAuth()
+  const { token, inTeam } = useAuth()
   const { apps: officialApps } = useMcpApps()
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
@@ -590,7 +590,7 @@ export function ConnectMcpDialog({
 
   // Ownership radio shared by the three connect/create flows (key connect,
   // custom MCP, custom API). Hidden on edit — sharing is managed in settings.
-  const ownershipRadio = editingCustomServerId ? null : (
+  const ownershipRadio = editingCustomServerId || !inTeam ? null : (
     <div className="space-y-1.5">
       <Label>{t('tools.mcp.dialog.ownership.label')}</Label>
       <RadioGroup value={shareChoice} onValueChange={(v) => setShareChoice(v as "private" | "team")}>

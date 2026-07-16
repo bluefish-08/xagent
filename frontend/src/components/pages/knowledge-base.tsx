@@ -55,7 +55,7 @@ interface AdminUserListResponse {
 }
 
 export function KnowledgeBasePage() {
-  const { user } = useAuth()
+  const { user, inTeam } = useAuth()
   const { t } = useI18n()
   const [collections, setCollections] = useState<Collection[]>([])
   const [loading, setLoading] = useState(true)
@@ -503,12 +503,14 @@ export function KnowledgeBasePage() {
                               <Badge variant="outline" className="text-green-600 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-900 whitespace-nowrap">
                                 {t("kb.card.status.active")}
                               </Badge>
-                              <Badge variant="secondary" className="whitespace-nowrap">
-                                {collection.ownership === "team"
-                                  ? t("kb.ownership.team")
-                                  : t("kb.ownership.personal")}
-                              </Badge>
-                              {(collection.ownership !== "team" || collection.can_delete) && (
+                              {inTeam && (
+                                <Badge variant="secondary" className="whitespace-nowrap">
+                                  {collection.ownership === "team"
+                                    ? t("kb.ownership.team")
+                                    : t("kb.ownership.personal")}
+                                </Badge>
+                              )}
+                              {inTeam && (collection.ownership !== "team" || collection.can_delete) && (
                                 <Button
                                   variant="ghost"
                                   size="icon"

@@ -35,7 +35,7 @@ export function OfficialMcpSettingsDialog({
   onConfigure,
   onManageKey
 }: OfficialMcpSettingsDialogProps) {
-  const { token } = useAuth()
+  const { token, inTeam } = useAuth()
   const { t } = useI18n()
 
   const handleConnectApp = (appToConnect: AppIntegration) => {
@@ -188,7 +188,7 @@ export function OfficialMcpSettingsDialog({
             </div>
           )}
 
-          {isGloballyConnected && Number.isInteger(app.server_id) && (
+          {inTeam && isGloballyConnected && Number.isInteger(app.server_id) && (
             <div className={`mb-4 inline-flex items-center px-3 py-1 rounded-full text-sm font-medium border ${app.shared ? 'bg-blue-50 border-blue-100 text-blue-700' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
               {!app.shared
                 ? t('tools.mcp.sharing.private')
@@ -244,7 +244,7 @@ export function OfficialMcpSettingsDialog({
                       {/* "Make team" / "Make personal": only the owner (or a team admin,
                           enforced server-side) can change ownership. Hidden on non-owned
                           team tools. */}
-                      {Number.isInteger(app.server_id) && !isNonOwnedTeamTool && (
+                      {inTeam && Number.isInteger(app.server_id) && !isNonOwnedTeamTool && (
                         <Button
                           variant="outline"
                           className="w-full max-w-[200px] rounded-full h-11 font-medium"
