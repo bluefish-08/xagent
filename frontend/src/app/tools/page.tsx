@@ -178,7 +178,7 @@ function ToolsPageContent() {
   const [runtimeValidationError, setRuntimeValidationError] = useState<RuntimeConfigErrorKey | null>(null)
 
   const { t, tDynamic } = useI18n()
-  const { user } = useAuth()
+  const { user, inTeam } = useAuth()
   const { getAppIcon } = useMcpApps()
   const isAdmin = Boolean(user?.is_admin)
 
@@ -258,6 +258,12 @@ function ToolsPageContent() {
   }
 
   const loadConnectorStatus = async (servers: MCPServer[]) => {
+    // Team ownership status is an overlay-only concept; standalone has no
+    // /api/connectors/status route, so skip the call entirely when not in a team.
+    if (!inTeam) {
+      setConnectorStatus({})
+      return
+    }
     try {
       const refs = servers.map((s) => ({
         type: s.transport === "custom_api" ? "custom_api" : "mcp",
@@ -935,9 +941,11 @@ function ToolsPageContent() {
             <span className="rounded-full bg-[rgba(28,202,91,0.12)] px-2 py-0.5 text-[10px] font-semibold text-[rgb(21,157,71)]">
               {t('tools.mcp.badge')}
             </span>
-            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${isTeam ? 'bg-blue-100 text-blue-700' : 'bg-muted text-muted-foreground'}`}>
-              {ownershipLabel}
-            </span>
+            {inTeam && (
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${isTeam ? 'bg-blue-100 text-blue-700' : 'bg-muted text-muted-foreground'}`}>
+                {ownershipLabel}
+              </span>
+            )}
             {status?.needs_config && (
               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
                 {t('tools.mcp.sharing.needsConfig')}

@@ -168,6 +168,9 @@ export function ConnectMcpDialog({
   // Batch-fetch team-sharing status for connected connectors and merge it into
   // the apps list so cards/settings can show Shared/Private/Needs-config.
   const loadSharingStatus = async (list: AppIntegration[]) => {
+    // /api/connectors/status is an overlay-only route; standalone has no team
+    // sharing, so skip it entirely when the user is not in a team.
+    if (!inTeam) return
     const refs = list.map(connectorRef).filter((r): r is { type: string; id: number } => r !== null)
     if (refs.length === 0) return
     try {
@@ -922,7 +925,7 @@ export function ConnectMcpDialog({
                                   {app.is_local ? <Home className="h-3 w-3 mr-1.5 text-slate-400" /> : <Globe className="h-3 w-3 mr-1.5 text-slate-400" />}
                                   {app.is_local ? t('tools.mcp.dialog.local') : t('tools.mcp.dialog.remote')}
                                 </Badge>
-                                {isGloballyConnected && connectorRef(app) && (
+                                {inTeam && isGloballyConnected && connectorRef(app) && (
                                   <Badge variant="secondary" className={`font-medium px-2 py-0.5 rounded-md border shadow-none ${app.shared ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                                     {!app.shared
                                       ? t('tools.mcp.sharing.private')

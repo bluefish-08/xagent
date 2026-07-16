@@ -21,7 +21,7 @@ class ConnectorDeleteDecision:
     authorized: bool = False
     delete_definition: bool = False
     # Set when the delete is refused because the connector is still selected by a
-    # team agent. The endpoint surfaces this as a 409 before any mutation, mirroring
+    # team agent. The endpoint surfaces this as a 403 before any mutation, mirroring
     # the unshare path's "still used by a team agent" guard.
     blocked_reason: str | None = None
 

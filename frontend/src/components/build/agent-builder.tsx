@@ -1168,6 +1168,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           knowledge_bases: selectedKbs,
           skills: selectedSkills,
           tool_categories: finalToolCategories,
+          // Sent so a visibility-only change on an already team-owned agent is
+          // persisted; promote-team/demote handle the ownership transitions.
+          visibility,
           logo_base64,
         }),
       })

@@ -53,24 +53,6 @@ def set_agent_team_scope_hook(hook: Any) -> None:
     _agent_team_scope_hook = hook
 
 
-def set_team_agent_connector_validator(fn: Any) -> None:
-    """Install (or clear, with ``None``) the team-agent connector validator.
-
-    The SaaS overlay installs a function that, given an agent's selected
-    connectors (via ``tool_categories``), returns the ones not yet shared with
-    the team. Standalone xagent leaves it unset so promotion imposes no
-    connector constraint.
-    """
-    global _team_agent_connector_validator
-    _team_agent_connector_validator = fn
-
-
-def set_team_agent_knowledge_base_validator(fn: Any) -> None:
-    """Install the team-agent knowledge-base ownership validator."""
-    global _team_agent_knowledge_base_validator
-    _team_agent_knowledge_base_validator = fn
-
-
 def validate_team_agent_connectors(
     db: Session, user_id: int, team_id: int, tool_categories: Any
 ) -> list:
