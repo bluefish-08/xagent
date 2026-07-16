@@ -39,7 +39,8 @@ import {
   Check,
   Video,
   Volume2,
-  Music
+  Music,
+  Globe
 } from "lucide-react"
 import { useI18n } from "@/contexts/i18n-context"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -253,6 +254,16 @@ export function ModelManagementDialog({
       return provider.categoryBaseUrls[category]
     }
     return provider.defaultBaseUrl || ""
+  }
+
+  const getProviderHost = (model: Model) => {
+    const url = model.base_url || getDefaultBaseUrlForProvider(model.model_provider, model.category)
+    if (!url) return ""
+    try {
+      return new URL(url).hostname
+    } catch {
+      return url
+    }
   }
 
   // Determine initial form data based on editing model or prefill provider
@@ -793,6 +804,14 @@ export function ModelManagementDialog({
                               </Badge>
                             )}
                           </div>
+                          {getProviderHost(model) && (
+                            <div className="mt-1">
+                              <Badge variant="outline" className="font-normal text-muted-foreground">
+                                <Globe />
+                                {getProviderHost(model)}
+                              </Badge>
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-1">
                           {!model.is_owner && getDefaultOptionsForModel(model.category, model.abilities).length > 0 && (
