@@ -2793,7 +2793,7 @@ def delete_mcp_server(
         team_delete = delete_team_connector(db, int(user_id), "mcp", int(server_id))
         if team_delete.blocked_reason:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail=team_delete.blocked_reason,
             )
         if team_delete.team_owned and not team_delete.authorized:
@@ -3422,8 +3422,7 @@ async def connect_mcp_oauth(
                 detail={
                     "code": "unsupported_auth_server",
                     "message": (
-                        "Unsupported token endpoint auth method: "
-                        f"{token_endpoint_auth_method}"
+                        f"Unsupported token endpoint auth method: {token_endpoint_auth_method}"
                     ),
                 },
             )

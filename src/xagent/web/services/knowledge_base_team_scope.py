@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
+
+from sqlalchemy.orm import Session
 
 KnowledgeBaseAction = Literal["read", "edit", "delete"]
 
@@ -24,11 +26,11 @@ class KnowledgeBaseAccess:
     can_delete: bool = True
 
 
-KnowledgeBaseVisibilityHook = Callable[[Any, int], list[KnowledgeBaseAccess]]
+KnowledgeBaseVisibilityHook = Callable[[Session | None, int], list[KnowledgeBaseAccess]]
 KnowledgeBaseAccessHook = Callable[
-    [Any, int, str, KnowledgeBaseAction], KnowledgeBaseAccess | None
+    [Session | None, int, str, KnowledgeBaseAction], KnowledgeBaseAccess | None
 ]
-KnowledgeBaseLifecycleHook = Callable[[Any, int, str, str | None], None]
+KnowledgeBaseLifecycleHook = Callable[[Session | None, int, str, str | None], None]
 
 _visibility_hook: KnowledgeBaseVisibilityHook | None = None
 _access_hook: KnowledgeBaseAccessHook | None = None
@@ -52,19 +54,22 @@ def set_knowledge_base_team_hooks(
     _deleted_hook = deleted
 
 
-def visible_team_knowledge_bases(db: Any, user_id: int) -> list[KnowledgeBaseAccess]:
+def visible_team_knowledge_bases(
+    db: Session | None, user_id: int
+) -> list[KnowledgeBaseAccess]:
+    """Return visible team KBs; hooks must open a session when ``db`` is None."""
     if _visibility_hook is None:
         return []
     return list(_visibility_hook(db, int(user_id)))
 
 
 def resolve_knowledge_base_access(
-    db: Any,
+    db: Session | None,
     user_id: int,
     name: str,
     action: KnowledgeBaseAction = "read",
 ) -> KnowledgeBaseAccess:
-    """Resolve the physical owner for a logical collection name."""
+    """Resolve ownership; hooks must open a session when ``db`` is None."""
 
     if _access_hook is not None:
         resolved = _access_hook(db, int(user_id), name, action)
@@ -74,12 +79,14 @@ def resolve_knowledge_base_access(
 
 
 def notify_knowledge_base_renamed(
-    db: Any, user_id: int, old_name: str, new_name: str
+    db: Session | None, user_id: int, old_name: str, new_name: str
 ) -> None:
+    """Notify the app; hooks must open a session when ``db`` is None."""
     if _renamed_hook is not None and old_name != new_name:
         _renamed_hook(db, int(user_id), old_name, new_name)
 
 
-def notify_knowledge_base_deleted(db: Any, user_id: int, name: str) -> None:
+def notify_knowledge_base_deleted(db: Session | None, user_id: int, name: str) -> None:
+    """Notify the app; hooks must open a session when ``db`` is None."""
     if _deleted_hook is not None:
         _deleted_hook(db, int(user_id), name, None)

@@ -363,6 +363,7 @@ async def _search_knowledge_base_impl(
             effective_rerank = tool_args.rerank_model_id or collection_rerank
             if effective_rerank:
                 search_config["rerank_model_id"] = effective_rerank
+            storage_user_id = getattr(collection_info, "storage_user_id", None)
 
             try:
                 logger.info(
@@ -373,9 +374,7 @@ async def _search_knowledge_base_impl(
                     collection=collection_name,
                     query_text=tool_args.query,
                     config=search_config,
-                    user_id=(
-                        getattr(collection_info, "storage_user_id", None) or user_id
-                    ),
+                    user_id=storage_user_id if storage_user_id is not None else user_id,
                     is_admin=False
                     if getattr(collection_info, "ownership", "personal") == "team"
                     else is_admin,

@@ -3184,7 +3184,15 @@ kb_router = APIRouter(prefix="/api/kb", tags=["kb"])
 
 
 class _EffectiveKnowledgeBaseUser:
-    """User-like view whose id points at a collection's storage tenant."""
+    """User-like view whose id points at a collection's storage tenant.
+
+    Contract: this is NOT a mapped ``User`` instance. It only overrides ``id``
+    and ``is_admin`` and forwards every other attribute to the acting user.
+    Consumers must treat it as read-only and use only ``id``/``is_admin`` for
+    tenant scoping. Do not pass it to ``db.add``/``db.refresh``, rely on
+    ``isinstance(x, User)``, or read identity attributes (``username`` etc.) as
+    the storage tenant — those resolve to the acting member, not the tenant.
+    """
 
     def __init__(self, actor: User, storage_user_id: int) -> None:
         self._actor = actor
@@ -3205,6 +3213,16 @@ def _effective_knowledge_base_user(
     action: Literal["read", "edit", "delete"] = "read",
 ) -> tuple[Any, KnowledgeBaseAccess]:
     access = resolve_knowledge_base_access(db, int(actor.id), collection_name, action)
+    if action == "edit" and not access.can_edit:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to edit this knowledge base",
+        )
+    if action == "delete" and not access.can_delete:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to delete this knowledge base",
+        )
     if access.storage_user_id == int(actor.id):
         return actor, access
     return _EffectiveKnowledgeBaseUser(actor, access.storage_user_id), access
@@ -6161,84 +6179,6 @@ def _strip_config_only_sentinel(
     )
 
 
-def _validate_and_prefetch_batch_delete_counts(
-    unique_names: List[str],
-    user_id: int,
-    is_admin: bool,
-) -> tuple[
-    List[str],
-    List[BatchDeleteFailureItem],
-    Dict[str, tuple[int, int]],
-]:
-    """Validate batch delete names and prefetch count hints.
-
-    Returns ``(valid_names, failed_items, counts_by_name)``. For non-admin
-    callers ``counts_by_name`` maps the trimmed collection name to its
-    ``(total, own)`` document counts so callers can reuse them when invoking
-    ``_perform_kb_collection_delete`` (avoids redundant LanceDB scans).
-    Admin callers receive an empty dict because counts are not needed.
-    """
-    failed: List[BatchDeleteFailureItem] = []
-    allowed: List[str] = []
-    counts_by_name: Dict[str, tuple[int, int]] = {}
-
-    if is_admin:
-        for name in unique_names:
-            if not name or not name.strip():
-                failed.append(
-                    BatchDeleteFailureItem(
-                        name=name or "",
-                        error="Collection name cannot be empty",
-                    )
-                )
-            else:
-                allowed.append(name)
-        return allowed, failed, counts_by_name
-
-    non_empty: List[str] = []
-    for name in unique_names:
-        if not name or not name.strip():
-            failed.append(
-                BatchDeleteFailureItem(
-                    name=name or "",
-                    error="Collection name cannot be empty",
-                )
-            )
-        else:
-            non_empty.append(name)
-
-    if not non_empty:
-        return [], failed, counts_by_name
-
-    vector_store = get_vector_index_store()
-    try:
-        totals = vector_store.count_documents_grouped_by_collection(
-            non_empty, user_id=None, is_admin=True
-        )
-        owns = vector_store.count_documents_grouped_by_collection(
-            non_empty, user_id=int(user_id), is_admin=False
-        )
-    except Exception as exc:
-        logger.error(
-            "Batch delete count prefetch failed (vector store grouped counts): %s",
-            exc,
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to scan documents table for batch delete.",
-        ) from exc
-
-    for name in non_empty:
-        key = str(name).strip()
-        total = int(totals.get(key, 0))
-        own = int(owns.get(key, 0))
-        allowed.append(name)
-        counts_by_name[key] = (total, own)
-
-    return allowed, failed, counts_by_name
-
-
 def _build_config_only_delete_result(
     safe_collection: str,
     cleanup_counts: dict[str, int],
@@ -6278,15 +6218,8 @@ def _perform_kb_collection_delete(
     user_id: int,
     is_admin: bool,
     db: Session,
-    *,
-    preflight_counts: Optional[tuple[int, int]] = None,
 ) -> CollectionOperationResult:
-    """Delete one KB collection (same pipeline as single-delete API).
-
-    ``preflight_counts`` is an optional ``(total, own)`` pair already computed
-    by an upstream batch preflight. It is used only as a stale-preflight hint;
-    non-admin callers always get a live delete-mode recheck before mutation.
-    """
+    """Delete one KB collection through the same pipeline as the single API."""
     try:
         try:
             safe_collection = sanitize_path_component(collection_name, "collection")
@@ -6295,35 +6228,12 @@ def _perform_kb_collection_delete(
                 status_code=422, detail=f"Invalid collection name: {str(e)}"
             ) from e
 
-        preflight_delete_mode: Optional[_DeleteMode] = None
-        if preflight_counts is not None:
-            total_count, own_count = preflight_counts
-            preflight_delete_mode = _resolve_delete_mode_from_counts(
-                int(total_count), int(own_count), is_admin
-            )
-        elif not is_admin:
-            preflight_delete_mode = _get_collection_delete_mode(
-                safe_collection, user_id, is_admin=False
-            )
-
         if is_admin:
             delete_mode = "full"
         else:
             delete_mode = _get_collection_delete_mode(
                 safe_collection, user_id, is_admin=False
             )
-            if (
-                preflight_delete_mode is not None
-                and preflight_delete_mode != delete_mode
-            ):
-                logger.info(
-                    "Collection delete mode changed after preflight for %s/user_%s: "
-                    "preflight=%s live=%s",
-                    safe_collection,
-                    user_id,
-                    preflight_delete_mode,
-                    delete_mode,
-                )
 
         if delete_mode == "config_only":
             return _perform_config_only_collection_delete(safe_collection, user_id)
@@ -6528,18 +6438,27 @@ async def delete_collection_api(
     Raises:
         HTTPException: If physical deletion fails (prevents database deletion)
     """
+    try:
+        safe_collection = sanitize_path_component(collection_name, "collection")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid collection name: {exc}",
+        ) from exc
     _user, access = _effective_knowledge_base_user(
-        db, _user, collection_name, action="delete"
+        db, _user, safe_collection, action="delete"
     )
+    notify_knowledge_base_deleted(db, access.storage_user_id, safe_collection)
     result = _perform_kb_collection_delete(
-        collection_name,
+        safe_collection,
         int(_user.id),
         bool(_user.is_admin),
         db,
     )
     if result.status in ("success", "partial_success"):
-        notify_knowledge_base_deleted(db, access.storage_user_id, collection_name)
         db.commit()
+    else:
+        db.rollback()
     return _strip_config_only_sentinel(result)
 
 
@@ -6582,6 +6501,16 @@ async def batch_delete_collections_api(
                 effective_user, access = _effective_knowledge_base_user(
                     db, _user, safe_name, action="delete"
                 )
+                # Validate the current delete mode before the lifecycle hook,
+                # then let the delete pipeline re-check it immediately before
+                # mutation. Ownership can change between these two points.
+                if not effective_user.is_admin:
+                    _get_collection_delete_mode(
+                        safe_name,
+                        int(effective_user.id),
+                        is_admin=False,
+                    )
+                notify_knowledge_base_deleted(db, access.storage_user_id, safe_name)
                 result = _perform_kb_collection_delete(
                     safe_name,
                     int(effective_user.id),
@@ -6589,10 +6518,10 @@ async def batch_delete_collections_api(
                     db,
                 )
                 if result.status in ("success", "partial_success"):
-                    deleted.append(name)
-                    notify_knowledge_base_deleted(db, access.storage_user_id, safe_name)
                     db.commit()
+                    deleted.append(name)
                 else:
+                    db.rollback()
                     failed.append(
                         BatchDeleteFailureItem(
                             name=name,
@@ -6612,12 +6541,12 @@ async def batch_delete_collections_api(
                     "Batch delete aborted after HTTP error for %s; rolled back pending SQL.",
                     name,
                 )
-                break
+                continue
             except Exception as e:
                 db.rollback()
                 logger.exception("Batch delete failed for collection %s: %s", name, e)
                 failed.append(BatchDeleteFailureItem(name=name, error=str(e)))
-                break
+                continue
     except Exception:
         db.rollback()
         raise
@@ -6646,7 +6575,13 @@ async def check_documents_exist_api(
     For duplicate check we always filter by current user's documents only (including
     for admins), so "already exists" matches what will be overwritten on re-upload.
     """
-    _user, _ = _effective_knowledge_base_user(db, _user, collection_name, action="read")
+    try:
+        safe_collection = sanitize_path_component(collection_name, "collection")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid collection name: {str(e)}"
+        ) from e
+    _user, _ = _effective_knowledge_base_user(db, _user, safe_collection, action="read")
     try:
         filenames = body.get("filenames")
         if not isinstance(filenames, list):
@@ -6662,13 +6597,6 @@ async def check_documents_exist_api(
         requested = {f.strip() for f in filenames if f and f.strip()}
         if not requested:
             return {"existing_filenames": []}
-
-        try:
-            safe_collection = sanitize_path_component(collection_name, "collection")
-        except ValueError as e:
-            raise HTTPException(
-                status_code=422, detail=f"Invalid collection name: {str(e)}"
-            ) from e
 
         await _ensure_collection_access(safe_collection, _user, allow_create=True)
 
@@ -7714,13 +7642,14 @@ async def get_parse_result_api(
             status_code=422, detail="Page size must be between 1 and 100"
         )
 
-    _user, _ = _effective_knowledge_base_user(db, _user, collection_name, action="read")
     try:
         safe_collection = sanitize_path_component(collection_name, "collection")
     except ValueError as e:
         raise HTTPException(
             status_code=422, detail=f"Invalid collection name: {str(e)}"
         ) from e
+
+    _user, _ = _effective_knowledge_base_user(db, _user, safe_collection, action="read")
 
     await _ensure_collection_access(safe_collection, _user, hide_missing=False)
 

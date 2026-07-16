@@ -447,7 +447,7 @@ async def delete_custom_api(
     )
     if team_delete.blocked_reason:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=team_delete.blocked_reason,
         )
     if team_delete.team_owned and not team_delete.authorized:

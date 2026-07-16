@@ -126,6 +126,7 @@ class AgentStore:
         return {
             "id": agent.id,
             "user_id": agent.user_id,
+            "team_id": agent.team_id,
             "name": agent.name,
             "description": agent.description,
             "instructions": agent.instructions,
@@ -154,6 +155,7 @@ class AgentStore:
     def agent_to_list_item_dict(self, agent: Agent) -> dict[str, Any]:
         return {
             "id": agent.id,
+            "team_id": agent.team_id,
             "name": agent.name,
             "description": agent.description,
             "logo_url": agent.logo_url,
@@ -345,8 +347,8 @@ class AgentStore:
             published_at = datetime.now(timezone.utc)
         # Widget-enabled agents always carry an embed credential; agents
         # created disabled get one when the widget is first enabled.
-        team_scope = get_agent_team_scope(self.db, user_id)
-        _assert_can_set_visibility(team_scope, visibility)
+        if visibility is not None and visibility not in _VALID_VISIBILITIES:
+            raise ValueError(f"Unsupported agent visibility: {visibility}")
         widget_key = new_widget_key() if widget_enabled else None
         # Agents are created personal (team_id NULL). Team ownership is granted
         # only by an explicit promote (see ``promote_agent_to_team``); a create
@@ -461,6 +463,12 @@ class AgentStore:
         _assert_can_set_visibility(
             scope, visibility, cast("str | None", agent.visibility)
         )
+        if (
+            agent.team_id is not None
+            and int(agent.team_id) == int(scope.team_id)
+            and str(agent.visibility) == visibility
+        ):
+            return agent
         unshared = validate_team_agent_connectors(
             self.db,
             user_id,
@@ -490,6 +498,15 @@ class AgentStore:
         agent = self.get_owned_agent(user_id, agent_id, team_scope)
         if agent is None:
             return None
+        if (
+            team_scope is not None
+            and agent.team_id is not None
+            and not team_scope.is_team_admin
+            and int(agent.user_id) != int(user_id)
+        ):
+            raise PermissionError(
+                "Only a team admin or the agent creator can make it personal"
+            )
         agent.team_id = None  # type: ignore[assignment]
         self.db.commit()
         self.db.refresh(agent)

@@ -33,6 +33,20 @@ _team_agent_connector_validator = None
 _team_agent_knowledge_base_validator = None
 
 
+def set_agent_team_hooks(
+    *,
+    scope: Any = None,
+    connector_validator: Any = None,
+    knowledge_base_validator: Any = None,
+) -> None:
+    """Install or clear the complete application-owned agent team hook set."""
+    global _agent_team_scope_hook
+    global _team_agent_connector_validator, _team_agent_knowledge_base_validator
+    _agent_team_scope_hook = scope
+    _team_agent_connector_validator = connector_validator
+    _team_agent_knowledge_base_validator = knowledge_base_validator
+
+
 def set_agent_team_scope_hook(hook: Any) -> None:
     """Install (or clear, with ``None``) the user-id -> AgentTeamScope resolver."""
     global _agent_team_scope_hook

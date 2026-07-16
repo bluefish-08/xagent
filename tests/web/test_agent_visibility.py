@@ -38,6 +38,8 @@ def test_serializers_include_visibility(db):
     )
     assert store.agent_to_response_dict(agent)["visibility"] == "team"
     assert store.agent_to_list_item_dict(agent)["visibility"] == "team"
+    assert store.agent_to_response_dict(agent)["team_id"] is None
+    assert store.agent_to_list_item_dict(agent)["team_id"] is None
 
 
 def test_team_id_of():
@@ -178,19 +180,20 @@ def test_admin_can_create_admins_only_agent(db, team_of_admin_and_member):
     assert agent.visibility == "admins"
 
 
-def test_member_cannot_create_admins_only_agent(db, team_of_admin_and_member):
+def test_personal_create_may_store_future_team_visibility(db, team_of_admin_and_member):
     from xagent.web.services.agent_store import AgentStore
 
     _admin, member = team_of_admin_and_member
     store = AgentStore(db)
-    with pytest.raises(PermissionError):
-        store.create_agent(
-            user_id=int(member.id),
-            name="Nope",
-            description=None,
-            instructions=None,
-            visibility="admins",
-        )
+    agent = store.create_agent(
+        user_id=int(member.id),
+        name="Private until promoted",
+        description=None,
+        instructions=None,
+        visibility="admins",
+    )
+    assert agent.team_id is None
+    assert agent.visibility == "admins"
 
 
 def test_create_defaults_visibility_to_team(db, team_of_admin_and_member):
@@ -308,8 +311,7 @@ def test_list_accessible_agents_hides_published_admins_only_from_member(
         aa.get_visible_agent_ids = orig_aa
 
 
-def test_set_admins_visibility_fail_closed_without_scope(db):
-    """#8: with no team scope, the store must refuse to set admins-only."""
+def test_personal_create_does_not_require_team_scope_for_visibility(db):
     from xagent.web.models.user import User
     from xagent.web.services import agent_team_scope as ats
     from xagent.web.services.agent_store import AgentStore
@@ -319,14 +321,15 @@ def test_set_admins_visibility_fail_closed_without_scope(db):
     db.add(u)
     db.flush()
     store = AgentStore(db)
-    with pytest.raises(PermissionError):
-        store.create_agent(
-            user_id=int(u.id),
-            name="Nope",
-            description=None,
-            instructions=None,
-            visibility="admins",
-        )
+    agent = store.create_agent(
+        user_id=int(u.id),
+        name="Personal",
+        description=None,
+        instructions=None,
+        visibility="admins",
+    )
+    assert agent.team_id is None
+    assert agent.visibility == "admins"
 
 
 def test_store_rejects_unknown_visibility_value(db, team_of_admin_and_member):
@@ -378,6 +381,27 @@ def test_non_admin_cannot_downgrade_admins_only_agent(db, team_of_admin_and_memb
             team_scope=non_admin_scope,
             agent=agent,
         )
+
+
+def test_non_admin_cannot_demote_teammates_team_agent(db, two_users_one_team_via_scope):
+    from xagent.web.services.agent_store import AgentStore
+    from xagent.web.services.agent_team_scope import get_agent_team_scope
+
+    admin, member = two_users_one_team_via_scope
+    store = AgentStore(db)
+    agent = store.create_agent(
+        user_id=int(admin.id), name="Team-owned", description=None, instructions=None
+    )
+    store.promote_agent_to_team(
+        int(admin.id),
+        int(agent.id),
+        get_agent_team_scope(db, int(admin.id)),
+    )
+
+    with pytest.raises(PermissionError):
+        store.demote_agent_to_personal(int(member.id), int(agent.id))
+
+    assert db.get(Agent, int(agent.id)).team_id == 300
 
 
 def test_run_path_team_member_can_load_team_agent(db, two_users_one_team_via_scope):

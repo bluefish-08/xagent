@@ -117,6 +117,7 @@ class AgentResponse(BaseModel):
 
     id: int
     user_id: int
+    team_id: Optional[int] = None
     name: str
     description: Optional[str]
     instructions: Optional[str]
@@ -147,6 +148,7 @@ class AgentListItem(BaseModel):
     """Simplified agent model for list views."""
 
     id: int
+    team_id: Optional[int] = None
     name: str
     description: Optional[str]
     logo_url: Optional[str]
@@ -172,6 +174,26 @@ class AgentShareLinkResponse(BaseModel):
     share_enabled: bool
     share_token: Optional[str]
     share_updated_at: Optional[str]
+
+
+def _unshared_error_response(
+    error: UnsharedConnectorsError | UnsharedKnowledgeBasesError,
+) -> HTTPException:
+    if isinstance(error, UnsharedConnectorsError):
+        return HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent uses connectors not shared with or resolvable by the team",
+                "unshared_connectors": error.connectors,
+            },
+        )
+    return HTTPException(
+        status_code=422,
+        detail={
+            "message": "Agent uses knowledge bases not shared with the team",
+            "unshared_knowledge_bases": error.knowledge_bases,
+        },
+    )
 
 
 class AgentWidgetKeyResponse(BaseModel):
@@ -724,24 +746,9 @@ async def update_agent(
 
     except HTTPException:
         raise
-    except UnsharedConnectorsError as e:
+    except (UnsharedConnectorsError, UnsharedKnowledgeBasesError) as e:
         db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Agent uses connectors not shared with or resolvable by the team",
-                "unshared_connectors": e.connectors,
-            },
-        ) from e
-    except UnsharedKnowledgeBasesError as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Agent uses knowledge bases not shared with the team",
-                "unshared_knowledge_bases": e.knowledge_bases,
-            },
-        ) from e
+        raise _unshared_error_response(e) from e
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
@@ -784,24 +791,9 @@ async def promote_agent_to_team(
         return AgentResponse.model_validate(store.agent_to_response_dict(agent))
     except HTTPException:
         raise
-    except UnsharedConnectorsError as e:
+    except (UnsharedConnectorsError, UnsharedKnowledgeBasesError) as e:
         db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Agent uses connectors not shared with or resolvable by the team",
-                "unshared_connectors": e.connectors,
-            },
-        ) from e
-    except UnsharedKnowledgeBasesError as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Agent uses knowledge bases not shared with the team",
-                "unshared_knowledge_bases": e.knowledge_bases,
-            },
-        ) from e
+        raise _unshared_error_response(e) from e
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
@@ -825,6 +817,8 @@ async def demote_agent_to_personal(
         return AgentResponse.model_validate(store.agent_to_response_dict(agent))
     except HTTPException:
         raise
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Failed to demote agent {agent_id}: {e}")
         db.rollback()
