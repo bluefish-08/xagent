@@ -2316,16 +2316,15 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="team">{t("builds.configForm.visibility.team")}</SelectItem>
-                    <SelectItem value="admins" disabled={!canSetAdminsOnly}>
-                      {t("builds.configForm.visibility.admins")}
-                    </SelectItem>
+                    {/* Admins-only is an admin-controlled setting; non-admins
+                        never see the option (the backend also gates it). */}
+                    {canSetAdminsOnly && (
+                      <SelectItem value="admins">
+                        {t("builds.configForm.visibility.admins")}
+                      </SelectItem>
+                    )}
                   </SelectContent>
                 </SelectRadix>
-                {!canSetAdminsOnly && (
-                  <div className="text-xs text-muted-foreground">
-                    {t("builds.configForm.visibility.adminsHint")}
-                  </div>
-                )}
               </div>
             )}
           </div>
