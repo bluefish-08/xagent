@@ -445,6 +445,11 @@ async def delete_custom_api(
     team_delete = delete_team_connector(
         db, int(current_user.id), "custom_api", int(api_id)
     )
+    if team_delete.blocked_reason:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=team_delete.blocked_reason,
+        )
     if team_delete.team_owned and not team_delete.authorized:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

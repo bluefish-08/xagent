@@ -2791,6 +2791,11 @@ def delete_mcp_server(
         from ..services.connector_team_scope import delete_team_connector
 
         team_delete = delete_team_connector(db, int(user_id), "mcp", int(server_id))
+        if team_delete.blocked_reason:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=team_delete.blocked_reason,
+            )
         if team_delete.team_owned and not team_delete.authorized:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
