@@ -39,6 +39,7 @@ from ..services.agent_management import (
 from ..services.agent_store import (
     AgentStore,
     UnsharedConnectorsError,
+    UnsharedKnowledgeBasesError,
     new_widget_key,
 )
 from ..services.agent_team_scope import (
@@ -71,19 +72,13 @@ class AgentCreateRequest(BaseModel):
     models: Optional[dict] = Field(
         None, description="Model config: {general, small_fast, visual, compact}"
     )
-    knowledge_bases: List[str] = Field(
-        default_factory=list, description="Knowledge base names"
-    )
+    knowledge_bases: List[str] = Field(default_factory=list, description="Knowledge base names")
     skills: List[str] = Field(default_factory=list, description="Skill names")
-    tool_categories: List[str] = Field(
-        default_factory=list, description="Tool category names"
-    )
+    tool_categories: List[str] = Field(default_factory=list, description="Tool category names")
     suggested_prompts: List[str] = Field(
         default_factory=list, description="Suggested prompt examples for users"
     )
-    logo_base64: Optional[str] = Field(
-        None, description="Logo image as base64 data URL"
-    )
+    logo_base64: Optional[str] = Field(None, description="Logo image as base64 data URL")
     visibility: Optional[Literal["team", "admins"]] = None
 
 
@@ -192,9 +187,7 @@ class OptimizeInstructionsRequest(BaseModel):
     """Request model for optimizing agent instructions."""
 
     instructions: str = Field(..., description="Draft instructions to optimize")
-    model_id: Optional[int] = Field(
-        None, description="Model ID to use for optimization"
-    )
+    model_id: Optional[int] = Field(None, description="Model ID to use for optimization")
 
 
 KNOWLEDGE_TOOL_CATEGORY = "knowledge"
@@ -215,9 +208,7 @@ def _ensure_shareable_agent(agent: Agent | None) -> Agent:
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.status.value != "published":
-        raise HTTPException(
-            status_code=400, detail="Only published agents can be shared"
-        )
+        raise HTTPException(status_code=400, detail="Only published agents can be shared")
     return agent
 
 
@@ -230,9 +221,7 @@ def _serialize_share_link_response(agent: Agent) -> AgentShareLinkResponse:
         agent_id=int(agent.id),
         share_enabled=bool(agent.share_enabled),
         share_token=agent.share_token,
-        share_updated_at=agent.share_updated_at.isoformat()
-        if agent.share_updated_at
-        else None,
+        share_updated_at=agent.share_updated_at.isoformat() if agent.share_updated_at else None,
     )
 
 
@@ -264,9 +253,7 @@ def enhance_system_prompt_with_kb(
 # ===== Helper Functions =====
 
 
-def _validate_knowledge_base_tools(
-    knowledge_bases: List[str], tool_categories: List[str]
-) -> None:
+def _validate_knowledge_base_tools(knowledge_bases: List[str], tool_categories: List[str]) -> None:
     """Raise HTTPException if knowledge bases are selected without the knowledge tool category."""
     if knowledge_bases and KNOWLEDGE_TOOL_CATEGORY not in tool_categories:
         raise HTTPException(
@@ -275,9 +262,7 @@ def _validate_knowledge_base_tools(
         )
 
 
-async def _validate_knowledge_bases_exist(
-    knowledge_bases: List[str], current_user: User
-) -> None:
+async def _validate_knowledge_bases_exist(knowledge_bases: List[str], current_user: User) -> None:
     """Raise HTTPException if any selected knowledge base is not visible to the user."""
     missing = await find_missing_knowledge_bases(
         knowledge_bases,
@@ -288,8 +273,7 @@ async def _validate_knowledge_bases_exist(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Knowledge base(s) not found or not visible to this user: "
-                + ", ".join(missing)
+                "Knowledge base(s) not found or not visible to this user: " + ", ".join(missing)
             ),
         )
 
@@ -428,9 +412,7 @@ async def optimize_instructions(
             llm = default_llm
 
         if not llm:
-            raise HTTPException(
-                status_code=400, detail="No LLM available for optimization"
-            )
+            raise HTTPException(status_code=400, detail="No LLM available for optimization")
 
         # Construct prompt
         system_prompt = (
@@ -440,7 +422,9 @@ async def optimize_instructions(
             "Do not include any conversational filler. Just output the optimized instructions."
         )
 
-        user_prompt = f"Draft instructions:\n{request.instructions}\n\nPlease optimize these instructions."
+        user_prompt = (
+            f"Draft instructions:\n{request.instructions}\n\nPlease optimize these instructions."
+        )
 
         # Call LLM
         response = await llm.chat(
@@ -490,9 +474,7 @@ async def create_agent_from_template(
     except TemplateNotFoundError:
         raise HTTPException(status_code=404, detail="Template not found")
     except DuplicateAgentNameError:
-        raise HTTPException(
-            status_code=400, detail="Agent with this name already exists"
-        )
+        raise HTTPException(status_code=400, detail="Agent with this name already exists")
     except Exception as e:
         logger.error(f"Failed to create agent from template: {e}")
         db.rollback()
@@ -511,13 +493,9 @@ async def create_agent(
         user_id = int(current_user.id)
         # Check for duplicate name
         if store.agent_name_exists(user_id, agent_data.name):
-            raise HTTPException(
-                status_code=400, detail="Agent with this name already exists"
-            )
+            raise HTTPException(status_code=400, detail="Agent with this name already exists")
 
-        _validate_knowledge_base_tools(
-            agent_data.knowledge_bases, agent_data.tool_categories
-        )
+        _validate_knowledge_base_tools(agent_data.knowledge_bases, agent_data.tool_categories)
         await _validate_knowledge_bases_exist(agent_data.knowledge_bases, current_user)
 
         agent = store.create_agent(
@@ -539,9 +517,7 @@ async def create_agent(
             logo_url = _save_logo(agent_data.logo_base64, agent.id)  # type: ignore[arg-type]
             if logo_url:
                 agent = (
-                    store.update_agent_fields(
-                        user_id, int(agent.id), {"logo_url": logo_url}
-                    )
+                    store.update_agent_fields(user_id, int(agent.id), {"logo_url": logo_url})
                     or agent
                 )
 
@@ -664,9 +640,7 @@ async def update_agent(
                 exclude_agent_id=agent_id,
                 team_scope=team_scope,
             ):
-                raise HTTPException(
-                    status_code=400, detail="Agent with this name already exists"
-                )
+                raise HTTPException(status_code=400, detail="Agent with this name already exists")
             updates["name"] = agent_data.name
 
         if agent_data.description is not None:
@@ -732,6 +706,15 @@ async def update_agent(
                 "unshared_connectors": e.connectors,
             },
         ) from e
+    except UnsharedKnowledgeBasesError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent uses knowledge bases not shared with the team",
+                "unshared_knowledge_bases": e.knowledge_bases,
+            },
+        ) from e
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
@@ -766,9 +749,7 @@ async def promote_agent_to_team(
         if scope is None:
             raise HTTPException(status_code=400, detail="No team to promote into")
         visibility = (body or PromoteTeamRequest()).visibility
-        agent = store.promote_agent_to_team(
-            user_id, agent_id, scope, visibility=visibility
-        )
+        agent = store.promote_agent_to_team(user_id, agent_id, scope, visibility=visibility)
         if agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         return AgentResponse.model_validate(store.agent_to_response_dict(agent))
@@ -781,6 +762,15 @@ async def promote_agent_to_team(
             detail={
                 "message": "Agent uses connectors not shared with the team",
                 "unshared_connectors": e.connectors,
+            },
+        ) from e
+    except UnsharedKnowledgeBasesError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent uses knowledge bases not shared with the team",
+                "unshared_knowledge_bases": e.knowledge_bases,
             },
         ) from e
     except PermissionError as e:
@@ -944,9 +934,7 @@ async def enable_agent_share_link(
     """Create or re-enable a share link for a published agent."""
     try:
         store = AgentStore(db)
-        agent = _ensure_shareable_agent(
-            store.get_owned_agent(int(current_user.id), agent_id)
-        )
+        agent = _ensure_shareable_agent(store.get_owned_agent(int(current_user.id), agent_id))
         now = datetime.now(timezone.utc)
         updates: dict[str, Any] = {
             "share_enabled": True,
@@ -954,9 +942,7 @@ async def enable_agent_share_link(
         }
         if not agent.share_token:
             updates["share_token"] = _new_share_token()
-        updated_agent = store.update_agent_fields(
-            int(current_user.id), agent_id, updates
-        )
+        updated_agent = store.update_agent_fields(int(current_user.id), agent_id, updates)
         if updated_agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         return _serialize_share_link_response(updated_agent)
@@ -1044,9 +1030,7 @@ async def get_agent_widget_key(
         if agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         if not agent.widget_key:
-            agent = store.update_agent_fields(
-                user_id, agent_id, {"widget_key": new_widget_key()}
-            )
+            agent = store.update_agent_fields(user_id, agent_id, {"widget_key": new_widget_key()})
             if agent is None:
                 raise HTTPException(status_code=404, detail="Agent not found")
         return AgentWidgetKeyResponse(
@@ -1074,9 +1058,7 @@ async def rotate_agent_widget_key(
         user_id = int(current_user.id)
         if store.get_owned_agent(user_id, agent_id) is None:
             raise HTTPException(status_code=404, detail="Agent not found")
-        agent = store.update_agent_fields(
-            user_id, agent_id, {"widget_key": new_widget_key()}
-        )
+        agent = store.update_agent_fields(user_id, agent_id, {"widget_key": new_widget_key()})
         if agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         return AgentWidgetKeyResponse(
@@ -1332,9 +1314,7 @@ class AgentPreviewRequest(BaseModel):
     models: Optional[dict] = Field(
         None, description="Model config: {general, small_fast, visual, compact}"
     )
-    knowledge_bases: List[str] = Field(
-        default_factory=list, description="Knowledge base names"
-    )
+    knowledge_bases: List[str] = Field(default_factory=list, description="Knowledge base names")
     skills: List[str] = Field(default_factory=list, description="Skill names")
     # ``None`` (field omitted) keeps the legacy "unconfigured" semantics
     # (full default tool set); ``[]`` means the caller explicitly selected
@@ -1376,9 +1356,7 @@ async def preview_agent(
 
             if model_config.get("general"):
                 general_model = (
-                    db.query(DBModel)
-                    .filter(DBModel.id == model_config["general"])
-                    .first()
+                    db.query(DBModel).filter(DBModel.id == model_config["general"]).first()
                 )
                 if general_model:
                     default_llm = storage.get_llm_by_name_with_access(
@@ -1386,9 +1364,7 @@ async def preview_agent(
                     )
             if model_config.get("small_fast"):
                 fast_model = (
-                    db.query(DBModel)
-                    .filter(DBModel.id == model_config["small_fast"])
-                    .first()
+                    db.query(DBModel).filter(DBModel.id == model_config["small_fast"]).first()
                 )
                 if fast_model:
                     fast_llm = storage.get_llm_by_name_with_access(
@@ -1396,9 +1372,7 @@ async def preview_agent(
                     )
             if model_config.get("visual"):
                 visual_model = (
-                    db.query(DBModel)
-                    .filter(DBModel.id == model_config["visual"])
-                    .first()
+                    db.query(DBModel).filter(DBModel.id == model_config["visual"]).first()
                 )
                 if visual_model:
                     vision_llm = storage.get_llm_by_name_with_access(
@@ -1406,9 +1380,7 @@ async def preview_agent(
                     )
             if model_config.get("compact"):
                 compact_model = (
-                    db.query(DBModel)
-                    .filter(DBModel.id == model_config["compact"])
-                    .first()
+                    db.query(DBModel).filter(DBModel.id == model_config["compact"]).first()
                 )
                 if compact_model:
                     compact_llm = storage.get_llm_by_name_with_access(
@@ -1416,9 +1388,7 @@ async def preview_agent(
                     )
 
         if not default_llm:
-            raise HTTPException(
-                status_code=400, detail="General model is required for preview"
-            )
+            raise HTTPException(status_code=400, detail="General model is required for preview")
 
         # Create tool config with allowed collections, skills, and tools
         # WebToolConfig expects db and request, pass a minimal dict-like request object

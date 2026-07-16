@@ -29,6 +29,9 @@ _agent_team_scope_hook = None  # (db, user_id) -> AgentTeamScope | None
 # (db, user_id, team_id, tool_categories) -> list of unshared connector dicts.
 _team_agent_connector_validator = None
 
+# (db, user_id, team_id, knowledge_bases) -> list of unshared KB dicts.
+_team_agent_knowledge_base_validator = None
+
 
 def set_agent_team_scope_hook(hook: Any) -> None:
     """Install (or clear, with ``None``) the user-id -> AgentTeamScope resolver."""
@@ -48,6 +51,12 @@ def set_team_agent_connector_validator(fn: Any) -> None:
     _team_agent_connector_validator = fn
 
 
+def set_team_agent_knowledge_base_validator(fn: Any) -> None:
+    """Install the team-agent knowledge-base ownership validator."""
+    global _team_agent_knowledge_base_validator
+    _team_agent_knowledge_base_validator = fn
+
+
 def validate_team_agent_connectors(
     db: Session, user_id: int, team_id: int, tool_categories: Any
 ) -> list:
@@ -64,9 +73,19 @@ def validate_team_agent_connectors(
     )
 
 
-def get_agent_team_scope(
-    db: Session, user_id: Optional[int]
-) -> Optional[AgentTeamScope]:
+def validate_team_agent_knowledge_bases(
+    db: Session, user_id: int, team_id: int, knowledge_bases: Any
+) -> list:
+    """Return selected knowledge bases not owned by the agent's team."""
+    if _team_agent_knowledge_base_validator is None:
+        return []
+    return cast(
+        list,
+        _team_agent_knowledge_base_validator(db, user_id, team_id, knowledge_bases),
+    )
+
+
+def get_agent_team_scope(db: Session, user_id: Optional[int]) -> Optional[AgentTeamScope]:
     """Return the caller's team scope, or ``None`` when unscoped."""
     if _agent_team_scope_hook is None or user_id is None:
         return None
@@ -92,9 +111,7 @@ def owns_agent(agent: Agent, user_id: int, scope: Optional[AgentTeamScope]) -> b
     return bool(scope.is_team_admin or agent.visibility == "team")
 
 
-def owned_agent_clause(
-    user_id: int, scope: Optional[AgentTeamScope]
-) -> ColumnElement[bool]:
+def owned_agent_clause(user_id: int, scope: Optional[AgentTeamScope]) -> ColumnElement[bool]:
     """Predicate for agents *user_id* may see/manage.
 
     - No scope (standalone / no hook): exactly ``Agent.user_id == user_id``.

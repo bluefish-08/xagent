@@ -194,6 +194,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [unsharedConnectors, setUnsharedConnectors] = useState<
     { type: string; id: number | string; name: string }[]
   >([])
+  const [unsharedKnowledgeBases, setUnsharedKnowledgeBases] = useState<
+    { name: string }[]
+  >([])
   const [isSharingConnectors, setIsSharingConnectors] = useState(false)
   const [templateRequirements, setTemplateRequirements] = useState<TemplateRequirements | null>(null)
 
@@ -1019,8 +1022,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       if (res.status === 422) {
         const body = await res.json().catch(() => ({}))
         const connectors = Array.isArray(body?.detail?.unshared_connectors) ? body.detail.unshared_connectors : []
-        if (connectors.length > 0) {
+        const knowledgeBases = Array.isArray(body?.detail?.unshared_knowledge_bases)
+          ? body.detail.unshared_knowledge_bases
+          : []
+        if (connectors.length > 0 || knowledgeBases.length > 0) {
           setUnsharedConnectors(connectors)
+          setUnsharedKnowledgeBases(knowledgeBases)
           return null
         }
         throw new Error(body?.detail?.message ?? body?.detail ?? t("builds.editor.error.unknown"))
@@ -1064,7 +1071,18 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           throw new Error(body?.detail?.message ?? body?.detail ?? t("builds.editor.error.unknown"))
         }
       }
+      for (const kb of unsharedKnowledgeBases) {
+        const res = await apiRequest(
+          `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(kb.name)}/promote-team`,
+          { method: "POST" },
+        )
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.detail?.message ?? body?.detail ?? t("builds.editor.error.unknown"))
+        }
+      }
       setUnsharedConnectors([])
+      setUnsharedKnowledgeBases([])
       const result = await reconcileOwnership(localAgentId, null)
       if (result) {
         setOriginalData((current: any) => ({ ...current, ...result }))
@@ -1081,6 +1099,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const handleCancelShareConnectors = () => {
     // User declined to share: stay personal.
     setUnsharedConnectors([])
+    setUnsharedKnowledgeBases([])
     setOwnership("personal")
   }
 
@@ -2459,7 +2478,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
       {/* Share-connectors-first prompt (promote-team 422) */}
       <Dialog
-        open={unsharedConnectors.length > 0}
+        open={unsharedConnectors.length > 0 || unsharedKnowledgeBases.length > 0}
         onOpenChange={(open) => { if (!open) handleCancelShareConnectors() }}
       >
         <DialogContent>
@@ -2472,6 +2491,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <ul className="list-disc pl-5 text-sm space-y-1">
             {unsharedConnectors.map((c) => (
               <li key={`${c.type}:${c.id}`}>{c.name}</li>
+            ))}
+            {unsharedKnowledgeBases.map((kb) => (
+              <li key={`kb:${kb.name}`}>{kb.name}</li>
             ))}
           </ul>
           <DialogFooter className="gap-2 sm:justify-end">

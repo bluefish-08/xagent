@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from .RAG_tools.core.schemas import ListCollectionsResult
 from .RAG_tools.management.collections import list_collections
 from .RAG_tools.pipelines.document_search import run_document_search
 
@@ -19,6 +20,41 @@ def _get_tool_compatibility_facade() -> "KBToolCompatibilityFacade":
     from .RAG_tools.kb import get_kb_coordinator
 
     return get_kb_coordinator().tool_compatibility
+
+
+async def _list_visible_collections(
+    user_id: Optional[int], is_admin: bool
+) -> ListCollectionsResult:
+    """Union personal collections with application-provided team overlays."""
+    result = await list_collections(user_id=user_id, is_admin=is_admin)
+    if user_id is None or is_admin:
+        return result
+
+    from ....web.services.knowledge_base_team_scope import (
+        visible_team_knowledge_bases,
+    )
+
+    collections_by_name = {collection.name: collection for collection in result.collections}
+    refs_by_owner: dict[int, list] = {}
+    for ref in visible_team_knowledge_bases(None, int(user_id)):
+        refs_by_owner.setdefault(ref.storage_user_id, []).append(ref)
+    for storage_user_id, refs in refs_by_owner.items():
+        owner_result = await list_collections(user_id=storage_user_id, is_admin=False)
+        owner_collections = {collection.name: collection for collection in owner_result.collections}
+        for ref in refs:
+            collection = owner_collections.get(ref.name)
+            if collection is None:
+                continue
+            collections_by_name[ref.name] = collection.model_copy(
+                update={
+                    "ownership": "team",
+                    "storage_user_id": ref.storage_user_id,
+                    "can_edit": ref.can_edit,
+                    "can_delete": ref.can_delete,
+                }
+            )
+    merged = list(collections_by_name.values())
+    return result.model_copy(update={"collections": merged, "total_count": len(merged)})
 
 
 class ListKnowledgeBasesArgs(BaseModel):
@@ -47,9 +83,7 @@ class KnowledgeSearchArgs(BaseModel):
         description="Search type: 'dense' (semantic), 'sparse' (keyword), or 'hybrid' (combined)",
     )
     top_k: int = Field(default=5, description="Maximum results per collection")
-    min_score: float = Field(
-        default=0.3, description="Minimum relevance score (0.0-1.0)"
-    )
+    min_score: float = Field(default=0.3, description="Minimum relevance score (0.0-1.0)")
     embedding_model_id: Optional[str] = Field(
         default=None, description="Optional embedding model ID to use for searches"
     )
@@ -79,9 +113,7 @@ class KnowledgeSearchResult(BaseModel):
     results: list[SearchResultItem] = Field(
         description="List of search results with document metadata"
     )
-    summary: str = Field(
-        default="", description="Human-readable summary of search results"
-    )
+    summary: str = Field(default="", description="Human-readable summary of search results")
 
 
 async def list_knowledge_bases(
@@ -116,7 +148,7 @@ async def _list_knowledge_bases_impl(
         RuntimeError: If listing knowledge bases fails
     """
     try:
-        result = await list_collections(user_id=user_id, is_admin=is_admin)
+        result = await _list_visible_collections(user_id=user_id, is_admin=is_admin)
 
         kb_list = []
         for collection in result.collections:
@@ -168,7 +200,7 @@ async def _find_missing_knowledge_bases_impl(
     if not requested:
         return []
 
-    result = await list_collections(user_id=user_id, is_admin=is_admin)
+    result = await _list_visible_collections(user_id=user_id, is_admin=is_admin)
     available = {collection.name for collection in result.collections}
     return [name for name in requested if name not in available]
 
@@ -206,7 +238,7 @@ async def _search_knowledge_base_impl(
     """
     try:
         # List all collections
-        collections_result = await list_collections(user_id=user_id, is_admin=is_admin)
+        collections_result = await _list_visible_collections(user_id=user_id, is_admin=is_admin)
 
         if not collections_result.collections:
             return KnowledgeSearchResult(
@@ -218,9 +250,7 @@ async def _search_knowledge_base_impl(
         available_names = {c.name for c in collections_result.collections}
 
         # Debug: Log available collections for troubleshooting
-        logger.info(
-            f"📚 Available knowledge base collections: {sorted(available_names)}"
-        )
+        logger.info(f"📚 Available knowledge base collections: {sorted(available_names)}")
         if tool_args.collections:
             logger.info(f"   - Requested collections: {tool_args.collections}")
         if tool_args.allowed_collections:
@@ -308,9 +338,7 @@ async def _search_knowledge_base_impl(
 
             # Skip collections with no embeddings
             if collection_info.embeddings == 0:
-                logger.debug(
-                    f"Skipping collection with no embeddings: {collection_name}"
-                )
+                logger.debug(f"Skipping collection with no embeddings: {collection_name}")
                 continue
 
             # Per-KB rerank resolution: explicit tool arg wins, otherwise
@@ -323,16 +351,16 @@ async def _search_knowledge_base_impl(
                 search_config["rerank_model_id"] = effective_rerank
 
             try:
-                logger.info(
-                    f"Searching collection '{collection_name}' for: {tool_args.query}"
-                )
+                logger.info(f"Searching collection '{collection_name}' for: {tool_args.query}")
 
                 result = run_document_search(
                     collection=collection_name,
                     query_text=tool_args.query,
                     config=search_config,
-                    user_id=user_id,
-                    is_admin=is_admin,
+                    user_id=(getattr(collection_info, "storage_user_id", None) or user_id),
+                    is_admin=False
+                    if getattr(collection_info, "ownership", "personal") == "team"
+                    else is_admin,
                 )
 
                 if result.status not in {"success", "partial_success"}:
@@ -351,9 +379,7 @@ async def _search_knowledge_base_impl(
                 if result.status != "success" or result.warnings:
                     warning_message = result.message or "; ".join(result.warnings)
                     if warning_message:
-                        collection_warnings.append(
-                            f"{collection_name}: {warning_message}"
-                        )
+                        collection_warnings.append(f"{collection_name}: {warning_message}")
 
                 if result.results:
                     for res in result.results:
@@ -370,14 +396,11 @@ async def _search_knowledge_base_impl(
 
         if not all_results:
             if collection_errors:
-                summary = (
-                    "Knowledge base search failed for one or more collections: "
-                    + " | ".join(collection_errors)
+                summary = "Knowledge base search failed for one or more collections: " + " | ".join(
+                    collection_errors
                 )
                 if collection_warnings:
-                    summary = (
-                        summary + "\n\nWarnings: " + " | ".join(collection_warnings)
-                    )
+                    summary = summary + "\n\nWarnings: " + " | ".join(collection_warnings)
                 return KnowledgeSearchResult(results=[], summary=summary)
             summary = (
                 f"No relevant documents found in any knowledge base. "

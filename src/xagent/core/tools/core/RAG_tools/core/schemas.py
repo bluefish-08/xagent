@@ -82,7 +82,9 @@ class DocumentProcessingStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     CHUNKED = "chunked"  # Document has been chunked but not yet embedded
-    PARTIALLY_EMBEDDED = "partially_embedded"  # Document has some embeddings but not all chunks are embedded
+    PARTIALLY_EMBEDDED = (
+        "partially_embedded"  # Document has some embeddings but not all chunks are embedded
+    )
     SUCCESS = "success"  # Document fully processed: all chunks have embeddings
     FAILED = "failed"
     CANCELLED = "cancelled"  # Task was cancelled by user or system
@@ -111,12 +113,8 @@ class TaskProgress(BaseModel):
         le=1.0,
         description="Progress in [0, 1]",
     )
-    start_time: Optional[float] = Field(
-        default=None, description="Unix timestamp when started"
-    )
-    end_time: Optional[float] = Field(
-        default=None, description="Unix timestamp when ended"
-    )
+    start_time: Optional[float] = Field(default=None, description="Unix timestamp when started")
+    end_time: Optional[float] = Field(default=None, description="Unix timestamp when ended")
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Extra task metadata",
@@ -276,12 +274,8 @@ class RegisterDocumentRequest(BaseModel):
         ),
     )
 
-    file_type: Optional[str] = Field(
-        None, description="File type (auto-detected if not provided)"
-    )
-    doc_id: Optional[str] = Field(
-        None, description="Document ID (auto-generated if not provided)"
-    )
+    file_type: Optional[str] = Field(None, description="File type (auto-detected if not provided)")
+    doc_id: Optional[str] = Field(None, description="Document ID (auto-generated if not provided)")
     uploaded_at: Optional[datetime] = Field(
         None,
         description="Upload timestamp (defaults to now)",
@@ -301,9 +295,7 @@ class RegisterDocumentResponse(BaseModel):
 
     doc_id: str = Field(..., description="The document ID (generated or provided)")
 
-    created: bool = Field(
-        ..., description="True if new document created, False if existed"
-    )
+    created: bool = Field(..., description="True if new document created, False if existed")
 
     content_hash: str = Field(..., description="SHA256 hash of the document content")
 
@@ -334,15 +326,11 @@ class ParseDocumentRequest(BaseModel):
     collection: str = Field(..., description="Collection name for data isolation")
     doc_id: str = Field(..., description="Document ID to parse")
     parse_method: ParseMethod = Field(..., description="Parsing method to use")
-    params: Optional[Dict[str, Any]] = Field(
-        None, description="Optional parameters for parsing"
-    )
+    params: Optional[Dict[str, Any]] = Field(None, description="Optional parameters for parsing")
     user_id: Optional[int] = Field(
         None, description="User ID for multi-tenancy (None for legacy data)"
     )
-    is_admin: bool = Field(
-        False, description="Whether user is admin (can access all data)"
-    )
+    is_admin: bool = Field(False, description="Whether user is admin (can access all data)")
 
 
 class ParseDocumentResponse(BaseModel):
@@ -355,12 +343,8 @@ class ParseDocumentResponse(BaseModel):
 
     doc_id: str = Field(..., description="The document ID that was parsed")
     parse_hash: str = Field(..., description="SHA256 hash of parse configuration")
-    paragraphs: List[ParsedParagraph] = Field(
-        ..., description="List of parsed paragraphs"
-    )
-    written: bool = Field(
-        ..., description="True if parse record was written to database"
-    )
+    paragraphs: List[ParsedParagraph] = Field(..., description="List of parsed paragraphs")
+    written: bool = Field(..., description="True if parse record was written to database")
 
 
 # ------------------------- Parse Result Display schemas -------------------------
@@ -436,9 +420,7 @@ class ChunkDocumentRequest(BaseModel):
     collection: str = Field(..., description="Collection name for data isolation")
     doc_id: str = Field(..., description="Document ID to chunk")
     parse_hash: str = Field(..., description="Parse version hash to use as source")
-    chunk_strategy: ChunkStrategy = Field(
-        ..., description="Chunking strategy identifier"
-    )
+    chunk_strategy: ChunkStrategy = Field(..., description="Chunking strategy identifier")
     chunk_size: int = Field(
         ..., gt=0, description="Target chunk size in characters; must be positive"
     )
@@ -466,9 +448,7 @@ class ChunkDocumentResponse(BaseModel):
         ..., ge=0, description="Number of chunks produced; must be non-negative"
     )
     stats: Dict[str, Any] = Field(..., description="Chunk statistics")
-    created: bool = Field(
-        ..., description="True if chunk records were written to database"
-    )
+    created: bool = Field(..., description="True if chunk records were written to database")
 
 
 # ------------------------- Embed schemas -------------------------
@@ -518,9 +498,7 @@ class EmbeddingReadResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    chunks: List[ChunkForEmbedding] = Field(
-        ..., description="Chunks ready for embedding"
-    )
+    chunks: List[ChunkForEmbedding] = Field(..., description="Chunks ready for embedding")
     total_count: int = Field(
         ..., ge=0, description="Total number of chunks found; must be non-negative"
     )
@@ -555,12 +533,8 @@ class EmbeddingWriteRequest(BaseModel):
 
     collection: str = Field(..., description="Collection name for data isolation")
 
-    embeddings: List[ChunkEmbeddingData] = Field(
-        ..., description="List of embedding data to write"
-    )
-    create_index: bool = Field(
-        True, description="Whether to create/update index after writing"
-    )
+    embeddings: List[ChunkEmbeddingData] = Field(..., description="List of embedding data to write")
+    create_index: bool = Field(True, description="Whether to create/update index after writing")
 
 
 class EmbeddingWriteResponse(BaseModel):
@@ -576,9 +550,7 @@ class EmbeddingWriteResponse(BaseModel):
         ge=0,
         description="Number of stale embeddings deleted; must be non-negative",
     )
-    index_status: str = Field(
-        ..., description="Index operation status: created/updated/skipped"
-    )
+    index_status: str = Field(..., description="Index operation status: created/updated/skipped")
 
 
 # ------------------------- Search/Retrieval schemas -------------------------
@@ -636,9 +608,7 @@ class DenseSearchRequest(BaseModel):
 
     collection: str = Field(..., description="Collection name for data isolation")
     model_tag: str = Field(..., description="Embedding model identifier")
-    query_vector: List[float] = Field(
-        ..., description="Query vector for similarity search"
-    )
+    query_vector: List[float] = Field(..., description="Query vector for similarity search")
     top_k: int = Field(default=10, description="Number of top results to return")
     filters: Optional[Dict[str, Any]] = Field(
         default=None, description="Optional filters for search results"
@@ -668,13 +638,9 @@ class PerformanceImpact(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    expected_latency_ms: float = Field(
-        ..., description="Expected latency in milliseconds"
-    )
+    expected_latency_ms: float = Field(..., description="Expected latency in milliseconds")
     actual_latency_ms: float = Field(..., description="Actual latency in milliseconds")
-    degradation_reason: str = Field(
-        ..., description="Reason for performance degradation"
-    )
+    degradation_reason: str = Field(..., description="Reason for performance degradation")
 
 
 class FallbackInfo(BaseModel):
@@ -684,9 +650,7 @@ class FallbackInfo(BaseModel):
 
     applied: bool = Field(..., description="Whether fallback was applied")
     reason: str = Field(..., description="Reason for fallback")
-    performance_impact: PerformanceImpact = Field(
-        ..., description="Performance impact details"
-    )
+    performance_impact: PerformanceImpact = Field(..., description="Performance impact details")
 
 
 class DenseSearchResponse(BaseModel):
@@ -708,9 +672,7 @@ class DenseSearchResponse(BaseModel):
         default_factory=list, description="Warnings for degraded operations"
     )
     index_status: IndexStatus = Field(..., description="Current index status")
-    index_advice: Optional[str] = Field(
-        default=None, description="Human-readable index advice"
-    )
+    index_advice: Optional[str] = Field(default=None, description="Human-readable index advice")
     idempotency_key: Optional[str] = Field(
         default=None, description="Idempotency key for task deduplication"
     )
@@ -812,9 +774,7 @@ class HybridSearchResponse(BaseModel):
         description="Number of sparse results contributed; must be non-negative",
     )
     index_status: IndexStatus = Field(..., description="Dense index status")
-    index_advice: Optional[str] = Field(
-        default=None, description="Human-readable index advice"
-    )
+    index_advice: Optional[str] = Field(default=None, description="Human-readable index advice")
 
 
 class IndexResult(BaseModel):
@@ -832,9 +792,7 @@ class IndexResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: str = Field(..., description="Index creation status")
-    advice: Optional[str] = Field(
-        default=None, description="Human-readable index advice"
-    )
+    advice: Optional[str] = Field(default=None, description="Human-readable index advice")
     fts_enabled: bool = Field(
         default=False, description="Whether FTS index is enabled on text column"
     )
@@ -935,15 +893,11 @@ class GenerateResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    generated_text: str = Field(
-        description="The main text content generated by the LLM."
-    )
+    generated_text: str = Field(description="The main text content generated by the LLM.")
     status: Literal["success", "failed", "partial_success"] = Field(
         default="success", description="The status of the generation operation."
     )
-    model_name: str = Field(
-        description="The name of the LLM model used for generation."
-    )
+    model_name: str = Field(description="The name of the LLM model used for generation.")
     warnings: Optional[List[Dict[str, Any]]] = Field(
         default_factory=list,
         description="Optional list of warning details during generation.",
@@ -987,9 +941,7 @@ class PromptTemplate(BaseModel):
     name: str = Field(..., description="Human-readable name for the prompt template")
     template: str = Field(..., description="The actual prompt template content")
     version: int = Field(default=1, description="Version number of the prompt template")
-    is_latest: bool = Field(
-        default=True, description="Whether this is the latest version"
-    )
+    is_latest: bool = Field(default=True, description="Whether this is the latest version")
     metadata: Optional[str] = Field(
         default=None,
         description="Optional metadata as JSON string (author, description, tags, etc.)",
@@ -1201,9 +1153,7 @@ class IngestionResult(BaseModel):
     parse_hash: Optional[str] = Field(
         None, description="Parse hash produced during parse_document step"
     )
-    chunk_count: int = Field(
-        0, ge=0, description="Number of chunks created; must be non-negative"
-    )
+    chunk_count: int = Field(0, ge=0, description="Number of chunks created; must be non-negative")
     embedding_count: int = Field(
         0, ge=0, description="Number of embeddings generated; must be non-negative"
     )
@@ -1219,9 +1169,7 @@ class IngestionResult(BaseModel):
         None, description="Pipeline step where failure occurred, if any"
     )
     message: str = Field(..., description="Human-readable summary of pipeline result")
-    warnings: List[str] = Field(
-        default_factory=list, description="Non-fatal warnings encountered"
-    )
+    warnings: List[str] = Field(default_factory=list, description="Non-fatal warnings encountered")
     file_id: Optional[str] = Field(
         None,
         description="Uploaded file ID for preview/download via /api/files (when ingest registers the file)",
@@ -1265,20 +1213,12 @@ class DocumentProcessingRecord(BaseModel):
     processed_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    parse_duration_ms: Optional[int] = Field(
-        None, description="Parsing time in milliseconds"
-    )
-    chunk_duration_ms: Optional[int] = Field(
-        None, description="Chunking time in milliseconds"
-    )
-    embed_duration_ms: Optional[int] = Field(
-        None, description="Embedding time in milliseconds"
-    )
+    parse_duration_ms: Optional[int] = Field(None, description="Parsing time in milliseconds")
+    chunk_duration_ms: Optional[int] = Field(None, description="Chunking time in milliseconds")
+    embed_duration_ms: Optional[int] = Field(None, description="Embedding time in milliseconds")
 
     # 🏷️ Version control
-    processing_version: str = Field(
-        ..., description="Version of processing pipeline used"
-    )
+    processing_version: str = Field(..., description="Version of processing pipeline used")
 
 
 class CollectionDocumentMetadata(BaseModel):
@@ -1305,6 +1245,14 @@ class CollectionInfo(BaseModel):
 
     # Basic identifier
     name: str = Field(..., description="Collection identifier")
+    ownership: Literal["personal", "team"] = Field(
+        default="personal", description="Logical owner scope exposed by the web API"
+    )
+    storage_user_id: Optional[int] = Field(
+        default=None, description="Physical tenant id backing a team collection"
+    )
+    can_edit: bool = Field(default=True)
+    can_delete: bool = Field(default=True)
 
     # 🎯 Core binding: Embedding configuration (lazy initialization)
     embedding_model_id: Optional[str] = Field(
@@ -1332,9 +1280,7 @@ class CollectionInfo(BaseModel):
 
     # 📊 Statistics
     documents: int = Field(0, description="Total number of registered documents")
-    processed_documents: int = Field(
-        0, description="Number of successfully processed documents"
-    )
+    processed_documents: int = Field(0, description="Number of successfully processed documents")
     parses: int = Field(0, description="Number of parse records")
     chunks: int = Field(0, description="Number of chunk records")
     embeddings: int = Field(0, description="Number of embedding vectors")
@@ -1394,9 +1340,7 @@ class CollectionInfo(BaseModel):
     @property
     def is_initialized(self) -> bool:
         """Check if collection has been initialized with embedding config."""
-        return (
-            self.embedding_model_id is not None and self.embedding_dimension is not None
-        )
+        return self.embedding_model_id is not None and self.embedding_dimension is not None
 
     @classmethod
     def from_storage(cls, data: dict) -> "CollectionInfo":
@@ -1459,7 +1403,16 @@ class CollectionInfo(BaseModel):
         """
         import json
 
-        data = self.model_dump(exclude={"document_metadata", "rerank_model_id"})
+        data = self.model_dump(
+            exclude={
+                "document_metadata",
+                "rerank_model_id",
+                "ownership",
+                "storage_user_id",
+                "can_edit",
+                "can_delete",
+            }
+        )
 
         # Serialize complex types to JSON strings for LanceDB
         data["extra_metadata"] = json.dumps(data["extra_metadata"])
@@ -1509,9 +1462,7 @@ class DocumentStats(BaseModel):
     doc_id: str = Field(..., description="Document identifier inside the collection")
     document_exists: bool = Field(..., description="Whether the document record exists")
     parse_count: int = Field(0, description="Number of parse records for the document")
-    chunk_count: int = Field(
-        0, description="Number of chunks generated for the document"
-    )
+    chunk_count: int = Field(0, description="Number of chunks generated for the document")
     embedding_count: int = Field(
         0, description="Total number of embeddings across all matched tables"
     )
@@ -1558,12 +1509,8 @@ class DocumentInfo(BaseModel):
     collection: str = Field(..., description="Collection identifier")
     source_path: Optional[str] = Field(None, description="Source file path")
     file_type: Optional[str] = Field(None, description="File type")
-    status: Optional[str] = Field(
-        None, description="Processing status from ingestion_runs table"
-    )
-    message: Optional[str] = Field(
-        None, description="Status message from ingestion_runs table"
-    )
+    status: Optional[str] = Field(None, description="Processing status from ingestion_runs table")
+    message: Optional[str] = Field(None, description="Status message from ingestion_runs table")
     uploaded_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         description="Upload timestamp",
@@ -1643,9 +1590,7 @@ class DocumentRecordDetail(BaseModel):
         None, description="Stored (metadata) source path for the document"
     )
     file_type: Optional[str] = Field(None, description="Detected document file type")
-    content_hash: Optional[str] = Field(
-        None, description="SHA256 hash of the document content"
-    )
+    content_hash: Optional[str] = Field(None, description="SHA256 hash of the document content")
     uploaded_at: Optional[datetime] = Field(None, description="Upload timestamp")
     title: Optional[str] = Field(None, description="Optional document title")
     language: Optional[str] = Field(None, description="Optional document language")
@@ -1749,12 +1694,8 @@ class ParseRecordDetail(BaseModel):
     parse_hash: str = Field(..., description="Hash identifying the parse version")
     parser: Optional[str] = Field(None, description="Parser identifier and version")
     created_at: Optional[datetime] = Field(None, description="Parse creation timestamp")
-    params_json: Optional[str] = Field(
-        None, description="JSON-encoded parse parameters"
-    )
-    parsed_content: Optional[str] = Field(
-        None, description="JSON-encoded parsed paragraphs"
-    )
+    params_json: Optional[str] = Field(None, description="JSON-encoded parse parameters")
+    parsed_content: Optional[str] = Field(None, description="JSON-encoded parsed paragraphs")
     user_id: Optional[int] = Field(
         None, description="Owner user id for multi-tenancy (None for legacy data)"
     )
@@ -1893,15 +1834,11 @@ class EmbeddingRecordDetail(BaseModel):
     chunk_id: str = Field(..., description="Chunk identifier the vector belongs to")
     parse_hash: str = Field(..., description="Parse version the embedding belongs to")
     model: str = Field(..., description="Embedding model name")
-    vector: List[float] = Field(
-        default_factory=list, description="Embedding vector values"
-    )
+    vector: List[float] = Field(default_factory=list, description="Embedding vector values")
     vector_dimension: Optional[int] = Field(None, description="Stored vector dimension")
     text: Optional[str] = Field(None, description="Original chunk text")
     chunk_hash: Optional[str] = Field(None, description="Per-chunk content hash")
-    created_at: Optional[datetime] = Field(
-        None, description="Embedding creation timestamp"
-    )
+    created_at: Optional[datetime] = Field(None, description="Embedding creation timestamp")
     metadata: Optional[str] = Field(None, description="Serialized chunk metadata")
     user_id: Optional[int] = Field(
         None, description="Owner user id for multi-tenancy (None for legacy data)"
@@ -1920,9 +1857,7 @@ class EmbeddingRecordDetail(BaseModel):
             parse_hash=_clean_row_value(row.get("parse_hash")),
             model=_clean_row_value(row.get("model")),
             vector=[float(v) for v in vector] if vector is not None else [],
-            vector_dimension=(
-                int(vector_dimension) if vector_dimension is not None else None
-            ),
+            vector_dimension=(int(vector_dimension) if vector_dimension is not None else None),
             text=_clean_row_value(row.get("text")),
             chunk_hash=_clean_row_value(row.get("chunk_hash")),
             created_at=_clean_row_value(row.get("created_at")),
@@ -1977,9 +1912,7 @@ class EmbeddingRecordSnapshot(BaseModel):
 
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for record in self.records:
-            grouped.setdefault(to_model_tag(record.model), []).append(
-                record.to_legacy_dict()
-            )
+            grouped.setdefault(to_model_tag(record.model), []).append(record.to_legacy_dict())
         return grouped
 
 
@@ -1990,9 +1923,7 @@ class DocumentOperationResult(BaseModel):
 
     status: str = Field(..., description="Operation status: success|error")
     collection: str = Field(..., description="Collection identifier")
-    doc_id: str = Field(
-        ..., description="Document identifier affected by the operation"
-    )
+    doc_id: str = Field(..., description="Document identifier affected by the operation")
     new_status: DocumentProcessingStatus = Field(
         default=DocumentProcessingStatus.PENDING,
         description="Document status after the operation completes",
@@ -2013,9 +1944,7 @@ class CollectionOperationDetail(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    doc_id: str = Field(
-        ..., description="Document identifier affected by the operation"
-    )
+    doc_id: str = Field(..., description="Document identifier affected by the operation")
     status: DocumentProcessingStatus = Field(
         ..., description="Resulting status recorded for the document"
     )
@@ -2030,15 +1959,9 @@ class CollectionOperationResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    status: str = Field(
-        ..., description="Operation status: success|partial_success|error"
-    )
-    collection: str = Field(
-        ..., description="Collection identifier affected by the operation"
-    )
-    message: str = Field(
-        ..., description="Human-readable summary of the collection operation"
-    )
+    status: str = Field(..., description="Operation status: success|partial_success|error")
+    collection: str = Field(..., description="Collection identifier affected by the operation")
+    message: str = Field(..., description="Human-readable summary of the collection operation")
     warnings: List[str] = Field(
         default_factory=list,
         description="Non-fatal issues encountered while processing the collection",
@@ -2180,12 +2103,8 @@ class CrawlResult(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         description="When the page was crawled",
     )
-    content_length: int = Field(
-        ..., ge=0, description="Length of content in characters"
-    )
-    links_found: int = Field(
-        default=0, ge=0, description="Number of links found on this page"
-    )
+    content_length: int = Field(..., ge=0, description="Length of content in characters")
+    links_found: int = Field(default=0, ge=0, description="Number of links found on this page")
 
 
 class WebIngestionResult(BaseModel):
@@ -2204,24 +2123,16 @@ class WebIngestionResult(BaseModel):
     collection: str = Field(..., description="Target collection name")
 
     # Crawl statistics
-    total_urls_found: int = Field(
-        ..., ge=0, description="Total number of unique URLs discovered"
-    )
-    pages_crawled: int = Field(
-        ..., ge=0, description="Number of successfully crawled pages"
-    )
-    pages_failed: int = Field(
-        ..., ge=0, description="Number of pages that failed to crawl"
-    )
+    total_urls_found: int = Field(..., ge=0, description="Total number of unique URLs discovered")
+    pages_crawled: int = Field(..., ge=0, description="Number of successfully crawled pages")
+    pages_failed: int = Field(..., ge=0, description="Number of pages that failed to crawl")
 
     # Ingestion statistics
     documents_created: int = Field(
         ..., ge=0, description="Number of documents created in collection"
     )
     chunks_created: int = Field(..., ge=0, description="Total number of chunks created")
-    embeddings_created: int = Field(
-        ..., ge=0, description="Total number of embeddings generated"
-    )
+    embeddings_created: int = Field(..., ge=0, description="Total number of embeddings generated")
 
     # Details
     crawled_urls: List[str] = Field(
@@ -2234,9 +2145,7 @@ class WebIngestionResult(BaseModel):
     )
 
     message: str = Field(..., description="Human-readable summary message")
-    warnings: List[str] = Field(
-        default_factory=list, description="Non-critical warnings"
-    )
+    warnings: List[str] = Field(default_factory=list, description="Non-critical warnings")
     side_effects_may_remain: bool = Field(
         default=False,
         description=(
@@ -2244,6 +2153,4 @@ class WebIngestionResult(BaseModel):
             "side effects may still exist"
         ),
     )
-    elapsed_time_ms: int = Field(
-        ..., ge=0, description="Total elapsed time in milliseconds"
-    )
+    elapsed_time_ms: int = Field(..., ge=0, description="Total elapsed time in milliseconds")
