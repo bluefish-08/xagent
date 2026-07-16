@@ -2553,6 +2553,8 @@ Build when you need.`,
       connectorNotShared: {
         title: "Share resources first",
         desc: "This agent uses connectors or knowledge bases that are not yet shared with your team. Share them to continue.",
+        unresolvedDesc: "This agent references a connector that you cannot resolve. Share the connector with the team first, or remove the reference before continuing.",
+        unresolved: "cannot be resolved",
         shareAndContinue: "Share and continue",
         cancel: "Cancel",
       },

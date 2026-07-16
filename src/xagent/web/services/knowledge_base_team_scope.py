@@ -25,7 +25,9 @@ class KnowledgeBaseAccess:
 
 
 KnowledgeBaseVisibilityHook = Callable[[Any, int], list[KnowledgeBaseAccess]]
-KnowledgeBaseAccessHook = Callable[[Any, int, str, KnowledgeBaseAction], KnowledgeBaseAccess | None]
+KnowledgeBaseAccessHook = Callable[
+    [Any, int, str, KnowledgeBaseAction], KnowledgeBaseAccess | None
+]
 KnowledgeBaseLifecycleHook = Callable[[Any, int, str, str | None], None]
 
 _visibility_hook: KnowledgeBaseVisibilityHook | None = None
@@ -71,7 +73,9 @@ def resolve_knowledge_base_access(
     return KnowledgeBaseAccess(name=name, storage_user_id=int(user_id))
 
 
-def notify_knowledge_base_renamed(db: Any, user_id: int, old_name: str, new_name: str) -> None:
+def notify_knowledge_base_renamed(
+    db: Any, user_id: int, old_name: str, new_name: str
+) -> None:
     if _renamed_hook is not None and old_name != new_name:
         _renamed_hook(db, int(user_id), old_name, new_name)
 

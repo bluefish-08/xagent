@@ -38,6 +38,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { useEffect } from "react"
+import { sanitizeAppIntegrations } from "@/lib/team-sharing-sanitizers"
 
 import {
   isValidMcpName,
@@ -57,9 +58,15 @@ const MASKED_SECRET_VALUE = "********"
 // A connector's (type, numeric id) for the /api/connectors sharing endpoints.
 // Only connected connectors carry a numeric server_id; catalog entries without
 // one can't be shared/statused, so return null.
-const connectorRef = (app: { server_id?: number; transport?: string }) =>
-  Number.isInteger(app.server_id)
-    ? { type: app.transport === "custom_api" ? "custom_api" : "mcp", id: app.server_id as number }
+const connectorRef = (app: unknown) =>
+  app !== null &&
+  typeof app === "object" &&
+  Number.isInteger((app as { server_id?: unknown }).server_id)
+    ? {
+        type:
+          (app as { transport?: unknown }).transport === "custom_api" ? "custom_api" : "mcp",
+        id: (app as { server_id: number }).server_id,
+      }
     : null
 
 export type { AppIntegration } from "./types"
@@ -147,7 +154,7 @@ export function ConnectMcpDialog({
 
       const response = await apiRequest(`${getApiUrl()}/api/mcp/apps?${params.toString()}`)
       if (response.ok) {
-        const data: AppIntegration[] = (await response.json()) || []
+        const data = sanitizeAppIntegrations(await response.json())
         setApps(data)
         void loadSharingStatus(data)
       }

@@ -85,7 +85,9 @@ def validate_team_agent_knowledge_bases(
     )
 
 
-def get_agent_team_scope(db: Session, user_id: Optional[int]) -> Optional[AgentTeamScope]:
+def get_agent_team_scope(
+    db: Session, user_id: Optional[int]
+) -> Optional[AgentTeamScope]:
     """Return the caller's team scope, or ``None`` when unscoped."""
     if _agent_team_scope_hook is None or user_id is None:
         return None
@@ -111,7 +113,9 @@ def owns_agent(agent: Agent, user_id: int, scope: Optional[AgentTeamScope]) -> b
     return bool(scope.is_team_admin or agent.visibility == "team")
 
 
-def owned_agent_clause(user_id: int, scope: Optional[AgentTeamScope]) -> ColumnElement[bool]:
+def owned_agent_clause(
+    user_id: int, scope: Optional[AgentTeamScope]
+) -> ColumnElement[bool]:
     """Predicate for agents *user_id* may see/manage.
 
     - No scope (standalone / no hook): exactly ``Agent.user_id == user_id``.

@@ -386,7 +386,6 @@ def test_run_path_team_member_can_load_team_agent(db, two_users_one_team_via_sco
     from xagent.web.api.chat import _load_agent_for_task_create
     from xagent.web.models.agent import AgentStatus
     from xagent.web.services.agent_store import AgentStore
-
     from xagent.web.services.agent_team_scope import get_agent_team_scope
 
     admin, member = two_users_one_team_via_scope

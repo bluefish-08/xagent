@@ -457,12 +457,13 @@ async def delete_custom_api(
         )
     if team_delete.team_owned:
         db.delete(user_api)
-        db.flush()
-        remaining = (
-            db.query(UserCustomApi)
-            .filter(UserCustomApi.custom_api_id == api_id)
-            .first()
-        )
+        db.flush([user_api])
+        with db.no_autoflush:
+            remaining = (
+                db.query(UserCustomApi)
+                .filter(UserCustomApi.custom_api_id == api_id)
+                .first()
+            )
         if remaining is None and team_delete.delete_definition:
             db.delete(api)
     else:

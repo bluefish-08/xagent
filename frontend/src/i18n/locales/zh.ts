@@ -2553,6 +2553,8 @@ Build when you need.`,
       connectorNotShared: {
         title: "请先共享资源",
         desc: "此 Agent 使用了尚未共享给团队的连接器或知识库，请先共享它们再继续。",
+        unresolvedDesc: "此 Agent 引用了当前无法解析的连接器。请先将连接器共享给团队，或移除该引用后再继续。",
+        unresolved: "无法解析",
         shareAndContinue: "共享并继续",
         cancel: "取消",
       },

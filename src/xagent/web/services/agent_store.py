@@ -58,15 +58,18 @@ _VALID_VISIBILITIES = {"team", "admins"}
 
 
 class UnsharedConnectorsError(Exception):
-    """A team agent selects connectors not shared with its team.
+    """A team agent selects connectors not shared with or resolvable by its team.
 
     Carries the offending connectors so the API layer can surface them
-    (mapped to HTTP 422) and the frontend can prompt to share them first.
+    (mapped to HTTP 422) and the frontend can prompt the user to share or
+    correct the references.
     """
 
     def __init__(self, connectors: list) -> None:
         self.connectors = connectors
-        super().__init__("agent selects connectors not shared with the team")
+        super().__init__(
+            "agent selects connectors not shared with or resolvable by the team"
+        )
 
 
 class UnsharedKnowledgeBasesError(Exception):
@@ -95,9 +98,13 @@ def _assert_can_set_visibility(
     if visibility is not None and visibility not in _VALID_VISIBILITIES:
         raise ValueError(f"Unsupported agent visibility: {visibility}")
     if visibility == "admins" and not is_team_admin:
-        raise PermissionError("Only team admins can set an agent to admins-only visibility")
+        raise PermissionError(
+            "Only team admins can set an agent to admins-only visibility"
+        )
     if visibility is not None and current_visibility == "admins" and not is_team_admin:
-        raise PermissionError("Only team admins can change the visibility of an admins-only agent")
+        raise PermissionError(
+            "Only team admins can change the visibility of an admins-only agent"
+        )
 
 
 def clean_tool_categories(categories: Any) -> list[str]:
@@ -131,7 +138,9 @@ class AgentStore:
             "logo_url": agent.logo_url,
             "status": agent.status.value,
             "visibility": agent.visibility,
-            "published_at": agent.published_at.isoformat() if agent.published_at else None,
+            "published_at": agent.published_at.isoformat()
+            if agent.published_at
+            else None,
             "created_at": agent.created_at.isoformat(),
             "updated_at": agent.updated_at.isoformat(),
             "widget_enabled": agent.widget_enabled,
@@ -304,7 +313,9 @@ class AgentStore:
         self.db.commit()
         self.db.refresh(agent)
         # Agents are created personal (team_id NULL); promotion is explicit.
-        invalidate_agent_cache(user_id, int(agent.id), cast("int | None", agent.team_id))
+        invalidate_agent_cache(
+            user_id, int(agent.id), cast("int | None", agent.team_id)
+        )
         return agent
 
     def add_agent(
@@ -447,7 +458,9 @@ class AgentStore:
         agent = self.get_owned_agent(user_id, agent_id, team_scope)
         if agent is None:
             return None
-        _assert_can_set_visibility(scope, visibility, cast("str | None", agent.visibility))
+        _assert_can_set_visibility(
+            scope, visibility, cast("str | None", agent.visibility)
+        )
         unshared = validate_team_agent_connectors(
             self.db,
             user_id,
@@ -490,7 +503,9 @@ class AgentStore:
             return None
 
         self.db.query(AgentApiKey).filter(AgentApiKey.agent_id == agent_id).delete()
-        self.db.query(Task).filter(Task.agent_id == agent_id).update({Task.agent_id: None})
+        self.db.query(Task).filter(Task.agent_id == agent_id).update(
+            {Task.agent_id: None}
+        )
         self.db.delete(agent)
         self.db.commit()
         invalidate_agent_cache(user_id, agent_id, team_id_of(team_scope))

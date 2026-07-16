@@ -61,7 +61,9 @@ def visible_team_connector_ids(db: Any, user_id: int) -> dict[str, set[int]]:
     return _connector_visibility_hook(db, int(user_id))
 
 
-def credential_sharing_allowed(connector_type: ConnectorType, transport: str | None) -> bool:
+def credential_sharing_allowed(
+    connector_type: ConnectorType, transport: str | None
+) -> bool:
     """Whether a connector may share the owner's credential with the team.
     Single policy point. Standalone (no hook) -> False. Flip to re-enable later."""
     if _credential_policy_hook is None:
@@ -93,4 +95,6 @@ def rename_team_connector(
     """Keep application-owned connector selectors aligned after a rename."""
 
     if _connector_renamed_hook is not None and old_name != new_name:
-        _connector_renamed_hook(db, user_id, connector_type, connector_id, old_name, new_name)
+        _connector_renamed_hook(
+            db, user_id, connector_type, connector_id, old_name, new_name
+        )

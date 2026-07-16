@@ -51,6 +51,12 @@ import { TaskConversationPanel } from "@/components/task/task-conversation-panel
 import { AgentTriggersDialog } from "./agent-triggers-dialog"
 import { AgentFlowView } from "./agent-flow-view"
 import { AgentTrigger, AgentTriggerType, listAgentTriggers } from "@/lib/agent-triggers-api"
+import {
+  sanitizeUnsharedConnectors,
+  sanitizeUnsharedKnowledgeBases,
+  type UnsharedConnector,
+  type UnsharedKnowledgeBase,
+} from "@/lib/team-sharing-sanitizers"
 
 interface KnowledgeBase {
   name: string
@@ -191,13 +197,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [createdAgent, setCreatedAgent] = useState<any>(null)
   // Connectors referenced by an agent that isn't yet team-shared. Populated from
   // a 422 promote-team response so the user can share them and retry.
-  const [unsharedConnectors, setUnsharedConnectors] = useState<
-    { type: string; id: number | string; name: string }[]
-  >([])
+  const [unsharedConnectors, setUnsharedConnectors] = useState<UnsharedConnector[]>([])
   const [unsharedKnowledgeBases, setUnsharedKnowledgeBases] = useState<
-    { name: string }[]
+    UnsharedKnowledgeBase[]
   >([])
   const [isSharingConnectors, setIsSharingConnectors] = useState(false)
+  const hasUnresolvedConnectors = unsharedConnectors.some((c) => c.reason === "unresolved")
   const [templateRequirements, setTemplateRequirements] = useState<TemplateRequirements | null>(null)
 
   // Data State
@@ -1021,10 +1026,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       })
       if (res.status === 422) {
         const body = await res.json().catch(() => ({}))
-        const connectors = Array.isArray(body?.detail?.unshared_connectors) ? body.detail.unshared_connectors : []
-        const knowledgeBases = Array.isArray(body?.detail?.unshared_knowledge_bases)
-          ? body.detail.unshared_knowledge_bases
-          : []
+        const connectors = sanitizeUnsharedConnectors(body?.detail?.unshared_connectors)
+        const knowledgeBases = sanitizeUnsharedKnowledgeBases(
+          body?.detail?.unshared_knowledge_bases,
+        )
         if (connectors.length > 0 || knowledgeBases.length > 0) {
           setUnsharedConnectors(connectors)
           setUnsharedKnowledgeBases(knowledgeBases)
@@ -1062,6 +1067,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     setIsSharingConnectors(true)
     try {
       for (const c of unsharedConnectors) {
+        if (c.reason === "unresolved" || c.id == null) continue
         const res = await apiRequest(
           `${getApiUrl()}/api/connectors/${c.type}/${c.id}/share`,
           { method: "POST" },
@@ -2485,12 +2491,19 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <DialogHeader>
             <DialogTitle>{t("builds.configForm.connectorNotShared.title")}</DialogTitle>
             <DialogDescription>
-              {t("builds.configForm.connectorNotShared.desc")}
+              {t(
+                hasUnresolvedConnectors
+                  ? "builds.configForm.connectorNotShared.unresolvedDesc"
+                  : "builds.configForm.connectorNotShared.desc",
+              )}
             </DialogDescription>
           </DialogHeader>
           <ul className="list-disc pl-5 text-sm space-y-1">
             {unsharedConnectors.map((c) => (
-              <li key={`${c.type}:${c.id}`}>{c.name}</li>
+              <li key={`${c.type}:${c.id ?? c.name}`}>
+                {c.name}
+                {c.reason === "unresolved" && ` — ${t("builds.configForm.connectorNotShared.unresolved")}`}
+              </li>
             ))}
             {unsharedKnowledgeBases.map((kb) => (
               <li key={`kb:${kb.name}`}>{kb.name}</li>
@@ -2501,10 +2514,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               <Button variant="outline" onClick={handleCancelShareConnectors} disabled={isSharingConnectors}>
                 {t("builds.configForm.connectorNotShared.cancel")}
               </Button>
-              <Button onClick={handleShareConnectorsAndContinue} disabled={isSharingConnectors}>
-                {isSharingConnectors && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                {t("builds.configForm.connectorNotShared.shareAndContinue")}
-              </Button>
+              {!hasUnresolvedConnectors && (
+                <Button onClick={handleShareConnectorsAndContinue} disabled={isSharingConnectors}>
+                  {isSharingConnectors && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  {t("builds.configForm.connectorNotShared.shareAndContinue")}
+                </Button>
+              )}
             </div>
           </DialogFooter>
         </DialogContent>

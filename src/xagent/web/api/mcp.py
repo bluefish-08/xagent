@@ -1330,7 +1330,9 @@ def _merge_masked_env(new_env: dict, old_env: dict) -> dict:
 
 
 def _check_mcp_permission(
-    user_mcp: UserMCPServer, is_admin: bool, require: str = "edit"
+    user_mcp: "UserMCPServer | _TeamOwnedUserMCP",
+    is_admin: bool,
+    require: str = "edit",
 ) -> bool:
     """Whether the user may mutate shared MCP config.
 
@@ -1431,7 +1433,7 @@ class _TeamOwnedUserApi:
 
 def _db_server_to_response(
     server: MCPServer,
-    user_mcp: UserMCPServer,
+    user_mcp: UserMCPServer | _TeamOwnedUserMCP,
     manager: DatabaseMCPServerManager,
     connected_account: Optional[str] = None,
     app_id: Optional[str] = None,
@@ -1481,7 +1483,7 @@ def _db_server_to_response(
 
 def _custom_api_to_mcp_response(
     api: CustomApi,
-    user_api: UserCustomApi,
+    user_api: UserCustomApi | _TeamOwnedUserApi,
 ) -> MCPServerResponse:
     """Project a Custom API into the aggregate connector response contract."""
     masked_env: dict[str, Any] = _mask_env(api.env) if isinstance(api.env, dict) else {}
@@ -2104,9 +2106,7 @@ def get_mcp_servers(
                 )
 
         own_api_ids = {int(api.id) for _ua, api in user_custom_apis}
-        missing_api = [
-            aid for aid in team_ids["custom_api"] if aid not in own_api_ids
-        ]
+        missing_api = [aid for aid in team_ids["custom_api"] if aid not in own_api_ids]
         if missing_api:
             for api in db.query(CustomApi).filter(CustomApi.id.in_(missing_api)).all():
                 responses.append(
