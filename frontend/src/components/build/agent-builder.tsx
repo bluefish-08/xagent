@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { apiRequest } from "@/lib/api-wrapper"
 import { getApiUrl } from "@/lib/utils"
-import { isBuiltinModel } from "@/lib/models"
+import { isBuiltinModel, hostnameFromUrl } from "@/lib/models"
 import { PlusCircle, MessageSquare, Upload, Settings2, Check, Zap, BookOpen, Gauge, Sparkles, Loader2, X, XCircle, Trash2, Bot, Brain, Webhook, CalendarClock, Mail, Eye, Workflow } from "lucide-react"
 import { ConnectMcpDialog } from "@/components/mcp/connect-mcp-dialog"
 import { useI18n } from "@/contexts/i18n-context"
@@ -725,14 +725,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }))
 
   const modelHost = (model: Model): string => {
-    let host = ""
-    if (model.base_url) {
-      try {
-        host = new URL(model.base_url).hostname
-      } catch {
-        host = model.base_url
-      }
-    }
+    const host = hostnameFromUrl(model.base_url)
     return host ? `${host} (${model.model_provider})` : model.model_provider
   }
 

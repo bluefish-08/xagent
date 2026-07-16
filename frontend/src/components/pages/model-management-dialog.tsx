@@ -15,6 +15,7 @@ import { apiRequest } from "@/lib/api-wrapper"
 import {
   DefaultModelType,
   getProviderModels,
+  hostnameFromUrl,
   isBuiltinModel,
   ProviderModel,
   removeUserDefaultModel,
@@ -258,12 +259,7 @@ export function ModelManagementDialog({
 
   const getProviderHost = (model: Model) => {
     const url = model.base_url || getDefaultBaseUrlForProvider(model.model_provider, model.category)
-    if (!url) return ""
-    try {
-      return new URL(url).hostname
-    } catch {
-      return url
-    }
+    return hostnameFromUrl(url)
   }
 
   // Determine initial form data based on editing model or prefill provider
@@ -767,6 +763,7 @@ export function ModelManagementDialog({
                   {managingProviderModels.map(model => {
                     const defaultTypes = getModelDefaultTypes(model.id)
                     const audioTypeLabels = getAudioTypeLabels(model)
+                    const host = getProviderHost(model)
                     return (
                       <div key={model.model_id} className="flex items-center justify-between p-4">
                         <div>
@@ -804,11 +801,11 @@ export function ModelManagementDialog({
                               </Badge>
                             )}
                           </div>
-                          {getProviderHost(model) && (
+                          {host && (
                             <div className="mt-1">
                               <Badge variant="outline" className="font-normal text-muted-foreground">
                                 <Globe />
-                                {getProviderHost(model)}
+                                {host}
                               </Badge>
                             </div>
                           )}

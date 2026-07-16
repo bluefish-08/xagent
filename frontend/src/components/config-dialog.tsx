@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Settings, X, Loader2, ArrowRight } from "lucide-react"
 import { getApiUrl } from "@/lib/utils"
 import { apiRequest } from "@/lib/api-wrapper"
-import { isBuiltinModel } from "@/lib/models"
+import { isBuiltinModel, hostnameFromUrl } from "@/lib/models"
 import { useAuth } from "@/contexts/auth-context"
 import { Select } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
@@ -66,14 +66,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
   // Provider host line shown under the model name: "hostname (provider)",
   // falling back to just the provider when there's no base_url.
   const modelHost = (m: Model): string => {
-    let host = ""
-    if (m.base_url) {
-      try {
-        host = new URL(m.base_url).hostname
-      } catch {
-        host = m.base_url
-      }
-    }
+    const host = hostnameFromUrl(m.base_url)
     return host ? `${host} (${m.model_provider})` : m.model_provider
   }
 
@@ -232,6 +225,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                       value: m.model_id,
                       label: m.model_name,
                       host: modelHost(m),
+                      description: m.model_id,
                       isBuiltin: isBuiltinModel(m),
                       isDefault: m.is_default,
                       isSmallFast: m.is_small_fast,
@@ -258,6 +252,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                         value: m.model_id,
                         label: m.model_name,
                         host: modelHost(m),
+                        description: m.model_id,
                         isBuiltin: isBuiltinModel(m),
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
@@ -285,6 +280,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                         value: m.model_id,
                         label: m.model_name,
                         host: modelHost(m),
+                        description: m.model_id,
                         isBuiltin: isBuiltinModel(m),
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
@@ -312,6 +308,7 @@ export function ConfigDialog({ onConfigChange, currentConfig, trigger }: ConfigD
                         value: m.model_id,
                         label: m.model_name,
                         host: modelHost(m),
+                        description: m.model_id,
                         isBuiltin: isBuiltinModel(m),
                         isDefault: m.is_default,
                         isSmallFast: m.is_small_fast,
