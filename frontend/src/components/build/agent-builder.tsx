@@ -735,6 +735,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       value: model.id.toString(),
       label: model.model_name,
       host: modelHost(model),
+      description: model.model_id,
       isBuiltin: isBuiltinModel(model),
       isDefault: model.is_default,
       isSmallFast: model.is_small_fast,
