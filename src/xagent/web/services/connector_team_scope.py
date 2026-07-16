@@ -1,8 +1,8 @@
 """Optional application hooks for team-owned MCP and Custom API connectors.
 
-Standalone xagent keeps connectors user-owned.  A multi-tenant application can
-install these hooks to materialize team access in the existing per-user
-junction tables without teaching xagent about the application's team tables.
+Standalone xagent keeps connectors user-owned. A multi-tenant application can
+install these hooks to overlay team visibility without teaching xagent about
+the application's team tables.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ConnectorType = Literal["mcp", "custom_api"]
-ConnectorSharedHook = Callable[[Any, int, ConnectorType, int], None]
 ConnectorRenamedHook = Callable[[Any, int, ConnectorType, int, str, str], None]
 
 
@@ -28,7 +27,6 @@ ConnectorDeletedHook = Callable[[Any, int, ConnectorType, int], ConnectorDeleteD
 ConnectorVisibilityHook = Callable[[Any, int], dict[str, set[int]]]
 CredentialPolicyHook = Callable[[ConnectorType, str | None], bool]
 
-_connector_shared_hook: ConnectorSharedHook | None = None
 _connector_deleted_hook: ConnectorDeletedHook | None = None
 _connector_renamed_hook: ConnectorRenamedHook | None = None
 _connector_visibility_hook: ConnectorVisibilityHook | None = None
@@ -37,7 +35,6 @@ _credential_policy_hook: CredentialPolicyHook | None = None
 
 def set_connector_team_hooks(
     *,
-    shared: ConnectorSharedHook | None = None,
     deleted: ConnectorDeletedHook | None = None,
     renamed: ConnectorRenamedHook | None = None,
     visibility: ConnectorVisibilityHook | None = None,
@@ -45,9 +42,8 @@ def set_connector_team_hooks(
 ) -> None:
     """Install application-owned connector lifecycle hooks."""
 
-    global _connector_shared_hook, _connector_deleted_hook, _connector_renamed_hook
+    global _connector_deleted_hook, _connector_renamed_hook
     global _connector_visibility_hook, _credential_policy_hook
-    _connector_shared_hook = shared
     _connector_deleted_hook = deleted
     _connector_renamed_hook = renamed
     _connector_visibility_hook = visibility
@@ -67,15 +63,6 @@ def credential_sharing_allowed(connector_type: ConnectorType, transport: str | N
     if _credential_policy_hook is None:
         return False
     return bool(_credential_policy_hook(connector_type, transport))
-
-
-def share_connector_with_team(
-    db: Any, user_id: int, connector_type: ConnectorType, connector_id: int
-) -> None:
-    """Notify the application that a user connected or created a connector."""
-
-    if _connector_shared_hook is not None:
-        _connector_shared_hook(db, user_id, connector_type, connector_id)
 
 
 def delete_team_connector(
