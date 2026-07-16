@@ -36,8 +36,15 @@ from ..services.agent_management import (
     DuplicateAgentNameError,
     TemplateNotFoundError,
 )
-from ..services.agent_store import AgentStore, new_widget_key
-from ..services.agent_team_scope import get_agent_team_scope, owned_agent_clause
+from ..services.agent_store import (
+    AgentStore,
+    UnsharedConnectorsError,
+    new_widget_key,
+)
+from ..services.agent_team_scope import (
+    get_agent_team_scope,
+    owned_agent_clause,
+)
 from ..services.api_keys import AgentApiKeyService, KeyRotationConflict
 from ..services.llm_utils import UserAwareModelStorage
 from ..services.workforce_access import get_visible_agent_ids
@@ -716,12 +723,93 @@ async def update_agent(
 
     except HTTPException:
         raise
+    except UnsharedConnectorsError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent uses connectors not shared with the team",
+                "unshared_connectors": e.connectors,
+            },
+        ) from e
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to update agent {agent_id}: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class PromoteTeamRequest(BaseModel):
+    """Request model for promoting a personal agent to team-owned."""
+
+    visibility: Literal["team", "admins"] = "team"
+
+
+@router.post("/{agent_id}/promote-team", response_model=AgentResponse)
+async def promote_agent_to_team(
+    agent_id: int,
+    body: PromoteTeamRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
+    """Promote a personal agent to team-owned.
+
+    Requires a team scope (the caller belongs to a team). Fails with 422 and
+    the offending connectors when the agent selects connectors not yet shared
+    with the team.
+    """
+    try:
+        store = AgentStore(db)
+        user_id = int(current_user.id)
+        scope = get_agent_team_scope(db, user_id)
+        if scope is None:
+            raise HTTPException(status_code=400, detail="No team to promote into")
+        visibility = (body or PromoteTeamRequest()).visibility
+        agent = store.promote_agent_to_team(
+            user_id, agent_id, scope, visibility=visibility
+        )
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return AgentResponse.model_validate(store.agent_to_response_dict(agent))
+    except HTTPException:
+        raise
+    except UnsharedConnectorsError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent uses connectors not shared with the team",
+                "unshared_connectors": e.connectors,
+            },
+        ) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except Exception as e:
+        logger.error(f"Failed to promote agent {agent_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/{agent_id}/demote-personal", response_model=AgentResponse)
+async def demote_agent_to_personal(
+    agent_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AgentResponse:
+    """Revert a team agent back to personal ownership."""
+    try:
+        store = AgentStore(db)
+        agent = store.demote_agent_to_personal(int(current_user.id), agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return AgentResponse.model_validate(store.agent_to_response_dict(agent))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to demote agent {agent_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.delete("/{agent_id}")

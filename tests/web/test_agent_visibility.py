@@ -387,8 +387,11 @@ def test_run_path_team_member_can_load_team_agent(db, two_users_one_team_via_sco
     from xagent.web.models.agent import AgentStatus
     from xagent.web.services.agent_store import AgentStore
 
+    from xagent.web.services.agent_team_scope import get_agent_team_scope
+
     admin, member = two_users_one_team_via_scope
     store = AgentStore(db)
+    admin_scope = get_agent_team_scope(db, int(admin.id))
     team_agent = store.create_agent(
         user_id=int(admin.id),
         name="TeamRun",
@@ -396,13 +399,16 @@ def test_run_path_team_member_can_load_team_agent(db, two_users_one_team_via_sco
         instructions=None,
         status=AgentStatus.PUBLISHED,
     )
+    store.promote_agent_to_team(int(admin.id), int(team_agent.id), admin_scope)
     secret = store.create_agent(
         user_id=int(admin.id),
         name="AdminRun",
         description=None,
         instructions=None,
-        visibility="admins",
         status=AgentStatus.PUBLISHED,
+    )
+    store.promote_agent_to_team(
+        int(admin.id), int(secret.id), admin_scope, visibility="admins"
     )
     assert _load_agent_for_task_create(db, member, int(team_agent.id)) is not None
     assert _load_agent_for_task_create(db, member, int(secret.id)) is None

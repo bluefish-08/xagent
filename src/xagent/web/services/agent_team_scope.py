@@ -26,11 +26,42 @@ class AgentTeamScope:
 
 _agent_team_scope_hook = None  # (db, user_id) -> AgentTeamScope | None
 
+# (db, user_id, team_id, tool_categories) -> list of unshared connector dicts.
+_team_agent_connector_validator = None
+
 
 def set_agent_team_scope_hook(hook: Any) -> None:
     """Install (or clear, with ``None``) the user-id -> AgentTeamScope resolver."""
     global _agent_team_scope_hook
     _agent_team_scope_hook = hook
+
+
+def set_team_agent_connector_validator(fn: Any) -> None:
+    """Install (or clear, with ``None``) the team-agent connector validator.
+
+    The SaaS overlay installs a function that, given an agent's selected
+    connectors (via ``tool_categories``), returns the ones not yet shared with
+    the team. Standalone xagent leaves it unset so promotion imposes no
+    connector constraint.
+    """
+    global _team_agent_connector_validator
+    _team_agent_connector_validator = fn
+
+
+def validate_team_agent_connectors(
+    db: Session, user_id: int, team_id: int, tool_categories: Any
+) -> list:
+    """Return the agent's selected connectors that are not shared with the team.
+
+    Empty list when no validator is installed (standalone) or nothing is
+    unshared. Each item is a ``{"type", "id", "name"}`` dict.
+    """
+    if _team_agent_connector_validator is None:
+        return []
+    return cast(
+        list,
+        _team_agent_connector_validator(db, user_id, team_id, tool_categories),
+    )
 
 
 def get_agent_team_scope(

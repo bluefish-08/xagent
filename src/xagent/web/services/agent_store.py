@@ -16,6 +16,7 @@ from .agent_team_scope import (
     get_agent_team_scope,
     owned_agent_clause,
     team_id_of,
+    validate_team_agent_connectors,
 )
 from .hot_path_cache import (
     agent_detail_key,
@@ -53,6 +54,18 @@ _UNRESOLVED = object()
 
 
 _VALID_VISIBILITIES = {"team", "admins"}
+
+
+class UnsharedConnectorsError(Exception):
+    """A team agent selects connectors not shared with its team.
+
+    Carries the offending connectors so the API layer can surface them
+    (mapped to HTTP 422) and the frontend can prompt to share them first.
+    """
+
+    def __init__(self, connectors: list) -> None:
+        self.connectors = connectors
+        super().__init__("agent selects connectors not shared with the team")
 
 
 def _assert_can_set_visibility(
@@ -287,7 +300,7 @@ class AgentStore:
         )
         self.db.commit()
         self.db.refresh(agent)
-        # add_agent already stamped agent.team_id from the resolved scope.
+        # Agents are created personal (team_id NULL); promotion is explicit.
         invalidate_agent_cache(
             user_id, int(agent.id), cast("int | None", agent.team_id)
         )
@@ -323,9 +336,13 @@ class AgentStore:
         team_scope = get_agent_team_scope(self.db, user_id)
         _assert_can_set_visibility(team_scope, visibility)
         widget_key = new_widget_key() if widget_enabled else None
+        # Agents are created personal (team_id NULL). Team ownership is granted
+        # only by an explicit promote (see ``promote_agent_to_team``); a create
+        # never stamps the caller's team. ``visibility`` is stored but only
+        # takes effect once the agent is a team agent.
         agent = Agent(
             user_id=user_id,
-            team_id=team_id_of(team_scope),
+            team_id=None,
             name=name,
             description=description,
             instructions=instructions,
@@ -373,6 +390,18 @@ class AgentStore:
                 cast("str | None", agent.visibility),
             )
 
+        # A team agent (team_id set) may only select connectors already shared
+        # with its team. Re-validate when its connector selection changes.
+        if agent.team_id is not None and "tool_categories" in updates:
+            unshared = validate_team_agent_connectors(
+                self.db,
+                user_id,
+                int(agent.team_id),
+                clean_tool_categories(updates.get("tool_categories")),
+            )
+            if unshared:
+                raise UnsharedConnectorsError(unshared)
+
         unknown_fields = set(updates) - _AGENT_UPDATE_FIELDS
         if unknown_fields:
             raise ValueError(
@@ -384,6 +413,52 @@ class AgentStore:
                 value = clean_tool_categories(value)
             setattr(agent, field, value)
 
+        self.db.commit()
+        self.db.refresh(agent)
+        invalidate_agent_cache(user_id, agent_id, team_id_of(team_scope))
+        return agent
+
+    def promote_agent_to_team(
+        self,
+        user_id: int,
+        agent_id: int,
+        scope: Any,
+        *,
+        visibility: str = "team",
+    ) -> Agent | None:
+        """Make a personal agent team-owned, gated on shared connectors.
+
+        Validates that every connector the agent selects is already shared
+        with ``scope.team_id`` (raising :class:`UnsharedConnectorsError` with
+        the offenders otherwise), then stamps ``team_id`` + ``visibility``.
+        """
+        team_scope = get_agent_team_scope(self.db, user_id)
+        agent = self.get_owned_agent(user_id, agent_id, team_scope)
+        if agent is None:
+            return None
+        _assert_can_set_visibility(scope, visibility, cast("str | None", agent.visibility))
+        unshared = validate_team_agent_connectors(
+            self.db,
+            user_id,
+            int(scope.team_id),
+            clean_tool_categories(agent.tool_categories),
+        )
+        if unshared:
+            raise UnsharedConnectorsError(unshared)
+        agent.team_id = scope.team_id
+        agent.visibility = visibility
+        self.db.commit()
+        self.db.refresh(agent)
+        invalidate_agent_cache(user_id, agent_id, team_id_of(team_scope))
+        return agent
+
+    def demote_agent_to_personal(self, user_id: int, agent_id: int) -> Agent | None:
+        """Revert a team agent to personal (team_id NULL)."""
+        team_scope = get_agent_team_scope(self.db, user_id)
+        agent = self.get_owned_agent(user_id, agent_id, team_scope)
+        if agent is None:
+            return None
+        agent.team_id = None  # type: ignore[assignment]
         self.db.commit()
         self.db.refresh(agent)
         invalidate_agent_cache(user_id, agent_id, team_id_of(team_scope))
