@@ -508,6 +508,9 @@ class AgentStore:
                 "Only a team admin or the agent creator can make it personal"
             )
         agent.team_id = None  # type: ignore[assignment]
+        # Reset to the default so a restrictive value (e.g. "admins") cannot
+        # survive on a personal agent, where the visibility control is hidden.
+        agent.visibility = "team"  # type: ignore[assignment]
         self.db.commit()
         self.db.refresh(agent)
         invalidate_agent_cache(user_id, agent_id, team_id_of(team_scope))

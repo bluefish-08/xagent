@@ -404,6 +404,36 @@ def test_non_admin_cannot_demote_teammates_team_agent(db, two_users_one_team_via
     assert db.get(Agent, int(agent.id)).team_id == 300
 
 
+def test_demote_resets_admins_visibility_to_default(db, two_users_one_team_via_scope):
+    """A restrictive visibility must not survive demotion.
+
+    Otherwise the value is stranded on a personal agent (the UI hides the
+    control) and, once saved, trips the team-admin visibility guard on every
+    later save. Demote resets it to the default so ordinary saves stay valid.
+    """
+    from xagent.web.services.agent_store import AgentStore
+    from xagent.web.services.agent_team_scope import get_agent_team_scope
+
+    admin, _member = two_users_one_team_via_scope
+    store = AgentStore(db)
+    agent = store.create_agent(
+        user_id=int(admin.id), name="Restricted", description=None, instructions=None
+    )
+    store.promote_agent_to_team(
+        int(admin.id),
+        int(agent.id),
+        get_agent_team_scope(db, int(admin.id)),
+        visibility="admins",
+    )
+    assert db.get(Agent, int(agent.id)).visibility == "admins"
+
+    store.demote_agent_to_personal(int(admin.id), int(agent.id))
+
+    demoted = db.get(Agent, int(agent.id))
+    assert demoted.team_id is None
+    assert demoted.visibility == "team"
+
+
 def test_run_path_team_member_can_load_team_agent(db, two_users_one_team_via_scope):
     """#2: a teammate can load a team-visible agent for a task; admins-only
     stays hidden from a non-admin runner."""

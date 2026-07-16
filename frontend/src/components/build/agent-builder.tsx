@@ -1168,9 +1168,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           knowledge_bases: selectedKbs,
           skills: selectedSkills,
           tool_categories: finalToolCategories,
-          // Sent so a visibility-only change on an already team-owned agent is
-          // persisted; promote-team/demote handle the ownership transitions.
-          visibility,
+          // Only meaningful for team agents; sending it for a personal agent
+          // could trip the team-admin visibility guard on an ordinary save.
+          // Ownership transitions go through promote-team/demote-personal.
+          ...(ownership === "team" ? { visibility } : {}),
           logo_base64,
         }),
       })
