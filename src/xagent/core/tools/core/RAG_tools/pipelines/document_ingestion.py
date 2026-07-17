@@ -1184,7 +1184,28 @@ def _process_document_impl(
                         batch_texts,
                         batch_index=idx,
                     )
-                    raw_vectors = embedding_adapter.encode(batch_texts)
+                    # Retry transient provider failures with linear backoff,
+                    # mirroring the async path. Runs in a worker thread, so a
+                    # blocking time.sleep between attempts is fine. A size
+                    # mismatch is deterministic and stays terminal (not retried).
+                    attempts = max(1, cfg.max_retries)
+                    raw_vectors = None
+                    for attempt in range(attempts):
+                        try:
+                            raw_vectors = embedding_adapter.encode(batch_texts)
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if attempt >= attempts - 1:
+                                raise
+                            logger.warning(
+                                "[RAG][embedding] batch encode failed "
+                                "(batch_index=%s attempt=%s/%s): %s",
+                                idx,
+                                attempt + 1,
+                                attempts,
+                                exc,
+                            )
+                            time.sleep(cfg.retry_delay * (attempt + 1))
                     vectors = normalize_raw_embedding_to_vectors(raw_vectors)
                     if len(vectors) != len(batch_chunks):
                         raise VectorValidationError(

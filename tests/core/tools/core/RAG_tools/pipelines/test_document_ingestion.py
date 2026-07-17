@@ -1265,3 +1265,54 @@ def test_batch_embedding_concurrency_one_stays_serial(
     assert result.status == "success"
     assert max_inflight == 1
     assert [e.chunk_id for e in written] == [f"chunk-{i}" for i in range(6)]
+
+
+def test_batch_embedding_retries_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient encode() failure in the sync batch path must be retried
+    (parity with the async path) instead of failing the whole document."""
+    _patch_pipeline_dependencies(monkeypatch)
+
+    chunks = _make_chunks(2)  # one batch of 2 at batch_size=2
+    read_response = EmbeddingReadResponse(
+        chunks=chunks, total_count=2, pending_count=2
+    ).model_dump()
+    monkeypatch.setattr(
+        document_ingestion, "read_chunks_for_embedding", lambda **_: read_response
+    )
+
+    calls = {"n": 0}
+
+    class _FlakyAdapter(_StubEmbeddingAdapter):
+        def encode(self, text, dimension=None, instruct=None):  # type: ignore[override]
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient 429")
+            return super().encode(text, dimension, instruct)
+
+    stub_config = EmbeddingModelConfig(
+        id="embedding-default",
+        model_name="text-embedding-v3",
+        model_provider="dashscope",
+        dimension=2,
+    )
+    monkeypatch.setattr(
+        document_ingestion,
+        "_resolve_embedding_adapter",
+        lambda _cfg: (stub_config, _FlakyAdapter()),
+    )
+
+    result = document_ingestion.process_document(
+        collection="demo",
+        source_path="/tmp/doc.md",
+        config=IngestionConfig(
+            embedding_use_async=False,
+            embedding_batch_size=2,
+            embedding_concurrent=1,
+            max_retries=3,
+        ),
+    )
+
+    assert result.status == "success"
+    assert calls["n"] == 2  # first attempt raised, retry succeeded

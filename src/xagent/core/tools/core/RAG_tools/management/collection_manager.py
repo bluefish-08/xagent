@@ -68,16 +68,20 @@ def _get_collection_thread_lock(collection_name: str) -> threading.RLock:
 class _CollectionThreadGuard:
     """Async-context wrapper around a collection's cross-thread RLock.
 
-    Usable in ``async with`` alongside the asyncio lock. Acquire is a brief
-    blocking call; the enclosing asyncio lock guarantees we never re-enter on the
-    same event loop while the lock is held across an await.
+    Usable in ``async with`` alongside the asyncio lock. Acquired via a
+    non-blocking poll so we never freeze the event loop this coroutine runs on
+    while a different thread holds the lock: yielding with ``asyncio.sleep``
+    lets other tasks on the same loop keep running. The enclosing asyncio lock
+    guarantees we never re-enter on the same event loop while the lock is held
+    across an await; the RLock is reentrant regardless.
     """
 
     def __init__(self, collection_name: str) -> None:
         self._lock = _get_collection_thread_lock(collection_name)
 
     async def __aenter__(self) -> "_CollectionThreadGuard":
-        self._lock.acquire()
+        while not self._lock.acquire(blocking=False):
+            await asyncio.sleep(0.005)
         return self
 
     async def __aexit__(self, *exc: object) -> None:

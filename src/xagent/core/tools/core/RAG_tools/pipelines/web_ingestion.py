@@ -801,13 +801,30 @@ async def _run_web_ingestion_impl(
             async with page_semaphore:
                 await _process_page(i, crawl_result)
 
-        await asyncio.gather(
-            *(
-                _guarded_page(i, crawl_result)
-                for i, crawl_result in enumerate(crawl_results)
-                if crawl_result.status == "success"
-            )
+        pending_pages = [
+            (i, crawl_result)
+            for i, crawl_result in enumerate(crawl_results)
+            if crawl_result.status == "success"
+        ]
+        # return_exceptions=True so an unexpected error in one page (e.g. from
+        # web_page_operation or progress_callback, outside _process_page's own
+        # handling) can't abort every other in-flight page. _process_page records
+        # expected per-page failures itself; here we only surface the escapees.
+        page_outcomes = await asyncio.gather(
+            *(_guarded_page(i, crawl_result) for i, crawl_result in pending_pages),
+            return_exceptions=True,
         )
+        for (_, crawl_result), outcome in zip(pending_pages, page_outcomes):
+            if isinstance(outcome, Exception):
+                logger.error(
+                    "Unexpected error ingesting %s: %s",
+                    crawl_result.url,
+                    outcome,
+                    exc_info=outcome,
+                )
+                failure_message = f"Failed to ingest {crawl_result.url}: {outcome}"
+                failed_urls[crawl_result.url] = failure_message
+                warnings.append(failure_message)
 
     # Step 3: Compile results
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
