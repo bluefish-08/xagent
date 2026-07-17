@@ -534,10 +534,17 @@ async def _run_web_ingestion_impl(
         total_embeddings = 0
 
         loop = asyncio.get_event_loop()
+        page_semaphore = asyncio.Semaphore(max(1, ing_cfg.page_ingest_concurrency))
 
-        for i, crawl_result in enumerate(crawl_results):
-            if crawl_result.status != "success":
-                continue
+        async def _process_page(i: int, crawl_result: CrawlResult) -> None:
+            # Pages are independent; each runs its blocking ingestion in a worker
+            # thread while sibling pages overlap (issue #912). The shared
+            # accumulators / warnings / failed_urls below are only mutated between
+            # awaits, so cooperative single-thread scheduling keeps them race-free
+            # without locks; the cross-thread DB write hazard is guarded inside
+            # collection_manager.
+            nonlocal documents_created, successful_page_ingestions
+            nonlocal total_chunks, total_embeddings
 
             page_title = crawl_result.title or f"page_{i + 1}"
             with pipeline_facade.web_page_operation(
@@ -651,7 +658,7 @@ async def _run_web_ingestion_impl(
                                 status="error",
                                 message=failure_message,
                             )
-                            continue
+                            return
 
                     try:
                         # Ingest the file
@@ -789,6 +796,18 @@ async def _run_web_ingestion_impl(
                         status="error",
                         message=failure_message,
                     )
+
+        async def _guarded_page(i: int, crawl_result: CrawlResult) -> None:
+            async with page_semaphore:
+                await _process_page(i, crawl_result)
+
+        await asyncio.gather(
+            *(
+                _guarded_page(i, crawl_result)
+                for i, crawl_result in enumerate(crawl_results)
+                if crawl_result.status == "success"
+            )
+        )
 
     # Step 3: Compile results
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)

@@ -28,6 +28,7 @@ DEFAULT_EMBEDDING_MODEL_ID: str = "text-embedding-v4"
 DEFAULT_EMBEDDING_BATCH_SIZE: int = 10
 DEFAULT_EMBEDDING_CONCURRENT: int = 10
 DEFAULT_MAX_RETRIES: int = 3
+DEFAULT_PAGE_INGEST_CONCURRENCY: int = 4
 DEFAULT_RETRY_DELAY_SECONDS: float = 1.0
 
 # LanceDB NULL sentinel values
@@ -1170,6 +1171,15 @@ class IngestionConfig(BaseModel):
         DEFAULT_MAX_RETRIES,
         ge=0,
         description="Maximum number of retries for embedding provider failures; must be non-negative",
+    )
+    page_ingest_concurrency: int = Field(
+        DEFAULT_PAGE_INGEST_CONCURRENCY,
+        gt=0,
+        description=(
+            "Maximum number of web pages ingested concurrently during website "
+            "import (Step 2). Pages are independent, so concurrency overlaps their "
+            "parse/chunk/embed cost. Set to 1 for the legacy fully-serial behavior."
+        ),
     )
     retry_delay: float = Field(
         DEFAULT_RETRY_DELAY_SECONDS,

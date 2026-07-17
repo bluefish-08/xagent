@@ -41,11 +41,55 @@ logger = logging.getLogger(__name__)
 _collection_locks: dict[tuple[int, str], asyncio.Lock] = {}
 _collection_locks_lock = threading.Lock()
 
+# Cross-thread locks for collection metadata read-modify-write. The asyncio locks
+# above are keyed by event-loop id, so they do NOT serialize concurrent web-page
+# ingestion where each page runs in its own executor thread + event loop. These
+# thread locks close that gap for the two RMW critical sections (stats update and
+# embedding init). Ordering: always acquire the asyncio lock first (same-loop
+# reentry) then this thread lock, so a task holding it across an await can never
+# block its own loop.
+# ponytail: per-collection thread lock; only guards the RMW metadata row, not the
+# additive documents/chunks/vectors appends (distinct ids, no logical conflict).
+_collection_thread_locks: dict[str, threading.RLock] = {}
+_collection_thread_locks_guard = threading.Lock()
+
+
+def _get_collection_thread_lock(collection_name: str) -> threading.RLock:
+    """Return a process-global cross-thread RLock for one collection's metadata RMW."""
+    lock = _collection_thread_locks.get(collection_name)
+    if lock is None:
+        with _collection_thread_locks_guard:
+            lock = _collection_thread_locks.setdefault(
+                collection_name, threading.RLock()
+            )
+    return lock
+
+
+class _CollectionThreadGuard:
+    """Async-context wrapper around a collection's cross-thread RLock.
+
+    Usable in ``async with`` alongside the asyncio lock. Acquire is a brief
+    blocking call; the enclosing asyncio lock guarantees we never re-enter on the
+    same event loop while the lock is held across an await.
+    """
+
+    def __init__(self, collection_name: str) -> None:
+        self._lock = _get_collection_thread_lock(collection_name)
+
+    async def __aenter__(self) -> "_CollectionThreadGuard":
+        self._lock.acquire()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._lock.release()
+
 
 def reset_locks_for_testing() -> None:
     """Clear in-memory collection locks for test isolation."""
     with _collection_locks_lock:
         _collection_locks.clear()
+    with _collection_thread_locks_guard:
+        _collection_thread_locks.clear()
 
 
 def _normalize_collection_config_user_id(user_id: Optional[int]) -> int:
@@ -418,7 +462,7 @@ class CollectionManager:
         lock = _get_collection_lock(collection_name)
         logger.debug("[COLLECTION_INIT] Acquiring lock for '%s'...", collection_name)
 
-        async with lock:
+        async with lock, _CollectionThreadGuard(collection_name):
             logger.debug("[COLLECTION_INIT] Lock acquired for '%s'", collection_name)
             # Get current state
             try:
@@ -532,7 +576,7 @@ class CollectionManager:
         """
         lock = _get_collection_lock(collection_name)
 
-        async with lock:
+        async with lock, _CollectionThreadGuard(collection_name):
             try:
                 collection = await self.get_collection(collection_name)
             except ValueError:

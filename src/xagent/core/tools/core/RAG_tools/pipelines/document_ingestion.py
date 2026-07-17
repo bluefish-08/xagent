@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import time
@@ -1163,34 +1164,62 @@ def _process_document_impl(
 
             else:
                 processed_batches = 0
+                # Split into batches up front so the (network-bound) encode() calls
+                # can overlap. Batch encodes are independent and stateless, so we
+                # fan them out over a bounded thread pool (honoring embedding_concurrent,
+                # the same knob the async path uses) and then write in original order.
+                # embedding_concurrent=1 restores the legacy fully-serial behavior.
+                batch_slices = [
+                    chunks[start : start + cfg.embedding_batch_size]
+                    for start in range(0, len(chunks), cfg.embedding_batch_size)
+                ]
+
+                def _encode_batch(
+                    indexed: Tuple[int, List[ChunkForEmbedding]],
+                ) -> List[List[float]]:
+                    idx, batch_chunks = indexed
+                    batch_texts = [chunk.text for chunk in batch_chunks]
+                    _log_embedding_text_batch_stats(
+                        f"compute_embeddings(batch) doc_id={doc_id}",
+                        batch_texts,
+                        batch_index=idx,
+                    )
+                    raw_vectors = embedding_adapter.encode(batch_texts)
+                    vectors = normalize_raw_embedding_to_vectors(raw_vectors)
+                    if len(vectors) != len(batch_chunks):
+                        raise VectorValidationError(
+                            "Embedding provider returned mismatched batch size",
+                            details={
+                                "batch_index": idx,
+                                "expected": len(batch_chunks),
+                                "actual": len(vectors),
+                            },
+                        )
+                    return vectors
+
+                max_encode_workers = max(1, cfg.embedding_concurrent)
+                if len(batch_slices) > 1 and max_encode_workers > 1:
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(max_encode_workers, len(batch_slices))
+                    ) as encode_pool:
+                        # map preserves input order, so vectors line up with batches.
+                        all_vectors = list(
+                            encode_pool.map(_encode_batch, enumerate(batch_slices))
+                        )
+                else:
+                    all_vectors = [
+                        _encode_batch((idx, bc)) for idx, bc in enumerate(batch_slices)
+                    ]
+
                 with progress_tracker.track_step(
                     "write_vectors_to_db",
                     total_count=len(chunks),
                     message="Writing vectors...",
                 ) as write_step_tracker:
-                    for batch_start in range(0, len(chunks), cfg.embedding_batch_size):
-                        batch_chunks = chunks[
-                            batch_start : batch_start + cfg.embedding_batch_size
-                        ]
-                        batch_texts = [chunk.text for chunk in batch_chunks]
-                        _log_embedding_text_batch_stats(
-                            f"compute_embeddings(batch) doc_id={doc_id}",
-                            batch_texts,
-                            batch_index=processed_batches,
-                        )
-                        raw_vectors = embedding_adapter.encode(batch_texts)
-                        vectors = normalize_raw_embedding_to_vectors(raw_vectors)
-
-                        if len(vectors) != len(batch_chunks):
-                            raise VectorValidationError(
-                                "Embedding provider returned mismatched batch size",
-                                details={
-                                    "batch_index": processed_batches,
-                                    "expected": len(batch_chunks),
-                                    "actual": len(vectors),
-                                },
-                            )
-
+                    for batch_index, (batch_chunks, vectors) in enumerate(
+                        zip(batch_slices, all_vectors)
+                    ):
+                        is_last_batch = batch_index == len(batch_slices) - 1
                         embeddings_batch: List[ChunkEmbeddingData] = [
                             ChunkEmbeddingData(
                                 doc_id=chunk.doc_id,
@@ -1219,10 +1248,7 @@ def _process_document_impl(
                             write_response = write_vectors_to_db(
                                 collection=collection,
                                 embeddings=embeddings_batch,
-                                create_index=(
-                                    batch_start + cfg.embedding_batch_size
-                                    >= len(chunks)
-                                ),
+                                create_index=is_last_batch,
                                 user_id=user_id,
                             )
                             last_write_response = (
