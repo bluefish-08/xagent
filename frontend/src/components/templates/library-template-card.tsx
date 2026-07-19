@@ -16,17 +16,18 @@ interface LibraryTemplateCardProps {
   className?: string;
 }
 
-// Soft pastel pill palette (bg + fg), keyed by category. Unknown categories
-// hash into the palette so colors stay stable across renders.
+// Soft pill palette keyed by category, with dark-mode variants so pills work
+// in both themes. Unknown categories hash into the palette so colors stay
+// stable across renders. The colored dot inherits the text color via bg-current.
 const PILL_PALETTE = [
-  { bg: "#e9f1fe", fg: "#1a56db" },
-  { bg: "#fdeaf1", fg: "#c2185b" },
-  { bg: "#e7f6ee", fg: "#1a7f47" },
-  { bg: "#eef0fb", fg: "#4f46e5" },
-  { bg: "#fdefe3", fg: "#c2410c" },
+  "bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300",
+  "bg-pink-50 text-pink-700 dark:bg-pink-950/50 dark:text-pink-300",
+  "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300",
+  "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300",
+  "bg-orange-50 text-orange-700 dark:bg-orange-950/50 dark:text-orange-300",
 ];
-const PILL_NEUTRAL = { bg: "#eef0f3", fg: "#5c6069" };
-const PILL_KNOWN: Record<string, (typeof PILL_PALETTE)[number]> = {
+const PILL_NEUTRAL = "bg-muted text-muted-foreground";
+const PILL_KNOWN: Record<string, string> = {
   sales: PILL_PALETTE[2],
   marketing: PILL_PALETTE[1],
   support: PILL_PALETTE[0],
@@ -34,7 +35,7 @@ const PILL_KNOWN: Record<string, (typeof PILL_PALETTE)[number]> = {
   productivity: PILL_PALETTE[4],
 };
 
-function pillColors(category?: string) {
+function pillClasses(category?: string): string {
   if (!category) return PILL_NEUTRAL;
   const key = category.toLowerCase();
   if (PILL_KNOWN[key]) return PILL_KNOWN[key];
@@ -96,7 +97,7 @@ export function LibraryTemplateCard({
   };
 
   const bullets = template.features && template.features.length > 0 ? template.features.slice(0, 3) : [];
-  const pill = pillColors(template.category);
+  const pill = pillClasses(template.category);
 
   return (
     <div
@@ -112,10 +113,12 @@ export function LibraryTemplateCard({
       {/* Category pill + setup time */}
       <div className="mb-3.5 flex items-center justify-between gap-2">
         <span
-          className="inline-flex items-center gap-1.5 rounded-full px-[9px] py-1 text-[11.5px] font-semibold"
-          style={{ background: pill.bg, color: pill.fg }}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full px-[9px] py-1 text-[11.5px] font-semibold",
+            pill
+          )}
         >
-          <span className="h-[5px] w-[5px] rounded-full" style={{ background: pill.fg }} />
+          <span className="h-[5px] w-[5px] rounded-full bg-current" />
           {categoryLabel || template.category}
         </span>
         {template.setup_time || defaultSetupTime ? (
@@ -126,7 +129,7 @@ export function LibraryTemplateCard({
         ) : null}
       </div>
 
-      <h3 className="mb-2 text-[16.5px] font-semibold leading-[1.25] tracking-[-0.015em] text-foreground">
+      <h3 className="mb-2 line-clamp-2 text-[16.5px] font-semibold leading-[1.25] tracking-[-0.015em] text-foreground">
         {template.name}
       </h3>
 

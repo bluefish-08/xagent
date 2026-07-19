@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { PageHeader } from "@/components/ui/page-header"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
@@ -249,20 +250,16 @@ export function ApiKeysPage() {
 
   return (
     <div className="flex h-full flex-col bg-background overflow-auto">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
-        <div className="w-full sm:w-auto">
-          <h1 className="text-[22px] font-bold leading-tight">
-            {t("apiKeysPage.title") || "API Keys"}
-          </h1>
-          <p className="text-[13px] text-muted-foreground mt-0.5">
-            {t("apiKeysPage.subtitle") || "Manage API keys for programmatic access to your agents."}
-          </p>
-        </div>
-        <Button onClick={openCreateDialog} className="shrink-0">
-          <Plus className="w-4 h-4 mr-1" />
-          {t("apiKeysPage.newKey") || "New API Key"}
-        </Button>
-      </div>
+      <PageHeader
+        title={t("apiKeysPage.title") || "API Keys"}
+        description={t("apiKeysPage.subtitle") || "Manage API keys for programmatic access to your agents."}
+        actions={
+          <Button onClick={openCreateDialog} className="shrink-0">
+            <Plus className="w-4 h-4 mr-1" />
+            {t("apiKeysPage.newKey") || "New API Key"}
+          </Button>
+        }
+      />
 
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 px-4 sm:px-8 mt-6">
         <Card>

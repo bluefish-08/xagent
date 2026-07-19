@@ -7,6 +7,7 @@ import { getApiUrl, cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import { apiRequest } from "@/lib/api-wrapper";
 import { SearchInput } from "@/components/ui/search-input";
+import { PageHeader } from "@/components/ui/page-header";
 import type { Template } from "@/types/template";
 import { LibraryTemplateCard } from "@/components/templates/library-template-card";
 import type { TranslationKey } from "@/i18n/translations";
@@ -164,21 +165,18 @@ export default function TemplatesPage() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background">
-      {/* Header — build-page style */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center px-6 md:px-8 py-5 md:py-6 gap-4 border-b border-border/60">
-        <div className="w-full sm:w-auto">
-          <h1 className="text-[22px] font-bold leading-tight">{t("templates.title")}</h1>
-          <p className="text-[13px] text-muted-foreground mt-0.5">{t("templates.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-3 w-full sm:w-auto">
+      <PageHeader
+        title={t("templates.title")}
+        description={t("templates.subtitle")}
+        actions={
           <SearchInput
             placeholder={t("templates.searchPlaceholder")}
             value={searchQuery}
             onChange={setSearchQuery}
             containerClassName="flex-1 sm:w-64"
           />
-        </div>
-      </div>
+        }
+      />
 
       <div className="px-6 py-6 md:px-8">
       {/* Segmented category filter */}
@@ -190,6 +188,7 @@ export default function TemplatesPage() {
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
+                aria-pressed={isActive}
                 className={cn(
                   "rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
                   isActive
@@ -286,7 +285,7 @@ function TemplateSection({
       </div>
       <div
         className="grid gap-5"
-        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 100%), 1fr))" }}
       >
         {templates.map((template) => (
           <LibraryTemplateCard

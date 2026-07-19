@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { PageHeader } from "@/components/ui/page-header";
 import { Select, type SelectOption } from "@/components/ui/select";
 import { badgeForSource, ScanBadge } from "@/components/skill-hub/badges";
 import { useI18n } from "@/contexts/i18n-context";
@@ -333,20 +334,19 @@ export default function SkillHubPage() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background">
-      {/* Header — build-page style */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center px-6 md:px-8 py-5 md:py-6 gap-4 border-b border-border/60">
-        <div className="w-full sm:w-auto">
-          <h1 className="text-[22px] font-bold leading-tight">{t("skillHub.page.title")}</h1>
-          <p className="text-[13px] text-muted-foreground mt-0.5">{t("skillHub.page.subtitle")}</p>
-        </div>
-        <Link
-          href="/skill-hub/new"
-          className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          <Plus className="h-4 w-4" />
-          {t("skillHub.page.createNew")}
-        </Link>
-      </div>
+      <PageHeader
+        title={t("skillHub.page.title")}
+        description={t("skillHub.page.subtitle")}
+        actions={
+          <Link
+            href="/skill-hub/new"
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            <Plus className="h-4 w-4" />
+            {t("skillHub.page.createNew")}
+          </Link>
+        }
+      />
 
       <div className="px-6 py-6 md:px-8">
         {/* Segmented tabs */}
@@ -355,6 +355,7 @@ export default function SkillHubPage() {
             <button
               type="button"
               onClick={() => setTab("discover")}
+              aria-pressed={tab === "discover"}
               className={cn(
                 "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
                 tab === "discover"
@@ -368,6 +369,7 @@ export default function SkillHubPage() {
             <button
               type="button"
               onClick={() => setTab("mine")}
+              aria-pressed={tab === "mine"}
               className={cn(
                 "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
                 tab === "mine"
@@ -564,7 +566,7 @@ function DiscoverTab({
         <>
           <div
             className="grid gap-5"
-            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 100%), 1fr))" }}
           >
             {registry.map((s) => {
               const installing = installingSlug === s.slug;
@@ -746,7 +748,7 @@ function MyTab({
       ) : (
         <div
           className="grid gap-5"
-          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}
+          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 100%), 1fr))" }}
         >
           {installed.map((s) => {
             const badge = badgeForSource(s.source);
