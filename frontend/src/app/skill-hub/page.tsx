@@ -16,6 +16,7 @@ import {
 
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { PageHeader } from "@/components/ui/page-header";
+import { SegmentedTabs } from "@/components/ui/segmented-tabs";
 import { Select, type SelectOption } from "@/components/ui/select";
 import { badgeForSource, ScanBadge } from "@/components/skill-hub/badges";
 import { useI18n } from "@/contexts/i18n-context";
@@ -351,46 +352,44 @@ export default function SkillHubPage() {
       <div className="px-6 py-6 md:px-8">
         {/* Segmented tabs */}
         <div className="mb-6">
-          <div className="inline-flex flex-wrap items-center gap-0.5 rounded-[13px] bg-muted p-1">
-            <button
-              type="button"
-              onClick={() => setTab("discover")}
-              aria-pressed={tab === "discover"}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
-                tab === "discover"
-                  ? "bg-background font-semibold text-foreground shadow-sm"
-                  : "font-medium text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <Compass className="h-4 w-4" />
-              {t("skillHub.tabs.discover")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("mine")}
-              aria-pressed={tab === "mine"}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
-                tab === "mine"
-                  ? "bg-background font-semibold text-foreground shadow-sm"
-                  : "font-medium text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <Library className="h-4 w-4" />
-              {t("skillHub.tabs.mySkills")}
-              {installed.length > 0 && (
-                <span className={cn(
-                  "ml-0.5 rounded-full px-2 py-px text-[11px] font-semibold",
-                  tab === "mine"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted-foreground/15 text-muted-foreground",
-                )}>
-                  {installed.length}
-                </span>
-              )}
-            </button>
-          </div>
+          <SegmentedTabs
+            items={[
+              {
+                id: "discover",
+                label: (
+                  <>
+                    <Compass className="h-4 w-4" />
+                    {t("skillHub.tabs.discover")}
+                  </>
+                ),
+              },
+              {
+                id: "mine",
+                label: (
+                  <>
+                    <Library className="h-4 w-4" />
+                    {t("skillHub.tabs.mySkills")}
+                    {installed.length > 0 && (
+                      <span className={cn(
+                        "ml-0.5 rounded-full px-2 py-px text-[11px] font-semibold",
+                        tab === "mine"
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted-foreground/15 text-muted-foreground",
+                      )}>
+                        {installed.length}
+                      </span>
+                    )}
+                  </>
+                ),
+              },
+            ]}
+            value={tab}
+            onValueChange={(v) => setTab(v as Tab)}
+            listClassName="gap-0.5 rounded-[13px] bg-muted p-1"
+            triggerClassName="inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm duration-300"
+            activeTriggerClassName="bg-background font-semibold text-foreground shadow-sm"
+            inactiveTriggerClassName="font-medium text-muted-foreground hover:text-foreground"
+          />
         </div>
 
         {tab === "discover" ? (

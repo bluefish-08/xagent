@@ -3,11 +3,12 @@
 import { useI18n } from "@/contexts/i18n-context";
 import { Loader2 } from "lucide-react";
 import { useState, useEffect, useMemo } from "react";
-import { getApiUrl, cn } from "@/lib/utils";
+import { getApiUrl } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import { apiRequest } from "@/lib/api-wrapper";
 import { SearchInput } from "@/components/ui/search-input";
 import { PageHeader } from "@/components/ui/page-header";
+import { SegmentedTabs } from "@/components/ui/segmented-tabs";
 import type { Template } from "@/types/template";
 import { LibraryTemplateCard } from "@/components/templates/library-template-card";
 import type { TranslationKey } from "@/i18n/translations";
@@ -181,26 +182,15 @@ export default function TemplatesPage() {
       <div className="px-6 py-6 md:px-8">
       {/* Segmented category filter */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex flex-wrap gap-0.5 rounded-[13px] bg-muted p-1">
-          {categories.map((cat) => {
-            const isActive = selectedCategory === cat.id;
-            return (
-              <button
-                key={cat.id}
-                onClick={() => setSelectedCategory(cat.id)}
-                aria-pressed={isActive}
-                className={cn(
-                  "rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
-                  isActive
-                    ? "bg-background font-semibold text-foreground shadow-sm"
-                    : "font-medium text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {cat.label}
-              </button>
-            );
-          })}
-        </div>
+        <SegmentedTabs
+          items={categories}
+          value={selectedCategory}
+          onValueChange={setSelectedCategory}
+          listClassName="gap-0.5 rounded-[13px] bg-muted p-1"
+          triggerClassName="rounded-[10px] px-4 py-2 text-sm duration-300"
+          activeTriggerClassName="bg-background font-semibold text-foreground shadow-sm"
+          inactiveTriggerClassName="font-medium text-muted-foreground hover:text-foreground"
+        />
         <span className="rounded-full bg-muted px-3 py-1.5 text-[13px] font-medium text-muted-foreground">
           {filteredTemplates.length === 1
             ? t("templates.countOne", { count: filteredTemplates.length })
