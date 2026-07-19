@@ -463,7 +463,7 @@ export function ModelsPage() {
         }
       />
 
-      <div className="w-full p-4 sm:p-8 pb-20">
+      <div className="w-full px-6 py-6 md:px-8 pb-20">
         <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full mb-8">
           <TabsList className="bg-transparent h-12 p-0 space-x-6 justify-start border-b w-full rounded-none">
             <TabsTrigger

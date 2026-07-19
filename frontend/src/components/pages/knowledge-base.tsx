@@ -393,7 +393,7 @@ export function KnowledgeBasePage() {
       />
 
       {/* Collections Grid */}
-      <div className="flex-1 overflow-y-auto w-full px-8 pb-8">
+      <div className="flex-1 overflow-y-auto w-full px-6 md:px-8 pb-8">
         {collections.length === 0 ? (
           <FeatureEmptyState
             icon={Database}

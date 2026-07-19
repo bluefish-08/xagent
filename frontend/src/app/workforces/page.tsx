@@ -92,7 +92,7 @@ export default function WorkforcesPage() {
         }
       />
 
-      <div className="mx-auto flex w-full flex-col gap-6 p-4 sm:p-8">
+      <div className="mx-auto flex w-full flex-col gap-6 px-6 py-6 md:px-8">
 
         {loading ? <div className="p-8 text-muted-foreground">{t("workforces.loading.list")}</div> : null}
         {error ? <div className="p-8 text-red-500">{error}</div> : null}

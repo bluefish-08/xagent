@@ -261,7 +261,7 @@ export function ApiKeysPage() {
         }
       />
 
-      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 px-4 sm:px-8 mt-6">
+      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 px-6 md:px-8 mt-6">
         <Card>
           <CardContent>
             <p className="text-xs text-muted-foreground">{t("apiKeysPage.stats.totalKeys") || "Total Keys"}</p>
@@ -304,7 +304,7 @@ export function ApiKeysPage() {
         </Card>
       </div>
 
-      <div className="px-4 sm:px-8 pb-8 mt-6">
+      <div className="px-6 md:px-8 pb-8 mt-6">
         <Card className="shadow-sm">
           <CardHeader className="pb-3 border-b flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 space-y-0">
             <h2 className="text-lg font-semibold">{t("apiKeysPage.allKeys") || "All Keys"}</h2>
