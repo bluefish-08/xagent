@@ -68,20 +68,15 @@ export default function WorkforcesPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex w-full flex-col gap-6 p-4 sm:p-8">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="text-[22px] font-bold leading-tight">{t("workforces.list.title")}</h1>
-            <p className="mt-0.5 max-w-2xl text-[13px] text-muted-foreground">
-              {t("workforces.list.description")}
-            </p>
-          </div>
-          <Button onClick={() => setView("create")} className="bg-blue-600 hover:bg-blue-700 text-white rounded-full px-6">
-            <Plus className="mr-2 h-4 w-4" />
-            {t("workforces.actions.new")}
-          </Button>
+      {/* Header — build-page style */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
+        <div className="w-full sm:w-auto">
+          <h1 className="text-[22px] font-bold leading-tight">{t("workforces.list.title")}</h1>
+          <p className="mt-0.5 max-w-2xl text-[13px] text-muted-foreground">
+            {t("workforces.list.description")}
+          </p>
         </div>
-        <div className="mt-2">
+        <div className="flex items-center gap-3 w-full sm:w-auto">
           <SearchInput
             placeholder={t("workforces.list.searchPlaceholder")}
             value={search}
@@ -89,9 +84,16 @@ export default function WorkforcesPage() {
               setSearch(value)
               setPage(1)
             }}
-            containerClassName="w-full sm:w-80"
+            containerClassName="flex-1 sm:w-64"
           />
+          <Button onClick={() => setView("create")} className="shrink-0 rounded-lg">
+            <Plus className="mr-2 h-4 w-4" />
+            {t("workforces.actions.new")}
+          </Button>
         </div>
+      </div>
+
+      <div className="mx-auto flex w-full flex-col gap-6 p-4 sm:p-8">
 
         {loading ? <div className="p-8 text-muted-foreground">{t("workforces.loading.list")}</div> : null}
         {error ? <div className="p-8 text-red-500">{error}</div> : null}

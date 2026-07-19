@@ -328,10 +328,10 @@ export function MemoryPage() {
   return (
     <div className="flex h-full flex-col bg-background">
       {/* Top Header */}
-      <div className="border-b flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 p-4 sm:p-8">
-        <div>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
+        <div className="w-full sm:w-auto">
           <h1 className="text-[22px] font-bold leading-tight">{t("memory.header.title")}</h1>
-          <p className="text-sm sm:text-base text-muted-foreground">{t("memory.header.description")}</p>
+          <p className="text-[13px] text-muted-foreground mt-0.5">{t("memory.header.description")}</p>
         </div>
 
         <div className="flex items-center gap-3 w-full sm:w-auto">

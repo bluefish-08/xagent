@@ -350,7 +350,7 @@ export function KnowledgeBasePage() {
   return (
     <div className="flex flex-col h-full bg-background/50">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center w-full p-4 sm:p-8 gap-4">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center w-full gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
         <div className="space-y-1 w-full sm:w-auto">
           <div className="flex items-center gap-3 mb-1 flex-wrap">
             <h1 className="text-[22px] font-bold leading-tight">{t("kb.header.title")}</h1>

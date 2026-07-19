@@ -333,29 +333,33 @@ export default function SkillHubPage() {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background">
-      <div className="mx-auto w-full flex-1 px-6 py-10">
-        {/* Header */}
-        <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          <div className="rounded-2xl bg-emerald-500/10 p-3 text-emerald-500">
-            <Library className="h-8 w-8" />
-          </div>
-          <h1 className="text-[22px] font-bold tracking-tight">{t("skillHub.page.title")}</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            {t("skillHub.page.subtitle")}
-          </p>
+      {/* Header — build-page style */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center px-6 md:px-8 py-5 md:py-6 gap-4 border-b border-border/60">
+        <div className="w-full sm:w-auto">
+          <h1 className="text-[22px] font-bold leading-tight">{t("skillHub.page.title")}</h1>
+          <p className="text-[13px] text-muted-foreground mt-0.5">{t("skillHub.page.subtitle")}</p>
         </div>
+        <Link
+          href="/skill-hub/new"
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+        >
+          <Plus className="h-4 w-4" />
+          {t("skillHub.page.createNew")}
+        </Link>
+      </div>
 
-        {/* Tabs + create */}
-        <div className="mb-6 flex items-center justify-between gap-2">
-          <div className="inline-flex items-center gap-1.5 rounded-2xl bg-muted p-1">
+      <div className="px-6 py-6 md:px-8">
+        {/* Segmented tabs */}
+        <div className="mb-6">
+          <div className="inline-flex flex-wrap items-center gap-0.5 rounded-[13px] bg-muted p-1">
             <button
               type="button"
               onClick={() => setTab("discover")}
               className={cn(
-                "inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold transition-all",
+                "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
                 tab === "discover"
-                  ? "bg-white text-foreground shadow-sm ring-1 ring-border/50"
-                  : "text-muted-foreground hover:bg-white/70 hover:text-foreground",
+                  ? "bg-background font-semibold text-foreground shadow-sm"
+                  : "font-medium text-muted-foreground hover:text-foreground",
               )}
             >
               <Compass className="h-4 w-4" />
@@ -365,10 +369,10 @@ export default function SkillHubPage() {
               type="button"
               onClick={() => setTab("mine")}
               className={cn(
-                "inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold transition-all",
+                "inline-flex items-center gap-2 rounded-[10px] px-4 py-2 text-sm transition-all duration-300",
                 tab === "mine"
-                  ? "bg-white text-foreground shadow-sm ring-1 ring-border/50"
-                  : "text-muted-foreground hover:bg-white/70 hover:text-foreground",
+                  ? "bg-background font-semibold text-foreground shadow-sm"
+                  : "font-medium text-muted-foreground hover:text-foreground",
               )}
             >
               <Library className="h-4 w-4" />
@@ -385,13 +389,6 @@ export default function SkillHubPage() {
               )}
             </button>
           </div>
-          <Link
-            href="/skill-hub/new"
-            className="inline-flex items-center gap-1.5 rounded-md border bg-card px-3 py-1.5 text-xs font-medium hover:bg-muted"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {t("skillHub.page.createNew")}
-          </Link>
         </div>
 
         {tab === "discover" ? (
@@ -565,7 +562,10 @@ function DiscoverTab({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div
+            className="grid gap-5"
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}
+          >
             {registry.map((s) => {
               const installing = installingSlug === s.slug;
               const isInstalled = !!s.installedAs;
@@ -574,7 +574,7 @@ function DiscoverTab({
                 <Link
                   key={s.slug}
                   href={`/skill-hub/${encodeURIComponent(s.slug)}`}
-                  className="flex flex-col gap-2 rounded-xl border bg-card p-4 transition-all hover:border-primary/40 hover:shadow-sm"
+                  className="group flex flex-col gap-2 rounded-[18px] border border-border bg-card p-5 shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-transparent hover:shadow-[0_16px_40px_rgba(0,0,0,0.11)]"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
@@ -744,14 +744,17 @@ function MyTab({
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div
+          className="grid gap-5"
+          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}
+        >
           {installed.map((s) => {
             const badge = badgeForSource(s.source);
             const removable = s.source === "user";
             return (
               <div
                 key={s.name}
-                className="group flex flex-col gap-2 rounded-xl border bg-card p-4 transition-all hover:border-primary/40 hover:shadow-sm"
+                className="group flex flex-col gap-2 rounded-[18px] border border-border bg-card p-5 shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:border-transparent hover:shadow-[0_16px_40px_rgba(0,0,0,0.11)]"
               >
                 <div className="flex items-start justify-between gap-2">
                   <Link

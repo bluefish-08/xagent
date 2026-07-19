@@ -449,21 +449,21 @@ export function ModelsPage() {
 
   return (
     <div className="h-full overflow-auto bg-background text-foreground">
-      <div className="w-full p-4 sm:p-8 pb-20">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
-          <div className="space-y-1 w-full sm:w-auto">
-            <h1 className="text-[22px] font-bold leading-tight">{t('models.header.title')}</h1>
-            <p className="text-[13px] text-muted-foreground mt-0.5">{t('models.header.description')}</p>
-          </div>
-
-          <Button onClick={handleAddModel} className="flex items-center gap-2 shrink-0">
-            <Plus size={16} className="mr-1 sm:mr-2" />
-            <span className="hidden sm:inline">{t('models.header.add')}</span>
-            <span className="sm:hidden">{t('common.add') || t('models.header.add')}</span>
-          </Button>
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
+        <div className="space-y-1 w-full sm:w-auto">
+          <h1 className="text-[22px] font-bold leading-tight">{t('models.header.title')}</h1>
+          <p className="text-[13px] text-muted-foreground mt-0.5">{t('models.header.description')}</p>
         </div>
 
+        <Button onClick={handleAddModel} className="flex items-center gap-2 shrink-0">
+          <Plus size={16} className="mr-1 sm:mr-2" />
+          <span className="hidden sm:inline">{t('models.header.add')}</span>
+          <span className="sm:hidden">{t('common.add') || t('models.header.add')}</span>
+        </Button>
+      </div>
+
+      <div className="w-full p-4 sm:p-8 pb-20">
         <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full mb-8">
           <TabsList className="bg-transparent h-12 p-0 space-x-6 justify-start border-b w-full rounded-none">
             <TabsTrigger

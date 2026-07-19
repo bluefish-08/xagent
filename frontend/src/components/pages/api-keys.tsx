@@ -249,24 +249,24 @@ export function ApiKeysPage() {
 
   return (
     <div className="flex h-full flex-col bg-background overflow-auto">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 sm:p-8 gap-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight mb-1">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-border/60 px-6 md:px-8 py-5 md:py-6">
+        <div className="w-full sm:w-auto">
+          <h1 className="text-[22px] font-bold leading-tight">
             {t("apiKeysPage.title") || "API Keys"}
           </h1>
-          <p className="text-xs sm:text-sm text-muted-foreground">
+          <p className="text-[13px] text-muted-foreground mt-0.5">
             {t("apiKeysPage.subtitle") || "Manage API keys for programmatic access to your agents."}
           </p>
         </div>
-        <Button onClick={openCreateDialog}>
+        <Button onClick={openCreateDialog} className="shrink-0">
           <Plus className="w-4 h-4 mr-1" />
           {t("apiKeysPage.newKey") || "New API Key"}
         </Button>
       </div>
 
-      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 px-4 sm:px-8">
+      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 px-4 sm:px-8 mt-6">
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <p className="text-xs text-muted-foreground">{t("apiKeysPage.stats.totalKeys") || "Total Keys"}</p>
             <p className="text-2xl font-bold mt-1">{stats?.total_keys ?? "—"}</p>
             <p className="text-xs text-muted-foreground mt-1">
@@ -275,7 +275,7 @@ export function ApiKeysPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <p className="text-xs text-muted-foreground">{t("apiKeysPage.stats.activeKeys") || "Active Keys"}</p>
             <p className="text-2xl font-bold mt-1">{stats?.active_keys ?? "—"}</p>
             <p className="text-xs text-muted-foreground mt-1">
@@ -284,7 +284,7 @@ export function ApiKeysPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <p className="text-xs text-muted-foreground">{t("apiKeysPage.stats.callsThisMonth") || "Calls This Month"}</p>
             <p className="text-2xl font-bold mt-1">{stats?.calls_this_month ?? "—"}</p>
             <p className="text-xs text-muted-foreground mt-1">
@@ -293,7 +293,7 @@ export function ApiKeysPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <p className="text-xs text-muted-foreground">{t("apiKeysPage.stats.lastApiCall") || "Last API Call"}</p>
             <p className="text-2xl font-bold mt-1">
               {stats?.last_api_call ? new Date(stats.last_api_call).toLocaleDateString() : "—"}
