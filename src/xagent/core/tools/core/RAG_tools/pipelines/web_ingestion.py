@@ -537,6 +537,12 @@ async def _run_web_ingestion_impl(
         page_semaphore = asyncio.Semaphore(max(1, ing_cfg.page_ingest_concurrency))
 
         async def _process_page(i: int, crawl_result: CrawlResult) -> None:
+            # Bound concurrency, then run the page. Split out so gather() can call
+            # this directly (each page becomes its own semaphore-limited Task).
+            async with page_semaphore:
+                await _ingest_page(i, crawl_result)
+
+        async def _ingest_page(i: int, crawl_result: CrawlResult) -> None:
             # Pages are independent; each runs its blocking ingestion in a worker
             # thread while sibling pages overlap (issue #912). The shared
             # accumulators / warnings / failed_urls below are only mutated between
@@ -561,9 +567,11 @@ async def _run_web_ingestion_impl(
                     )
 
                 try:
-                    # Save crawled content to temporary markdown file
+                    # Index-prefixed so concurrent same-titled pages don't collide
+                    # on one temp path (torn read + shared doc_id when file_handler
+                    # is None).
                     filename = sanitize_for_doc_id(page_title)
-                    temp_file = Path(temp_dir) / f"{filename}.md"
+                    temp_file = Path(temp_dir) / f"{i}_{filename}.md"
 
                     with open(temp_file, "w", encoding="utf-8") as f:
                         # Add metadata header
@@ -797,21 +805,17 @@ async def _run_web_ingestion_impl(
                         message=failure_message,
                     )
 
-        async def _guarded_page(i: int, crawl_result: CrawlResult) -> None:
-            async with page_semaphore:
-                await _process_page(i, crawl_result)
-
         pending_pages = [
             (i, crawl_result)
             for i, crawl_result in enumerate(crawl_results)
             if crawl_result.status == "success"
         ]
-        # return_exceptions=True so an unexpected error in one page (e.g. from
-        # web_page_operation or progress_callback, outside _process_page's own
-        # handling) can't abort every other in-flight page. _process_page records
-        # expected per-page failures itself; here we only surface the escapees.
+        # return_exceptions=True so one page's unexpected error can't abort the
+        # others; per-page failures are already recorded inside _process_page.
+        # gather() runs each page as its own Task, which is what gives per-page
+        # ContextVar isolation — don't collapse this into shared-context awaits.
         page_outcomes = await asyncio.gather(
-            *(_guarded_page(i, crawl_result) for i, crawl_result in pending_pages),
+            *(_process_page(i, crawl_result) for i, crawl_result in pending_pages),
             return_exceptions=True,
         )
         for (_, crawl_result), outcome in zip(pending_pages, page_outcomes):

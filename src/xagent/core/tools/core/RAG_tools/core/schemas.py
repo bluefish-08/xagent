@@ -1154,9 +1154,12 @@ class IngestionConfig(BaseModel):
         DEFAULT_EMBEDDING_CONCURRENT,
         gt=0,
         description=(
-            "Maximum concurrent requests for embedding computation when using "
-            "async mode (for models that don't support batch processing, e.g., text-embedding-v4). "
-            "Must be positive. Adjust based on machine configuration and API rate limits."
+            "Maximum concurrent embedding requests within one document: async-mode "
+            "per-chunk encodes (models without batch support, e.g. text-embedding-v4) "
+            "and batch-mode per-batch encodes both honor it. Must be positive. Note "
+            "that during website import the effective provider concurrency is "
+            "page_ingest_concurrency * embedding_concurrent (defaults 4 * 10 = ~40); "
+            "keep that product under your provider's rate limit to avoid 429s."
         ),
     )
     embedding_use_async: bool = Field(
@@ -1178,7 +1181,9 @@ class IngestionConfig(BaseModel):
         description=(
             "Maximum number of web pages ingested concurrently during website "
             "import (Step 2). Pages are independent, so concurrency overlaps their "
-            "parse/chunk/embed cost. Set to 1 for the legacy fully-serial behavior."
+            "parse/chunk/embed cost. Set to 1 for the legacy fully-serial behavior. "
+            "Multiplies with embedding_concurrent for total provider concurrency "
+            "(see that field); lower either if the provider rate-limits (429)."
         ),
     )
     retry_delay: float = Field(

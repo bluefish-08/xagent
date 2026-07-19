@@ -5,13 +5,22 @@ systems, including lazy initialization, embedding configuration, and statistics 
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
 from contextvars import copy_context
 from datetime import datetime, timezone
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Optional,
+    TypeVar,
+)
 
 import pyarrow as pa  # type: ignore
 
@@ -44,12 +53,11 @@ _collection_locks_lock = threading.Lock()
 # Cross-thread locks for collection metadata read-modify-write. The asyncio locks
 # above are keyed by event-loop id, so they do NOT serialize concurrent web-page
 # ingestion where each page runs in its own executor thread + event loop. These
-# thread locks close that gap for the two RMW critical sections (stats update and
-# embedding init). Ordering: always acquire the asyncio lock first (same-loop
-# reentry) then this thread lock, so a task holding it across an await can never
-# block its own loop.
-# ponytail: per-collection thread lock; only guards the RMW metadata row, not the
-# additive documents/chunks/vectors appends (distinct ids, no logical conflict).
+# thread locks close that gap for the metadata RMW critical sections (stats update,
+# embedding init, and access-timestamp bump). Ordering: always acquire the asyncio
+# lock first (same-loop reentry) then this thread lock, so a task holding it across
+# an await can never block its own loop. Only the RMW metadata row is guarded, not
+# the additive documents/chunks/vectors appends (distinct ids, no logical conflict).
 _collection_thread_locks: dict[str, threading.RLock] = {}
 _collection_thread_locks_guard = threading.Lock()
 
@@ -65,27 +73,23 @@ def _get_collection_thread_lock(collection_name: str) -> threading.RLock:
     return lock
 
 
-class _CollectionThreadGuard:
-    """Async-context wrapper around a collection's cross-thread RLock.
+@contextlib.asynccontextmanager
+async def _collection_thread_guard(collection_name: str) -> AsyncIterator[None]:
+    """Hold a collection's cross-thread RLock across an ``async with`` body.
 
-    Usable in ``async with`` alongside the asyncio lock. Acquired via a
-    non-blocking poll so we never freeze the event loop this coroutine runs on
-    while a different thread holds the lock: yielding with ``asyncio.sleep``
-    lets other tasks on the same loop keep running. The enclosing asyncio lock
-    guarantees we never re-enter on the same event loop while the lock is held
-    across an await; the RLock is reentrant regardless.
+    Acquired via a non-blocking poll so we never freeze the event loop this
+    coroutine runs on while a different thread holds the lock: yielding with
+    ``asyncio.sleep`` lets other tasks on the same loop keep running. The
+    enclosing asyncio lock guarantees we never re-enter on the same event loop
+    while the lock is held across an await; the RLock is reentrant regardless.
     """
-
-    def __init__(self, collection_name: str) -> None:
-        self._lock = _get_collection_thread_lock(collection_name)
-
-    async def __aenter__(self) -> "_CollectionThreadGuard":
-        while not self._lock.acquire(blocking=False):
-            await asyncio.sleep(0.005)
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        self._lock.release()
+    lock = _get_collection_thread_lock(collection_name)
+    while not lock.acquire(blocking=False):
+        await asyncio.sleep(0.005)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def reset_locks_for_testing() -> None:
@@ -466,7 +470,7 @@ class CollectionManager:
         lock = _get_collection_lock(collection_name)
         logger.debug("[COLLECTION_INIT] Acquiring lock for '%s'...", collection_name)
 
-        async with lock, _CollectionThreadGuard(collection_name):
+        async with lock, _collection_thread_guard(collection_name):
             logger.debug("[COLLECTION_INIT] Lock acquired for '%s'", collection_name)
             # Get current state
             try:
@@ -580,7 +584,7 @@ class CollectionManager:
         """
         lock = _get_collection_lock(collection_name)
 
-        async with lock, _CollectionThreadGuard(collection_name):
+        async with lock, _collection_thread_guard(collection_name):
             try:
                 collection = await self.get_collection(collection_name)
             except ValueError:
@@ -664,20 +668,24 @@ class CollectionManager:
             return
 
     async def mark_collection_accessed(self, collection_name: str) -> None:
-        """Mark collection as accessed by updating last_accessed_at timestamp.
+        """Update last_accessed_at.
 
-        This is a lightweight operation that updates the access timestamp
-        without acquiring a lock for performance reasons.
+        Takes the same lock as the other stat RMW sites: the write is a full-row
+        overwrite, so a stale read here would clobber a concurrent stat increment
+        on the per-page hot path.
         """
-        # Simple update without lock for performance, timestamp accuracy is not critical
+        lock = _get_collection_lock(collection_name)
         try:
-            collection = await self.get_collection(collection_name)
-            updated = collection.model_copy(
-                update={
-                    "last_accessed_at": datetime.now(timezone.utc).replace(tzinfo=None)
-                }
-            )
-            await self._save_collection_with_retry(updated)
+            async with lock, _collection_thread_guard(collection_name):
+                collection = await self.get_collection(collection_name)
+                updated = collection.model_copy(
+                    update={
+                        "last_accessed_at": datetime.now(timezone.utc).replace(
+                            tzinfo=None
+                        )
+                    }
+                )
+                await self._save_collection_with_retry(updated)
         except Exception as e:
             logger.debug(
                 "Failed to update last_accessed_at for %s: %s", collection_name, e

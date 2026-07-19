@@ -1062,9 +1062,9 @@ def _process_document_impl(
                     "batch_size": cfg.embedding_batch_size
                     if not cfg.embedding_use_async
                     else None,
-                    "concurrent": cfg.embedding_concurrent
-                    if cfg.embedding_use_async
-                    else None,
+                    # Both paths honor embedding_concurrent: the async path fans out
+                    # per-chunk encodes, the batch path fans out per-batch encodes.
+                    "concurrent": cfg.embedding_concurrent,
                 },
             )
             embedding_start = time.time()
@@ -1164,11 +1164,11 @@ def _process_document_impl(
 
             else:
                 processed_batches = 0
-                # Split into batches up front so the (network-bound) encode() calls
-                # can overlap. Batch encodes are independent and stateless, so we
-                # fan them out over a bounded thread pool (honoring embedding_concurrent,
-                # the same knob the async path uses) and then write in original order.
-                # embedding_concurrent=1 restores the legacy fully-serial behavior.
+                # Fan the independent (network-bound) batch encodes out over a
+                # bounded thread pool (honoring embedding_concurrent; =1 restores
+                # serial), then write in original order. This materializes all
+                # vectors before writing — peak memory scales with the whole doc,
+                # fine for web pages; stream if very large docs ever land here.
                 batch_slices = [
                     chunks[start : start + cfg.embedding_batch_size]
                     for start in range(0, len(chunks), cfg.embedding_batch_size)
