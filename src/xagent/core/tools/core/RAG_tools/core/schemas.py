@@ -1173,7 +1173,12 @@ class IngestionConfig(BaseModel):
     max_retries: int = Field(
         DEFAULT_MAX_RETRIES,
         ge=0,
-        description="Maximum number of retries for embedding provider failures; must be non-negative",
+        description=(
+            "Maximum number of retries for embedding provider failures; must be "
+            "non-negative. Note the two ingestion paths differ at 0: the batch "
+            "path always makes at least one attempt, while the async path makes "
+            "zero (skips embedding). Keep >=1 for consistent behavior."
+        ),
     )
     page_ingest_concurrency: int = Field(
         DEFAULT_PAGE_INGEST_CONCURRENCY,

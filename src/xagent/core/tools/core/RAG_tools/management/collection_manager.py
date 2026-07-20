@@ -314,12 +314,18 @@ class CollectionManager:
     async def save_collection(self, collection: CollectionInfo) -> None:
         """Save collection metadata to storage with retry mechanism.
 
+        Takes the cross-thread guard as well as the asyncio lock: this does a
+        full-row overwrite and is reachable from the concurrent ingestion hot
+        path (the legacy-migration branch of resolve_effective_embedding_model_sync),
+        so without it a stale-read overwrite could clobber a concurrent
+        stats/embedding-init write on the same collection.
+
         Args:
             collection: CollectionInfo to save
         """
         lock = _get_collection_lock(collection.name)
 
-        async with lock:
+        async with lock, _collection_thread_guard(collection.name):
             await self._save_collection_with_retry(collection)
 
     async def delete_collection_metadata(
