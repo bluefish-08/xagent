@@ -532,6 +532,7 @@ async def _run_web_ingestion_impl(
         successful_page_ingestions = 0
         total_chunks = 0
         total_embeddings = 0
+        pages_started = 0
 
         loop = asyncio.get_event_loop()
         page_semaphore = asyncio.Semaphore(max(1, ing_cfg.page_ingest_concurrency))
@@ -550,7 +551,7 @@ async def _run_web_ingestion_impl(
             # without locks; the cross-thread DB write hazard is guarded inside
             # collection_manager.
             nonlocal documents_created, successful_page_ingestions
-            nonlocal total_chunks, total_embeddings
+            nonlocal total_chunks, total_embeddings, pages_started
 
             page_title = crawl_result.title or f"page_{i + 1}"
             with pipeline_facade.web_page_operation(
@@ -558,11 +559,14 @@ async def _run_web_ingestion_impl(
                 url=crawl_result.url,
                 title=page_title,
             ) as page_operation:
-                # Progress callback
+                # Progress callback. Pages complete out of order under concurrency,
+                # so report a monotonic started-counter rather than the page index.
+                # Safe without a lock: only mutated between awaits on the one loop.
                 if progress_callback:
+                    pages_started += 1
                     progress_callback(
-                        f"Ingesting page {i + 1}/{len(crawl_results)}: {crawl_result.url}",
-                        i + 1,
+                        f"Ingesting {pages_started}/{len(crawl_results)}: {crawl_result.url}",
+                        pages_started,
                         len(crawl_results),
                     )
 

@@ -56,14 +56,17 @@ _collection_locks_lock = threading.Lock()
 # thread locks close that gap for the metadata RMW critical sections (stats update,
 # embedding init, and access-timestamp bump). Ordering: always acquire the asyncio
 # lock first (same-loop reentry) then this thread lock, so a task holding it across
-# an await can never block its own loop. Only the RMW metadata row is guarded, not
-# the additive documents/chunks/vectors appends (distinct ids, no logical conflict).
+# an await can never block its own loop. The same per-collection lock also serializes
+# the LanceDB vector writes in write_vectors_to_db (concurrent commits to one table,
+# including the create_index build, can raise CommitConflict); it's an RLock so the
+# metadata sites can nest the write under their own guard on the same thread.
 _collection_thread_locks: dict[str, threading.RLock] = {}
 _collection_thread_locks_guard = threading.Lock()
 
 
 def _get_collection_thread_lock(collection_name: str) -> threading.RLock:
-    """Return a process-global cross-thread RLock for one collection's metadata RMW."""
+    """Return a process-global cross-thread RLock serializing one collection's
+    metadata RMW and LanceDB vector writes across threads."""
     lock = _collection_thread_locks.get(collection_name)
     if lock is None:
         with _collection_thread_locks_guard:

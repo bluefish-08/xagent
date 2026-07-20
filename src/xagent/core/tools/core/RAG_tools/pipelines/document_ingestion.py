@@ -1184,10 +1184,12 @@ def _process_document_impl(
                         batch_texts,
                         batch_index=idx,
                     )
-                    # Retry transient provider failures with linear backoff,
-                    # mirroring the async path. Runs in a worker thread, so a
-                    # blocking time.sleep between attempts is fine. A size
-                    # mismatch is deterministic and stays terminal (not retried).
+                    # Retry transient provider failures with linear backoff. Runs
+                    # in a worker thread, so a blocking time.sleep between attempts
+                    # is fine. A size mismatch is deterministic and stays terminal.
+                    # On exhaustion this re-raises and fails the whole document
+                    # (unlike the async path, which drops the chunk and continues);
+                    # max_retries=0 still does one attempt here, vs zero on async.
                     attempts = max(1, cfg.max_retries)
                     raw_vectors = None
                     for attempt in range(attempts):
@@ -1355,20 +1357,29 @@ def _process_document_impl(
                 },
             )
         )
+        final_index_status = (
+            last_write_response.index_status
+            if last_write_response is not None
+            else "skipped"
+        )
         logger.info(
             "Step write_vectors_to_db completed",
             extra={
                 "collection": collection,
                 "doc_id": doc_id,
                 "vector_count": vector_count,
-                "index_status": (
-                    last_write_response.index_status
-                    if last_write_response is not None
-                    else "skipped"
-                ),
+                "index_status": final_index_status,
                 "elapsed_ms": write_elapsed_ms,
             },
         )
+        # Index build is non-fatal (vectors are written; search falls back to
+        # brute force), but a corrupted/failed index shouldn't stay buried in a
+        # status field — surface it to the caller as a warning.
+        if final_index_status in ("index_corrupted", "failed"):
+            warnings.append(
+                f"Vector index not ready (status={final_index_status}); "
+                "search will be slower until it rebuilds."
+            )
 
         # Update collection statistics
         try:
