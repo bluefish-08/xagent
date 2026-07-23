@@ -2,13 +2,30 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Mapping, Optional, Protocol, Type, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class ToolVisibility(str, Enum):
     PUBLIC = "public"
     PRIVATE = "private"
     INTERNAL = "internal"
+
+
+class ToolRisk(str, Enum):
+    """How dangerous a tool call is, consumed by the approval gate.
+
+    - ``SAFE``: read-only operations, no side effects, never prompts.
+    - ``WRITE``: bounded side effects (workspace files / DB rows).
+    - ``EXECUTE``: arbitrary code / commands / unknown third-party tools with
+      unbounded blast radius.
+
+    Default is ``EXECUTE`` (fail closed): an unannotated tool is treated as the
+    most dangerous so it can never silently bypass an approval gate.
+    """
+
+    SAFE = "safe"
+    WRITE = "write"
+    EXECUTE = "execute"
 
 
 class ToolCategory(str, Enum):
@@ -62,6 +79,16 @@ class ToolMetadata(BaseModel):
     # metadata is constructed).
     read_only: bool = False
     concurrency_safe: bool = False
+    # Risk class consumed by the tool-approval gate. Defaults to EXECUTE so
+    # unannotated tools fail closed. ``read_only`` hard-implies ``SAFE`` (see
+    # validator below), matching the "reads never prompt" rule.
+    risk: ToolRisk = ToolRisk.EXECUTE
+
+    @model_validator(mode="after")
+    def _coerce_risk(self) -> "ToolMetadata":
+        if self.read_only:
+            self.risk = ToolRisk.SAFE
+        return self
 
 
 @runtime_checkable
@@ -115,6 +142,8 @@ class AbstractBaseTool(ABC, Tool):
                 getattr(self, "concurrency_safe", False)
                 or getattr(self, "read_only", False)
             ),
+            # read_only tools are coerced to SAFE by the validator regardless.
+            risk=getattr(self, "risk", ToolRisk.EXECUTE),
         )
 
     @abstractmethod
