@@ -73,6 +73,7 @@ class FakeToolMetadata:
         category: str = "basic",
         decision_group: str | None = None,
         description: str | None = None,
+        risk: str | None = None,
     ) -> None:
         self.name = name
         self.description = description or f"Fake tool {name}"
@@ -80,6 +81,9 @@ class FakeToolMetadata:
         self.concurrency_safe = bool(concurrency_safe) or bool(read_only)
         self.category = category
         self.decision_group = decision_group
+        # Mirror the production ToolMetadata coercion: read_only -> SAFE,
+        # otherwise default to EXECUTE (fail closed).
+        self.risk = risk or ("safe" if read_only else "execute")
 
 
 class FakeTool:
@@ -97,12 +101,14 @@ class FakeTool:
         result: Any = None,
         decision_group: str | None = None,
         tracker: ConcurrencyTracker | None = None,
+        risk: str | None = None,
     ) -> None:
         self.metadata = FakeToolMetadata(
             name,
             concurrency_safe=concurrency_safe,
             read_only=read_only,
             decision_group=decision_group,
+            risk=risk,
         )
         self._delay = delay
         self._gate = gate

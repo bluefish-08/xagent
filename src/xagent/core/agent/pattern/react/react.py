@@ -38,6 +38,7 @@ from datetime import timezone
 from enum import Enum
 from typing import Any, cast
 
+from ....tools.adapters.vibe.base import ToolRisk
 from ...context.enrichment import (
     enrich_context_with_memory,
     enrich_context_with_skill,
@@ -180,6 +181,7 @@ class ReActPattern(AgentPattern):
         ),
         tool_parallel_enabled: bool = False,
         tool_max_concurrency: int = 3,
+        approval_policy: str = "never",
     ) -> None:
         self.llm = llm
         self.max_iterations = max_iterations
@@ -206,6 +208,15 @@ class ReActPattern(AgentPattern):
         self.force_final_answer_next = False
         self.repeated_tool_decision: dict[str, Any] | None = None
         self.waiting_for_user_request: dict[str, Any] | None = None
+        # Tool-approval gate state. ``approval_policy`` is one of
+        # "never" (default, gate disabled -> zero behavior change),
+        # "on_dangerous" (gate EXECUTE tools) or "strict" (gate WRITE+EXECUTE).
+        # ``session_approved`` caches approve-for-session decisions keyed by
+        # (tool_name, canonical-args SHA-256); ``pending_approval_decisions``
+        # holds a one-shot decision per gated tool_call_id, consumed on re-entry.
+        self.approval_policy: str = approval_policy
+        self.session_approved: dict[str, bool] = {}
+        self.pending_approval_decisions: dict[str, dict[str, Any]] = {}
         self.task_text: str | None = None
         self._memory_store: Any | None = None
         self._tool_decision_groups_by_name: dict[str, str] = {}
@@ -644,6 +655,9 @@ class ReActPattern(AgentPattern):
             ),
             "force_final_answer_next": self.force_final_answer_next,
             "repeated_tool_decision": self.repeated_tool_decision,
+            "approval_policy": self.approval_policy,
+            "session_approved": self.session_approved,
+            "pending_approval_decisions": self.pending_approval_decisions,
             "waiting_for_user_request": self.waiting_for_user_request,
             "task_text": self.task_text,
             "last_response": self.last_response,
@@ -693,6 +707,16 @@ class ReActPattern(AgentPattern):
             dict(repeated_tool_decision)
             if isinstance(repeated_tool_decision, dict)
             else None
+        )
+        if "approval_policy" in state:
+            self.approval_policy = str(state["approval_policy"])
+        session_approved = state.get("session_approved")
+        self.session_approved = (
+            dict(session_approved) if isinstance(session_approved, dict) else {}
+        )
+        pending_decisions = state.get("pending_approval_decisions")
+        self.pending_approval_decisions = (
+            dict(pending_decisions) if isinstance(pending_decisions, dict) else {}
         )
         waiting_request = state.get("waiting_for_user_request")
         self.waiting_for_user_request = (
@@ -744,6 +768,10 @@ class ReActPattern(AgentPattern):
             context=context,
             after_message_count=waiting_message_count,
         )
+        if self.waiting_for_user_request.get("kind") == "approval":
+            # Record the decision before clearing the request; the gated call is
+            # still pending and re-enters the gate to apply it.
+            self._record_approval_decision(context=context)
         waiting_task = self.waiting_for_user_request.get("task_text")
         if waiting_task and self.task_text is None:
             self.task_text = str(waiting_task)
@@ -1229,6 +1257,176 @@ class ReActPattern(AgentPattern):
         metadata = getattr(tool, "metadata", None)
         return bool(getattr(metadata, "concurrency_safe", False))
 
+    # ---- Tool-approval gate -------------------------------------------------
+    # ponytail: the gate fires only on serial segments. Concurrent segments are
+    # concurrency-safe tools (read-only -> SAFE), so they never need approval.
+
+    def _tool_risk(self, name: str, tools: list[Any]) -> ToolRisk:
+        try:
+            tool = self._find_tool(name, tools)
+        except ValueError:
+            return ToolRisk.EXECUTE
+        metadata = getattr(tool, "metadata", None)
+        raw = getattr(metadata, "risk", ToolRisk.EXECUTE)
+        try:
+            return ToolRisk(raw)
+        except ValueError:
+            return ToolRisk.EXECUTE
+
+    def _risk_needs_approval(self, risk: ToolRisk) -> bool:
+        if self.approval_policy == "on_dangerous":
+            return risk == ToolRisk.EXECUTE
+        if self.approval_policy == "strict":
+            return risk in (ToolRisk.WRITE, ToolRisk.EXECUTE)
+        return False
+
+    def _approval_cache_key(self, tool_call: dict[str, Any]) -> str:
+        name = str(tool_call.get("name", ""))
+        args = tool_call.get("args", {}) or {}
+        canonical = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"{name}:{digest}"
+
+    def _resolve_approval(
+        self, tool_call: dict[str, Any], tools: list[Any]
+    ) -> tuple[str, str]:
+        """Decide what to do with a pending serial tool call.
+
+        Returns ``(action, hint)`` where action is ``"allow"``, ``"deny"`` or
+        ``"ask"``. Precedence: policy-off / SAFE below threshold -> allow;
+        session cache -> allow; one-shot recorded decision -> apply & consume;
+        otherwise -> ask.
+        """
+        if self.approval_policy == "never":
+            return "allow", ""
+        risk = self._tool_risk(str(tool_call.get("name", "")), tools)
+        if not self._risk_needs_approval(risk):
+            return "allow", ""
+        if self.session_approved.get(self._approval_cache_key(tool_call)):
+            return "allow", ""
+        call_id = str(tool_call.get("id") or "")
+        decision = self.pending_approval_decisions.pop(call_id, None)
+        if decision is not None:
+            kind = str(decision.get("decision", "deny"))
+            if kind == "approve_session":
+                self.session_approved[self._approval_cache_key(tool_call)] = True
+                return "allow", ""
+            if kind == "approve":
+                return "allow", ""
+            return "deny", str(decision.get("hint", ""))
+        return "ask", ""
+
+    def _approval_interactions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "action_cards",
+                "field": "approval_decision",
+                "label": "Tool approval",
+                "options": [
+                    {"label": "Approve once", "value": "approve"},
+                    {"label": "Approve for session", "value": "approve_session"},
+                    {"label": "Deny", "value": "deny"},
+                ],
+            }
+        ]
+
+    def _approval_message(self, name: str, args: dict[str, Any], risk: ToolRisk) -> str:
+        try:
+            preview = json.dumps(args, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            preview = str(args)
+        if len(preview) > 500:
+            preview = preview[:500] + "…"
+        return (
+            f"Tool `{name}` (risk: {risk.value}) requests approval before running.\n"
+            f"Arguments: {preview}\n"
+            "Approve once, approve for this session, or deny "
+            "(optionally add a reason)."
+        )
+
+    async def _pause_for_approval(
+        self,
+        tool_call: dict[str, Any],
+        tools: list[Any],
+        context: Any,
+        runtime: PatternRuntime,
+    ) -> dict[str, Any]:
+        name = str(tool_call.get("name", ""))
+        call_id = tool_call.get("id")
+        args = tool_call.get("args", {}) or {}
+        risk = self._tool_risk(name, tools)
+        message = self._approval_message(name, args, risk)
+        interactions = self._approval_interactions()
+        await runtime.send_message(
+            message=message,
+            message_type="approval",
+            expect_response=True,
+            visible=True,
+            metadata={
+                "interactions": interactions,
+                "approval": {
+                    "tool_name": name,
+                    "tool_call_id": call_id,
+                    "risk": risk.value,
+                },
+            },
+        )
+        self.status = "waiting_for_user"
+        self.waiting_for_user_request = {
+            "kind": "approval",
+            "tool_call_id": call_id,
+            "tool_name": name,
+            "message": message,
+            "message_type": "approval",
+            "interactions": interactions,
+            "task_text": self.task_text,
+            "message_count": len(getattr(context, "messages", [])),
+        }
+        await runtime.checkpoint(
+            "waiting_for_user",
+            context=context,
+            pattern=self,
+            metadata={"waiting_for_user_request": self.waiting_for_user_request},
+        )
+        return {
+            "success": False,
+            "status": "waiting_for_user",
+            "message": message,
+            "message_type": "approval",
+            "interactions": interactions,
+            "context": context,
+        }
+
+    def _record_approval_decision(self, *, context: Any) -> None:
+        """Parse the user's reply to an approval request into a one-shot decision.
+
+        Fail closed: any free text that is not a recognizable approval is a
+        deny-with-hint, so an ambiguous answer never runs a dangerous tool.
+        """
+        waiting_request = self.waiting_for_user_request or {}
+        call_id = str(waiting_request.get("tool_call_id") or "")
+        if not call_id:
+            return
+        text = (latest_user_text(context) or "").strip()
+        lowered = text.lower()
+        if "approve_session" in lowered or "approve for session" in lowered:
+            decision, hint = "approve_session", ""
+        elif "approve" in lowered or lowered in {
+            "yes",
+            "y",
+            "ok",
+            "allow",
+            "批准",
+            "同意",
+        }:
+            decision, hint = "approve", ""
+        else:
+            decision, hint = "deny", text
+        self.pending_approval_decisions[call_id] = {
+            "decision": decision,
+            "hint": hint,
+        }
+
     def _next_segment(
         self, pending: list[dict[str, Any]], tools: list[Any]
     ) -> tuple[list[dict[str, Any]], str]:
@@ -1404,6 +1602,36 @@ class ReActPattern(AgentPattern):
 
             if kind == "serial":
                 tool_call = segment[0]
+                action, hint = self._resolve_approval(tool_call, tools)
+                if action == "ask":
+                    # Pause before executing; the call stays at the front of the
+                    # queue so it re-enters the gate with the decision applied.
+                    return await self._pause_for_approval(
+                        tool_call, tools, context, runtime
+                    )
+                if action == "deny":
+                    result = {
+                        "status": "denied_by_user",
+                        "error": "Tool call denied by user.",
+                        "message": (
+                            "The user denied this tool call. "
+                            + (f"Reason: {hint}. " if hint else "")
+                            + "Choose a different approach; do not retry the "
+                            "same call."
+                        ),
+                    }
+                    self._record_tool_call(
+                        tool_call, status="denied_by_user", result=result
+                    )
+                    self._backfill_result(tool_call, result, context)
+                    self.pending_tool_calls = self.pending_tool_calls[1:]
+                    await runtime.checkpoint(
+                        "after_tool",
+                        context=context,
+                        pattern=self,
+                        metadata={"tool_call": tool_call},
+                    )
+                    continue
                 await runtime.checkpoint(
                     "before_tool",
                     context=context,
