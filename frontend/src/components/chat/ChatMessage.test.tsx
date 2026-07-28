@@ -17,11 +17,6 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }))
 
-vi.mock("@/lib/utils", () => ({
-  cn: (...classes: Array<string | false | null | undefined>) =>
-    classes.filter(Boolean).join(" "),
-}))
-
 vi.mock("./TraceEventRenderer", () => ({
   TraceEventRenderer: () => <div data-testid="trace-renderer" />,
 }))
@@ -44,6 +39,18 @@ const TRACE_EVENTS = [
     event_type: "tool_call",
     timestamp: 1000,
     data: { tool_name: "web_search", args: { query: "secret" } },
+  },
+] as any
+
+const RAW_ERROR = "Traceback: KeyError('api_key') in web_search"
+
+const FAILED_TRACE_EVENTS = [
+  ...TRACE_EVENTS,
+  {
+    event_id: "err-1",
+    event_type: "trace_error",
+    timestamp: 2000,
+    data: { error: RAW_ERROR },
   },
 ] as any
 
@@ -92,25 +99,9 @@ describe("ChatMessage process view", () => {
     )
 
     expect(screen.queryByTestId("trace-renderer")).toBeNull()
-    expect(container.textContent).toBe("")
-    // An empty bubble is not empty markup: it still carries the assistant
-    // avatar, so assert the avatar icon is gone too.
-    expect(container.querySelector("svg")).toBeNull()
-  })
-
-  it("keeps the bubble for a trace-only turn that is awaiting input", () => {
-    render(
-      <ChatMessage
-        role="assistant"
-        content={null}
-        traceEvents={TRACE_EVENTS}
-        showProcessView={false}
-        showEmptyStatus={false}
-        interactions={[{ type: "select_one", field: "dataset", label: "Dataset" }]}
-      />
-    )
-
-    expect(screen.getByTestId("clarification-form")).toBeTruthy()
+    // The timeline separates children with space-y-*, so a childless wrapper
+    // would still take up its gap — nothing at all must be rendered.
+    expect(container.firstChild).toBeNull()
   })
 
   it("keeps a generic status line while the answer is still streaming", () => {
@@ -143,6 +134,75 @@ describe("ChatMessage process view", () => {
       />
     )
 
+    expect(screen.getByText(/tool_call/)).toBeTruthy()
     expect(screen.queryByText("common.thinking")).toBeNull()
+  })
+
+  it("does not sit on a thinking line once the turn is done", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={TRACE_EVENTS}
+        showProcessView={false}
+        showEmptyStatus={true}
+        taskStatus="completed"
+      />
+    )
+
+    expect(screen.getByText("common.done")).toBeTruthy()
+    expect(screen.queryByText("common.thinking")).toBeNull()
+  })
+})
+
+describe("ChatMessage failures", () => {
+  it("shows the backend error on internal pages", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={FAILED_TRACE_EVENTS}
+        showProcessView={true}
+        showEmptyStatus={true}
+        taskStatus="failed"
+      />
+    )
+
+    expect(screen.getByText(RAW_ERROR)).toBeTruthy()
+  })
+
+  it("replaces the backend error with a generic line when the trace is hidden", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={FAILED_TRACE_EVENTS}
+        showProcessView={false}
+        showEmptyStatus={true}
+        taskStatus="failed"
+      />
+    )
+
+    expect(screen.queryByText(RAW_ERROR)).toBeNull()
+    expect(screen.getByText("common.errors.taskFailed")).toBeTruthy()
+  })
+
+  it("keeps a past failed turn visible when the trace is hidden", () => {
+    // Its trace group is no longer the latest, so the panel marks it
+    // showEmptyStatus=false. Dropping the bubble as well would leave the
+    // visitor's question followed by nothing at all.
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={FAILED_TRACE_EVENTS}
+        showProcessView={false}
+        showEmptyStatus={false}
+        processStatus="failed"
+      />
+    )
+
+    expect(screen.getByText("common.errors.taskFailed")).toBeTruthy()
+    expect(screen.queryByText(RAW_ERROR)).toBeNull()
   })
 })

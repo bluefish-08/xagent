@@ -39,6 +39,7 @@ const zh = {
     customPlaceholder: "自定义...",
     errors: {
       unknown: "未知错误",
+      taskFailed: "出了点问题，请重试。",
     },
   },
   voiceInput: {

@@ -322,17 +322,6 @@ export function ChatMessage({
 
   const hasTraceEvents = Array.isArray(traceEvents) && traceEvents.length > 0;
   const shouldShowProcess = !!showProcessView && hasTraceEvents;
-  // A trace-only turn carries no answer text and no status line of its own, so
-  // its bubble would render as a bare avatar. Drop it whether the trace above
-  // was rendered (internal pages) or suppressed (embedded chat) — keying this
-  // off the events themselves rather than off shouldShowProcess. Interactions
-  // live inside the bubble, so a turn awaiting input always keeps it.
-  const isProcessOnlyMessage =
-    hasTraceEvents &&
-    !isUser &&
-    !content &&
-    showEmptyStatus === false &&
-    !(interactions && interactions.length > 0);
 
   // Map event/action to i18n key
   const getEventTitle = (e: TraceEvent | undefined) => {
@@ -357,8 +346,24 @@ export function ChatMessage({
     traceEvents,
   });
 
+  // A trace-only turn carries no answer text and no status line of its own, so
+  // its bubble would render as a bare avatar. Drop it whether the trace above
+  // was rendered (internal pages) or suppressed (embedded chat) — keying this
+  // off the events themselves rather than off shouldShowProcess. A failed turn
+  // is the exception once the trace is hidden: dropping the bubble too would
+  // leave the visitor with no sign the turn ever ran.
+  const isProcessOnlyMessage =
+    hasTraceEvents &&
+    !isUser &&
+    !content &&
+    showEmptyStatus === false &&
+    (showProcessView || resolvedProcessStatus !== "failed");
+
+  // The trace carries the backend's raw error string (a Python exception, more
+  // often than not). With the trace hidden the failure line must not become its
+  // replacement channel, so only mine the events when the process view is on.
   let errorMessage = "";
-  if (resolvedProcessStatus === "failed" && Array.isArray(traceEvents)) {
+  if (showProcessView && resolvedProcessStatus === "failed" && Array.isArray(traceEvents)) {
     for (let i = traceEvents.length - 1; i >= 0; i--) {
       const event = traceEvents[i];
       if (['trace_error', 'task_failed', 'react_task_failed', 'dag_step_failed', 'agent_error'].includes(event.event_type || '')) {
@@ -367,10 +372,28 @@ export function ChatMessage({
       }
     }
   }
+  const failureText =
+    errorMessage
+    || (showProcessView ? t("common.errors.unknown") : t("common.errors.taskFailed"));
   const failedMessageText =
     typeof content === "string" && content.trim()
       ? content
-      : errorMessage || t("common.errors.unknown");
+      : failureText;
+
+  // latestTitle names the running step ("calling web_search"), which is part of
+  // the trace: with the trace hidden it would leak the very detail the status
+  // line replaces.
+  const statusTitle = showProcessView
+    ? latestTitle
+    : resolvedProcessStatus === "completed"
+      ? t("common.done")
+      : t("common.thinking");
+
+  // An empty wrapper is not free: the timeline separates children with
+  // space-y-*, so a childless div still contributes its gap.
+  if (isProcessOnlyMessage && !copyableContent) {
+    return null;
+  }
 
   return (
     <div className="w-full space-y-2 animate-fade-in group">
@@ -433,10 +456,7 @@ export function ChatMessage({
                   <div className="text-sm leading-relaxed break-words [overflow-wrap:anywhere]">{content}</div>
                 )
               ) : (
-                // latestTitle names the running step ("calling web_search"),
-                // which is part of the trace: with the trace hidden it would
-                // leak the very detail the status line replaces.
-                !isUser && showEmptyStatus && <GeneratingIndicator latestTitle={showProcessView ? latestTitle : t("common.thinking")} taskStatus={resolvedProcessStatus || taskStatus} errorMessage={errorMessage} />
+                !isUser && showEmptyStatus && <GeneratingIndicator latestTitle={statusTitle} taskStatus={resolvedProcessStatus || taskStatus} errorMessage={failureText} />
               )}
               {!isUser && interactions && interactions.length > 0 && (
                 <div className="mt-4 border-t pt-4">

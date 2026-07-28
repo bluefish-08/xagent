@@ -39,6 +39,7 @@ const en = {
     customPlaceholder: "Custom...",
     errors: {
       unknown: "Unknown error",
+      taskFailed: "Something went wrong. Please try again.",
     },
   },
   voiceInput: {
