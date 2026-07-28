@@ -31,9 +31,11 @@ const nextConfig = {
   // Strip debug logging from production bundles. The embedded widget runs on
   // third-party sites, and the chat context logs whole WebSocket frames (user
   // messages, agent output, tool arguments and results) into their console.
-  // SWC drops log/debug/info/trace at build time only — `next dev` keeps them.
+  // Next hands this straight to SWC with no development guard of its own
+  // (build/swc/options.js), so `next dev` has to be excluded explicitly for
+  // local debugging to keep its log/debug/info/trace output.
   compiler: {
-    removeConsole: { exclude: ["error", "warn"] },
+    removeConsole: isDev ? false : { exclude: ["error", "warn"] },
   },
   // 解决开发模式错误
   reactStrictMode: true,
