@@ -320,12 +320,19 @@ export function ChatMessage({
     })
     : "";
 
-  const shouldShowProcess =
-    !!showProcessView &&
-    Array.isArray(traceEvents) &&
-    traceEvents.length > 0;
+  const hasTraceEvents = Array.isArray(traceEvents) && traceEvents.length > 0;
+  const shouldShowProcess = !!showProcessView && hasTraceEvents;
+  // A trace-only turn carries no answer text and no status line of its own, so
+  // its bubble would render as a bare avatar. Drop it whether the trace above
+  // was rendered (internal pages) or suppressed (embedded chat) — keying this
+  // off the events themselves rather than off shouldShowProcess. Interactions
+  // live inside the bubble, so a turn awaiting input always keeps it.
   const isProcessOnlyMessage =
-    shouldShowProcess && !isUser && !content && showEmptyStatus === false;
+    hasTraceEvents &&
+    !isUser &&
+    !content &&
+    showEmptyStatus === false &&
+    !(interactions && interactions.length > 0);
 
   // Map event/action to i18n key
   const getEventTitle = (e: TraceEvent | undefined) => {
@@ -426,7 +433,10 @@ export function ChatMessage({
                   <div className="text-sm leading-relaxed break-words [overflow-wrap:anywhere]">{content}</div>
                 )
               ) : (
-                !isUser && showEmptyStatus && <GeneratingIndicator latestTitle={latestTitle} taskStatus={resolvedProcessStatus || taskStatus} errorMessage={errorMessage} />
+                // latestTitle names the running step ("calling web_search"),
+                // which is part of the trace: with the trace hidden it would
+                // leak the very detail the status line replaces.
+                !isUser && showEmptyStatus && <GeneratingIndicator latestTitle={showProcessView ? latestTitle : t("common.thinking")} taskStatus={resolvedProcessStatus || taskStatus} errorMessage={errorMessage} />
               )}
               {!isUser && interactions && interactions.length > 0 && (
                 <div className="mt-4 border-t pt-4">

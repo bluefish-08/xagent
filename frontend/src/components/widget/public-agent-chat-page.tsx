@@ -400,6 +400,9 @@ function PublicConversationContent({
             showTokenUsage={false}
             showDagPreview={false}
             showTaskFiles={false}
+            // A visitor on a customer's site gets the answer, not the run: no
+            // reasoning, no tool arguments, no raw tool output.
+            showProcessView={false}
             hideFileUpload={false}
             hideConfig={true}
             compactInput={true}

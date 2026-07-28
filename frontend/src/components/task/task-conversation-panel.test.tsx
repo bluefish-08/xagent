@@ -68,6 +68,7 @@ vi.mock("@/components/chat/ChatMessage", () => ({
     taskStatus,
     processStatus,
     showEmptyStatus,
+    showProcessView,
     onOpenExecutionPlan,
   }: {
     content?: string | null
@@ -76,6 +77,7 @@ vi.mock("@/components/chat/ChatMessage", () => ({
     taskStatus?: string
     processStatus?: string
     showEmptyStatus?: boolean
+    showProcessView?: boolean
     onOpenExecutionPlan?: () => void
   }) => (
     <div
@@ -85,6 +87,7 @@ vi.mock("@/components/chat/ChatMessage", () => ({
       data-task-status={taskStatus || ""}
       data-process-status={processStatus || ""}
       data-show-empty-status={showEmptyStatus ? "true" : "false"}
+      data-show-process-view={showProcessView ? "true" : "false"}
     >
       {content}
       {onOpenExecutionPlan && traceEvents?.some((event) => {
@@ -817,5 +820,38 @@ describe("TaskConversationPanel", () => {
 
     expect(await screen.findByTestId("center-panel")).toHaveAttribute("data-node-count", "3")
     expect(screen.getByTestId("center-panel")).toHaveAttribute("data-edge-count", "0")
+  })
+
+  it("shows the process view by default and hides it when asked to", () => {
+    const runningTask = {
+      id: "42",
+      title: "Task",
+      description: "Task",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    } as any
+    appState.messages = []
+    appState.traceEvents = [
+      {
+        event_id: "tool-1",
+        event_type: "tool_call",
+        timestamp: 1000,
+        data: { tool_name: "web_search", args: { query: "secret" } },
+      },
+    ] as any
+    appState.currentTask = runningTask
+    appState.isProcessing = true
+
+    const { unmount } = render(<TaskConversationPanel mode="page" />)
+    for (const message of screen.getAllByTestId("chat-message")) {
+      expect(message).toHaveAttribute("data-show-process-view", "true")
+    }
+    unmount()
+
+    render(<TaskConversationPanel mode="page" showProcessView={false} />)
+    for (const message of screen.getAllByTestId("chat-message")) {
+      expect(message).toHaveAttribute("data-show-process-view", "false")
+    }
   })
 })

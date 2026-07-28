@@ -32,6 +32,10 @@ interface TaskConversationPanelProps {
   showTokenUsage?: boolean
   showDagPreview?: boolean
   showTaskFiles?: boolean
+  // Renders the execution trace (reasoning, tool arguments, tool output) above
+  // each answer. Off for public/embedded chat, where a visitor should see the
+  // answer and a status line, not the run.
+  showProcessView?: boolean
   hideFileUpload?: boolean
   hideConfig?: boolean
   compactInput?: boolean
@@ -181,6 +185,7 @@ export function TaskConversationPanel({
   showTokenUsage = mode === "page",
   showDagPreview = mode === "page",
   showTaskFiles = mode === "page",
+  showProcessView = true,
   hideFileUpload = false,
   hideConfig = mode === "embedded-preview",
   compactInput = false,
@@ -694,7 +699,7 @@ export function TaskConversationPanel({
                         content={item.content}
                         rawContent={item.rawContent}
                         traceEvents={item.traceEvents as any || []}
-                        showProcessView={true}
+                        showProcessView={showProcessView}
                         processStatus={item.processStatus}
                         taskStatus={
                           isFailedFinalAnswerStream
@@ -718,7 +723,7 @@ export function TaskConversationPanel({
                       role="assistant"
                       content={state.currentTask?.status === "waiting_for_user" ? waitingPrompt : null}
                       traceEvents={currentTurnTraceEvents as any || []}
-                      showProcessView={true}
+                      showProcessView={showProcessView}
                       isVirtual
                       processStatus={state.currentTask?.status}
                       taskStatus={state.currentTask?.status}

@@ -19,6 +19,7 @@ const en = {
     resume: "Resume",
     executing: "Executing",
     planning: "Formulating Plan",
+    thinking: "Thinking",
     taskPaused: "Task Paused",
     waitingForUser: "Waiting for your response",
     noData: "No Data",

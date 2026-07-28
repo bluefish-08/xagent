@@ -19,6 +19,7 @@ const zh = {
     resume: "继续",
     executing: "正在执行中",
     planning: "正在制定计划",
+    thinking: "正在思考",
     taskPaused: "任务已暂停",
     waitingForUser: "等待你的回复",
     noData: "暂无数据",
