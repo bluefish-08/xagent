@@ -377,6 +377,25 @@ describe("PublicAgentChatPage", () => {
 
     expect(await screen.findByRole("button", { name: "start:Support Agent" })).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    // No conversation yet — nothing to end.
+    expect(screen.queryByRole("button", { name: "widgetChat.newConversation" })).toBeNull()
+  })
+
+  it("ends the conversation and returns to the start screen", async () => {
+    const taskKey = "widget_task_17_guest-1"
+    localStorage.setItem(taskKey, "71")
+    fetchMock.mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
+
+    renderWidgetPage()
+
+    await screen.findByTestId("conversation-panel")
+    fireEvent.click(screen.getByRole("button", { name: "widgetChat.newConversation" }))
+
+    // The persisted id is dropped, so a reload cannot resurrect the old task,
+    // and the next message goes through the fresh-task path in handleSend.
+    expect(await screen.findByRole("button", { name: "start:Support Agent" })).toBeInTheDocument()
+    expect(app.setTaskId).toHaveBeenCalledWith(null, { navigate: false })
+    expect(localStorage.getItem(taskKey)).toBeNull()
   })
 
   it("creates an agent task and then sends its opening message", async () => {
@@ -610,6 +629,29 @@ describe("PublicAgentChatPage", () => {
     expect(fetchMock).not.toHaveBeenCalled()
     // Hiding the trace is scoped to the widget (#1041); share links keep it.
     expect(panel).toHaveAttribute("data-show-process-view", "true")
+  })
+
+  it("ends a share conversation and returns to the start screen", async () => {
+    localStorage.clear()
+    const token = makeShareJwt({ guest_id: "guest-A", exp: futureExp() })
+    localStorage.setItem(
+      SHARE_AUTH_KEY,
+      JSON.stringify({ ...successfulAgentAuth, access_token: token }),
+    )
+    const taskKey = "share_task_share-tok_17_guest-A"
+    localStorage.setItem(taskKey, "71")
+
+    renderSharePage()
+
+    await screen.findByTestId("conversation-panel")
+    fireEvent.click(screen.getByRole("button", { name: "widgetChat.newConversation" }))
+
+    expect(await screen.findByRole("button", { name: "start:Support Agent" })).toBeInTheDocument()
+    expect(app.setTaskId).toHaveBeenCalledWith(null, { navigate: false })
+    expect(localStorage.getItem(taskKey)).toBeNull()
+    // Only the task pointer is dropped — the guest auth survives, so no re-auth.
+    expect(localStorage.getItem(SHARE_AUTH_KEY)).not.toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("does not resume a task persisted under a different guest_id", async () => {
