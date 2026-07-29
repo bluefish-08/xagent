@@ -389,9 +389,11 @@ export function ChatMessage({
       ? t("common.done")
       : t("common.thinking");
 
-  // An empty wrapper is not free: the timeline separates children with
-  // space-y-*, so a childless div still contributes its gap.
-  if (isProcessOnlyMessage && !copyableContent) {
+  // Neither the trace nor the bubble is going to render, so there is nothing
+  // left to wrap. Bail out rather than emit an empty div: the timeline
+  // separates children with space-y-*, so a childless wrapper still takes its
+  // gap, and a stray rawContent would leave the copy button floating alone.
+  if (isProcessOnlyMessage && !shouldShowProcess) {
     return null;
   }
 

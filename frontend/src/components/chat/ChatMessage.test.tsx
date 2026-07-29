@@ -104,6 +104,23 @@ describe("ChatMessage process view", () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it("drops it even when the turn carries copyable rawContent", () => {
+    // rawContent alone must not resurrect the wrapper: with both the trace and
+    // the bubble hidden, all that survives is a floating copy button.
+    const { container } = render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        rawContent="internal draft text"
+        traceEvents={TRACE_EVENTS}
+        showProcessView={false}
+        showEmptyStatus={false}
+      />
+    )
+
+    expect(container.firstChild).toBeNull()
+  })
+
   it("keeps a generic status line while the answer is still streaming", () => {
     render(
       <ChatMessage
