@@ -78,16 +78,8 @@ export interface ChatMessageProps {
   onSendInteraction?: (message: string, files?: File[], metadata?: any) => Promise<void> | void;
 }
 
-function GeneratingIndicator({ latestTitle, taskStatus, errorMessage }: { latestTitle?: string, taskStatus?: string, errorMessage: string }) {
+function GeneratingIndicator({ latestTitle, taskStatus }: { latestTitle?: string, taskStatus?: string }) {
   const { t } = useI18n();
-
-  if (taskStatus === 'failed') {
-    return (
-      <div className="py-3 text-sm leading-relaxed text-red-500">
-        <span>{errorMessage}</span>
-      </div>
-    );
-  }
 
   const displayTitle = taskStatus === 'paused'
     ? t("common.taskPaused")
@@ -467,7 +459,7 @@ export function ChatMessage({
                 // A past paused/waiting turn has showEmptyStatus=false, but with
                 // the trace hidden its status line is all that marks the turn.
                 !isUser && (showEmptyStatus || (!showProcessView && isStoppedWithoutAnswer)) && (
-                  <GeneratingIndicator latestTitle={statusTitle} taskStatus={resolvedProcessStatus} errorMessage={failureText} />
+                  <GeneratingIndicator latestTitle={statusTitle} taskStatus={resolvedProcessStatus} />
                 )
               )}
               {!isUser && interactions && interactions.length > 0 && (
