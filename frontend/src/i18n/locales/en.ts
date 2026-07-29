@@ -36,6 +36,7 @@ const en = {
     create: "Create",
     edit: "Edit",
     done: "Done",
+    statusDone: "Done",
     customPlaceholder: "Custom...",
     errors: {
       unknown: "Unknown error",

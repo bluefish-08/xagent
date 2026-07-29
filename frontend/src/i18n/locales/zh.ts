@@ -36,6 +36,7 @@ const zh = {
     create: "创建",
     edit: "编辑",
     done: "完成",
+    statusDone: "已完成",
     customPlaceholder: "自定义...",
     errors: {
       unknown: "未知错误",

@@ -167,8 +167,67 @@ describe("ChatMessage process view", () => {
       />
     )
 
-    expect(screen.getByText("common.done")).toBeTruthy()
+    expect(screen.getByText("common.statusDone")).toBeTruthy()
     expect(screen.queryByText("common.thinking")).toBeNull()
+  })
+
+  it("renders the trace alone for an internal trace-only turn", () => {
+    const { container } = render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={TRACE_EVENTS}
+        showProcessView={true}
+        showEmptyStatus={false}
+      />
+    )
+
+    expect(screen.getByTestId("trace-renderer")).toBeTruthy()
+    // No bubble: the avatar (the only svg here, TraceEventRenderer is mocked)
+    // must not render below the trace.
+    expect(container.querySelector("svg")).toBeNull()
+  })
+})
+
+describe("ChatMessage stopped turns", () => {
+  it.each([
+    ["paused", "common.taskPaused"],
+    ["waiting_for_user", "common.waitingForUser"],
+  ])("keeps a past %s turn visible when the trace is hidden", (status, statusText) => {
+    // Like the past-failed case: the panel marks a superseded trace group
+    // showEmptyStatus=false, and without the trace only the status line is
+    // left to show the turn ever ran.
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={TRACE_EVENTS}
+        showProcessView={false}
+        showEmptyStatus={false}
+        processStatus={status}
+      />
+    )
+
+    expect(screen.getByText(statusText)).toBeTruthy()
+    expect(screen.queryByTestId("trace-renderer")).toBeNull()
+    expect(screen.queryByText(/web_search/)).toBeNull()
+  })
+
+  it("still drops a paused trace-only turn when the trace itself shows", () => {
+    const { container } = render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={TRACE_EVENTS}
+        showProcessView={true}
+        showEmptyStatus={false}
+        processStatus="paused"
+      />
+    )
+
+    expect(screen.getByTestId("trace-renderer")).toBeTruthy()
+    expect(container.querySelector("svg")).toBeNull()
+    expect(screen.queryByText("common.taskPaused")).toBeNull()
   })
 })
 
@@ -221,5 +280,23 @@ describe("ChatMessage failures", () => {
 
     expect(screen.getByText("common.errors.taskFailed")).toBeTruthy()
     expect(screen.queryByText(RAW_ERROR)).toBeNull()
+  })
+
+  it("falls back to a generic unknown error when the failed trace has no error text", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content={null}
+        traceEvents={[
+          ...TRACE_EVENTS,
+          { event_id: "err-2", event_type: "task_failed", timestamp: 2000, data: {} },
+        ]}
+        showProcessView={true}
+        showEmptyStatus={true}
+        taskStatus="failed"
+      />
+    )
+
+    expect(screen.getByText("common.errors.unknown")).toBeTruthy()
   })
 })

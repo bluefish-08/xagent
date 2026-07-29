@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { normalizeTimestampMs } from "@/lib/time-utils";
 import { FileChip } from "./FileChip";
 import { ClarificationForm } from "./clarification-form";
-import { resolveTraceProcessStatus } from "@/lib/trace-process-status";
+import { isStoppedTraceProcessStatus, resolveTraceProcessStatus } from "@/lib/trace-process-status";
 
 interface ToolArgs {
   code?: string;
@@ -78,13 +78,13 @@ export interface ChatMessageProps {
   onSendInteraction?: (message: string, files?: File[], metadata?: any) => Promise<void> | void;
 }
 
-function GeneratingIndicator({ latestTitle, taskStatus, errorMessage }: { latestTitle?: string, taskStatus?: string, errorMessage?: string }) {
+function GeneratingIndicator({ latestTitle, taskStatus, errorMessage }: { latestTitle?: string, taskStatus?: string, errorMessage: string }) {
   const { t } = useI18n();
 
   if (taskStatus === 'failed') {
     return (
       <div className="py-3 text-sm leading-relaxed text-red-500">
-        <span>{errorMessage || t("common.errors.unknown")}</span>
+        <span>{errorMessage}</span>
       </div>
     );
   }
@@ -346,18 +346,24 @@ export function ChatMessage({
     traceEvents,
   });
 
+  // A turn that stopped without an answer — failed, paused, or waiting for
+  // user input — must leave a visible mark once the trace is hidden: dropping
+  // its bubble too would show the visitor's question followed by nothing.
+  const isStoppedWithoutAnswer =
+    isStoppedTraceProcessStatus(resolvedProcessStatus) &&
+    resolvedProcessStatus !== "completed";
+
   // A trace-only turn carries no answer text and no status line of its own, so
   // its bubble would render as a bare avatar. Drop it whether the trace above
   // was rendered (internal pages) or suppressed (embedded chat) — keying this
-  // off the events themselves rather than off shouldShowProcess. A failed turn
-  // is the exception once the trace is hidden: dropping the bubble too would
-  // leave the visitor with no sign the turn ever ran.
+  // off the events themselves rather than off shouldShowProcess. Stopped
+  // unanswered turns are the exception once the trace is hidden (see above).
   const isProcessOnlyMessage =
     hasTraceEvents &&
     !isUser &&
     !content &&
     showEmptyStatus === false &&
-    (showProcessView || resolvedProcessStatus !== "failed");
+    (showProcessView || !isStoppedWithoutAnswer);
 
   // The trace carries the backend's raw error string (a Python exception, more
   // often than not). With the trace hidden the failure line must not become its
@@ -386,7 +392,7 @@ export function ChatMessage({
   const statusTitle = showProcessView
     ? latestTitle
     : resolvedProcessStatus === "completed"
-      ? t("common.done")
+      ? t("common.statusDone")
       : t("common.thinking");
 
   // Neither the trace nor the bubble is going to render, so there is nothing
@@ -458,7 +464,11 @@ export function ChatMessage({
                   <div className="text-sm leading-relaxed break-words [overflow-wrap:anywhere]">{content}</div>
                 )
               ) : (
-                !isUser && showEmptyStatus && <GeneratingIndicator latestTitle={statusTitle} taskStatus={resolvedProcessStatus || taskStatus} errorMessage={failureText} />
+                // A past paused/waiting turn has showEmptyStatus=false, but with
+                // the trace hidden its status line is all that marks the turn.
+                !isUser && (showEmptyStatus || (!showProcessView && isStoppedWithoutAnswer)) && (
+                  <GeneratingIndicator latestTitle={statusTitle} taskStatus={resolvedProcessStatus} errorMessage={failureText} />
+                )
               )}
               {!isUser && interactions && interactions.length > 0 && (
                 <div className="mt-4 border-t pt-4">
