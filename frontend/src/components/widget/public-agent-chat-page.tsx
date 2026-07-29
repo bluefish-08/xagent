@@ -221,10 +221,16 @@ function PublicConversationContent({
   const handleNewConversation = useCallback(() => {
     safeRemoveItem(storageKey)
     setTaskId(null, { navigate: false })
+    // Nulling taskId closes the socket, so no terminal WS event will ever
+    // reset these. Left stale mid-run, isProcessing keeps the start screen's
+    // composer disabled forever and currentTask pins the header on
+    // "Connecting..." — a reload would be the only way out.
+    dispatch({ type: "SET_PROCESSING", payload: false })
+    dispatch({ type: "SET_CURRENT_TASK", payload: null })
     setDraftMessage("")
     setDraftFiles([])
     setCreateTaskError(null)
-  }, [storageKey, setTaskId])
+  }, [dispatch, storageKey, setTaskId])
 
   const handleSend = useCallback(async (
     message: string,

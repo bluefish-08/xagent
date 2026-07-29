@@ -398,6 +398,24 @@ describe("PublicAgentChatPage", () => {
     expect(localStorage.getItem(taskKey)).toBeNull()
   })
 
+  it("clears processing state when ending a conversation mid-run", async () => {
+    localStorage.setItem("widget_task_17_guest-1", "71")
+    fetchMock.mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
+    // The agent is still streaming: isProcessing was set by a WS event, and
+    // once taskId nulls the socket closes, so no terminal event will ever
+    // reset it — the reset must come from the button handler itself, or the
+    // start screen's composer stays disabled forever.
+    app.state = { ...app.state, isProcessing: true }
+
+    renderWidgetPage()
+
+    await screen.findByTestId("conversation-panel")
+    fireEvent.click(screen.getByRole("button", { name: "widgetChat.newConversation" }))
+
+    expect(app.dispatch).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+    expect(app.dispatch).toHaveBeenCalledWith({ type: "SET_CURRENT_TASK", payload: null })
+  })
+
   it("creates an agent task and then sends its opening message", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
