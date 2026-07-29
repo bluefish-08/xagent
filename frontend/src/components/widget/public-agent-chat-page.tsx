@@ -401,8 +401,9 @@ function PublicConversationContent({
             showDagPreview={false}
             showTaskFiles={false}
             // A visitor on a customer's site gets the answer, not the run: no
-            // reasoning, no tool arguments, no raw tool output.
-            showProcessView={false}
+            // reasoning, no tool arguments, no raw tool output. Share links
+            // keep the trace — #1041 scopes the hiding to the widget only.
+            showProcessView={authMode === "share"}
             hideFileUpload={false}
             hideConfig={true}
             compactInput={true}

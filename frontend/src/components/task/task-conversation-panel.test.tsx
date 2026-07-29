@@ -853,5 +853,13 @@ describe("TaskConversationPanel", () => {
     for (const message of screen.getAllByTestId("chat-message")) {
       expect(message).toHaveAttribute("data-show-process-view", "false")
     }
+    cleanup()
+
+    // Unlike the mode-derived sibling flags, showProcessView defaults to true
+    // for every mode; only the widget opts out explicitly.
+    render(<TaskConversationPanel mode="embedded-preview" />)
+    for (const message of screen.getAllByTestId("chat-message")) {
+      expect(message).toHaveAttribute("data-show-process-view", "true")
+    }
   })
 })

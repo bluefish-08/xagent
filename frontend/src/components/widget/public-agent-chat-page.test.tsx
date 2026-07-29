@@ -70,7 +70,9 @@ vi.mock("@/components/chat/ChatStartScreen", () => ({
 }))
 
 vi.mock("@/components/task/task-conversation-panel", () => ({
-  TaskConversationPanel: () => <div data-testid="conversation-panel" />,
+  TaskConversationPanel: ({ showProcessView }: { showProcessView?: boolean }) => (
+    <div data-testid="conversation-panel" data-show-process-view={String(showProcessView)} />
+  ),
 }))
 
 vi.mock("@/lib/utils", async () => {
@@ -362,8 +364,10 @@ describe("PublicAgentChatPage", () => {
 
     renderWidgetPage()
 
-    expect(await screen.findByTestId("conversation-panel")).toBeInTheDocument()
+    const panel = await screen.findByTestId("conversation-panel")
     expect(app.setTaskId).toHaveBeenCalledWith(71, { navigate: false })
+    // A widget visitor gets the answer, never the execution trace.
+    expect(panel).toHaveAttribute("data-show-process-view", "false")
   })
 
   it("shows the start screen and defers task creation until the first agent message", async () => {
@@ -601,9 +605,11 @@ describe("PublicAgentChatPage", () => {
 
     renderSharePage()
 
-    expect(await screen.findByTestId("conversation-panel")).toBeInTheDocument()
+    const panel = await screen.findByTestId("conversation-panel")
     expect(app.setTaskId).toHaveBeenCalledWith(71, { navigate: false })
     expect(fetchMock).not.toHaveBeenCalled()
+    // Hiding the trace is scoped to the widget (#1041); share links keep it.
+    expect(panel).toHaveAttribute("data-show-process-view", "true")
   })
 
   it("does not resume a task persisted under a different guest_id", async () => {
