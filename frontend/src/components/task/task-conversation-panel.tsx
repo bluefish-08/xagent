@@ -33,8 +33,8 @@ interface TaskConversationPanelProps {
   showDagPreview?: boolean
   showTaskFiles?: boolean
   // Renders the execution trace (reasoning, tool arguments, tool output) above
-  // each answer. Off for public/embedded chat, where a visitor should see the
-  // answer and a status line, not the run.
+  // each answer. Off for the embedded widget, where a visitor should see the
+  // answer and a status line, not the run; share links keep it on.
   showProcessView?: boolean
   hideFileUpload?: boolean
   hideConfig?: boolean
@@ -702,7 +702,12 @@ export function TaskConversationPanel({
                         showProcessView={showProcessView}
                         processStatus={item.processStatus}
                         taskStatus={
-                          isFailedFinalAnswerStream
+                          // With the trace hidden, a failed result message
+                          // (final_answer_error stream or the verbatim terminal
+                          // reason, #893) must reach ChatMessage as failed so
+                          // its raw error text gets the generic replacement.
+                          isFailedFinalAnswerStream ||
+                          (!showProcessView && item.status === "failed")
                             ? "failed"
                             : item.showEmptyStatus
                               ? item.status

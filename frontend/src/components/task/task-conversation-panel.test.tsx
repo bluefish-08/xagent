@@ -432,6 +432,15 @@ describe("TaskConversationPanel", () => {
     // Only the user turn and the failure reason — no extra virtual message.
     expect(renderedMessages).toHaveLength(2)
     expect(renderedMessages[1]).toHaveTextContent(quotaReason)
+    // Trace visible: the reason renders as plain content, not the failed path.
+    expect(renderedMessages[1]).toHaveAttribute("data-task-status", "")
+    cleanup()
+
+    // With the trace hidden the same verbatim reason must reach ChatMessage
+    // flagged as failed, so its raw text gets the generic replacement there.
+    render(<TaskConversationPanel mode="page" showProcessView={false} />)
+    const hiddenTraceMessages = screen.getAllByTestId("chat-message")
+    expect(hiddenTraceMessages[1]).toHaveAttribute("data-task-status", "failed")
   })
 
   it("applies current task status only to the latest trace process group", () => {

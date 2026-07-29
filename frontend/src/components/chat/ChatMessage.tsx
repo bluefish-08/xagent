@@ -373,8 +373,11 @@ export function ChatMessage({
   const failureText =
     errorMessage
     || (showProcessView ? t("common.errors.unknown") : t("common.errors.taskFailed"));
+  // A failed turn's content is failure text by construction (final_answer_error
+  // streams str(exc); the terminal handler stores the reason verbatim), so with
+  // the trace hidden it needs the same generic replacement as mined errors.
   const failedMessageText =
-    typeof content === "string" && content.trim()
+    showProcessView && typeof content === "string" && content.trim()
       ? content
       : failureText;
 

@@ -282,6 +282,38 @@ describe("ChatMessage failures", () => {
     expect(screen.queryByText(RAW_ERROR)).toBeNull()
   })
 
+  it("replaces failed-turn content with the generic line when the trace is hidden", () => {
+    // content on a failed turn carries the backend's raw failure text
+    // (final_answer_error streams str(exc); the terminal handler stores the
+    // reason verbatim) — the same redaction as mined trace errors must apply.
+    render(
+      <ChatMessage
+        role="assistant"
+        content={RAW_ERROR}
+        traceEvents={[]}
+        showProcessView={false}
+        processStatus="failed"
+      />
+    )
+
+    expect(screen.queryByText(RAW_ERROR)).toBeNull()
+    expect(screen.getByText("common.errors.taskFailed")).toBeTruthy()
+  })
+
+  it("keeps failed-turn content verbatim on internal pages", () => {
+    render(
+      <ChatMessage
+        role="assistant"
+        content={RAW_ERROR}
+        traceEvents={[]}
+        showProcessView={true}
+        processStatus="failed"
+      />
+    )
+
+    expect(screen.getByText(RAW_ERROR)).toBeTruthy()
+  })
+
   it("falls back to a generic unknown error when the failed trace has no error text", () => {
     render(
       <ChatMessage
