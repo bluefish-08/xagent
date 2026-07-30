@@ -1,5 +1,5 @@
 import React from "react"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("@/contexts/i18n-context", () => ({
@@ -298,6 +298,29 @@ describe("ChatMessage failures", () => {
 
     expect(screen.queryByText(RAW_ERROR)).toBeNull()
     expect(screen.getByText("common.errors.taskFailed")).toBeTruthy()
+  })
+
+  it("copies the redacted text, not the raw error, on a failed hidden-trace turn", () => {
+    // The copy button reads copyableContent; redacting only the bubble would
+    // still hand the raw backend text to anyone clicking copy.
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    })
+
+    render(
+      <ChatMessage
+        role="assistant"
+        content={RAW_ERROR}
+        traceEvents={[]}
+        showProcessView={false}
+        processStatus="failed"
+      />
+    )
+
+    fireEvent.click(screen.getByTitle("common.copy"))
+    expect(writeText).toHaveBeenCalledWith("common.errors.taskFailed")
   })
 
   it("keeps failed-turn content verbatim on internal pages", () => {

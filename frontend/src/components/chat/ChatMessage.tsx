@@ -90,7 +90,7 @@ function GeneratingIndicator({ latestTitle, taskStatus }: { latestTitle?: string
   return (
     <div className="py-3 text-sm leading-relaxed text-muted-foreground flex items-center">
       <span>{displayTitle}</span>
-      {!["failed", "paused", "waiting_for_user", "completed"].includes(taskStatus || "") && (
+      {!["paused", "waiting_for_user", "completed"].includes(taskStatus || "") && (
         <span className="ml-1 inline-flex items-end gap-1">
           <span className="dot" />
           <span className="dot" />
@@ -284,16 +284,6 @@ export function ChatMessage({
   const isUser = role === "user";
   const [copied, setCopied] = useState(false);
 
-  const copyableContent = typeof content === "string" ? content : rawContent;
-
-  const handleCopy = () => {
-    if (copyableContent) {
-      navigator.clipboard.writeText(copyableContent);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
   const handleAgentClick = (agentId: string, agentName: string) => {
     router.push(`/agent/${agentId}`);
   };
@@ -380,6 +370,21 @@ export function ChatMessage({
     showProcessView && typeof content === "string" && content.trim()
       ? content
       : failureText;
+
+  // The copy button must not hand out what the bubble refuses to show: on a
+  // failed turn, copy exactly the (possibly redacted) text that is displayed.
+  const copyableContent =
+    !isUser && resolvedProcessStatus === "failed"
+      ? failedMessageText
+      : typeof content === "string" ? content : rawContent;
+
+  const handleCopy = () => {
+    if (copyableContent) {
+      navigator.clipboard.writeText(copyableContent);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   // latestTitle names the running step ("calling web_search"), which is part of
   // the trace: with the trace hidden it would leak the very detail the status
