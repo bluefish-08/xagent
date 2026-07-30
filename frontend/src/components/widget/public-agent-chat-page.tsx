@@ -223,10 +223,12 @@ function PublicConversationContent({
     setTaskId(null, { navigate: false })
     // Nulling taskId closes the socket, so no terminal WS event will ever
     // reset these. Left stale mid-run, isProcessing keeps the start screen's
-    // composer disabled forever and currentTask pins the header on
-    // "Connecting..." — a reload would be the only way out.
+    // composer disabled forever, currentTask pins the header on
+    // "Connecting...", and isHistoryLoading (cleared by an onConnect timer
+    // that may never have been scheduled) pins it on "Initializing".
     dispatch({ type: "SET_PROCESSING", payload: false })
     dispatch({ type: "SET_CURRENT_TASK", payload: null })
+    dispatch({ type: "SET_HISTORY_LOADING", payload: false })
     setDraftMessage("")
     setDraftFiles([])
     setCreateTaskError(null)

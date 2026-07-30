@@ -414,6 +414,10 @@ describe("PublicAgentChatPage", () => {
 
     expect(app.dispatch).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
     expect(app.dispatch).toHaveBeenCalledWith({ type: "SET_CURRENT_TASK", payload: null })
+    // The onConnect timer that normally clears this may never have been
+    // scheduled, so the reset must clear it or the header sticks on
+    // "Initializing".
+    expect(app.dispatch).toHaveBeenCalledWith({ type: "SET_HISTORY_LOADING", payload: false })
   })
 
   it("creates an agent task and then sends its opening message", async () => {
