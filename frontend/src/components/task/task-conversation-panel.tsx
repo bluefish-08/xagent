@@ -690,8 +690,13 @@ export function TaskConversationPanel({
                     if (item.isSystemNotice) {
                       return <CompactionNotice key={item.id} text={item.content as string} />
                     }
-                    const isFailedFinalAnswerStream =
-                      item.isStreamingFinalAnswer && item.status === "failed"
+                    // A failed final-answer stream always renders as failed; a
+                    // verbatim terminal reason (#893) only needs the flag when
+                    // the trace is hidden, so its raw text gets the generic
+                    // replacement in ChatMessage.
+                    const isFailedResultMessage =
+                      item.status === "failed" &&
+                      (item.isStreamingFinalAnswer || !showProcessView)
                     return (
                       <ChatMessage
                         key={item.id}
@@ -702,12 +707,7 @@ export function TaskConversationPanel({
                         showProcessView={showProcessView}
                         processStatus={item.processStatus}
                         taskStatus={
-                          // With the trace hidden, a failed result message
-                          // (final_answer_error stream or the verbatim terminal
-                          // reason, #893) must reach ChatMessage as failed so
-                          // its raw error text gets the generic replacement.
-                          isFailedFinalAnswerStream ||
-                          (!showProcessView && item.status === "failed")
+                          isFailedResultMessage
                             ? "failed"
                             : item.showEmptyStatus
                               ? item.status
