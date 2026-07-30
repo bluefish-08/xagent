@@ -3,12 +3,16 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
 from ...config import get_compact_threshold_default, get_compact_threshold_ratio
+from ..context_materializer import WorkspaceContextReferenceResolver
+from ..context_ref import CONTEXT_REFS_KEY
 from ..model.intent import enter_goal, exit_goal
 from ..workspace import WorkspaceManager
+from .checkpoint import read_latest_checkpoint_payload
 from .context import ContextManager, ExecutionContext
 from .result import extract_assistant_message
 from .runtime import ExecutionInterrupted, PatternRuntime, load_pattern_checkpoint
@@ -84,8 +88,9 @@ class AgentRunner:
             context = ExecutionContext.from_dict(checkpoint["context"])
             self.context_manager.set_context(context)
             execution_id = context.execution_id
+            workspace = None
         else:
-            context = await self._build_context(
+            context, workspace = await self._build_context(
                 task=task,
                 execution_id=execution_id,
                 user_id=user_id,
@@ -98,8 +103,17 @@ class AgentRunner:
             for message in initial_messages or []:
                 role = str(message.get("role") or "").strip()
                 content = str(message.get("content") or "").strip()
-                if role and content:
-                    context.add_message(role, content)
+                context_refs = message.get(
+                    CONTEXT_REFS_KEY, message.get("context_refs", ())
+                )
+                if role and (content or context_refs):
+                    context.add_message(
+                        role,
+                        content,
+                        context_refs=context_refs,
+                        tool_calls=message.get("tool_calls"),
+                        tool_call_id=message.get("tool_call_id"),
+                    )
             if task:
                 context.add_user_message(
                     task,
@@ -112,6 +126,20 @@ class AgentRunner:
             interrupt_checker=interrupt_checker,
             outbound_message_handler=self.outbound_message_handler,
         )
+        if runtime.context_ref_resolver is None:
+            if workspace is None:
+                workspace_base = base_dir or self.workspace_base_dir
+                if context.workspace_path:
+                    workspace_base = str(Path(context.workspace_path).parent)
+                workspace = self.workspace_manager.get_or_create_workspace(
+                    base_dir=workspace_base,
+                    task_id=context.workspace_id or workspace_id or execution_id,
+                    allowed_external_dirs=allowed_external_dirs,
+                    scope_segments=self.scope_segments,
+                )
+                if inspect.isawaitable(workspace):
+                    workspace = await workspace
+            runtime.context_ref_resolver = WorkspaceContextReferenceResolver(workspace)
         self._active_controls[execution_id] = ExecutionControl(
             runtime=runtime,
             task=task,
@@ -408,13 +436,24 @@ class AgentRunner:
         # change (see comment below) and persist it.
         watermark_before = self._read_trace_watermark(context)
         traced_turn_ids_before = self._read_traced_turn_ids(context)
-        await self._dispatch_callback(
-            "on_user_message_posted",
-            runner=self,
-            context=context,
-            message=added,
-            files=files,
-        )
+        try:
+            await self._dispatch_callback(
+                "on_user_message_posted",
+                runner=self,
+                context=context,
+                message=added,
+                files=files,
+            )
+        except Exception:
+            # The injected-context checkpoint above is the durable acceptance
+            # boundary. Trace projection can be replayed from its pending
+            # marker, so it must not turn an accepted user message into a
+            # rejected delivery.
+            logger.warning(
+                "user-message callback failed after injection checkpoint for %s",
+                execution_id,
+                exc_info=True,
+            )
         # Re-persist when the trace callback advanced the watermark —
         # without this a worker crash between trace emission and the next
         # checkpoint would let the resume path replay the same user_message
@@ -428,11 +467,20 @@ class AgentRunner:
             watermark_after and watermark_after != watermark_before
         ) or traced_turn_ids_after != traced_turn_ids_before:
             self._clear_pending_user_message_marker(context)
-            await self._persist_injected_context(
-                execution_id=execution_id,
-                context=context,
-                label="user_message_trace_watermark",
-            )
+            try:
+                await self._persist_injected_context(
+                    execution_id=execution_id,
+                    context=context,
+                    label="user_message_trace_watermark",
+                )
+            except Exception:
+                # Preserve the pending marker for resume catch-up when the
+                # trace watermark cannot be persisted after acceptance.
+                logger.warning(
+                    "user-message watermark checkpoint failed after injection for %s",
+                    execution_id,
+                    exc_info=True,
+                )
         if request_interrupt:
             self.pause(execution_id, reason=reason or "new user message")
         return context
@@ -551,7 +599,7 @@ class AgentRunner:
         allowed_external_dirs: list[str] | None,
         base_dir: str | None,
         metadata: dict[str, Any] | None,
-    ) -> ExecutionContext:
+    ) -> tuple[ExecutionContext, Any]:
         workspace = self.workspace_manager.get_or_create_workspace(
             base_dir=base_dir or self.workspace_base_dir,
             task_id=workspace_id or execution_id,
@@ -593,7 +641,7 @@ class AgentRunner:
             memory_id, snapshot = memory_session
             context.attach_memory_session(memory_id, snapshot)
 
-        return context
+        return context, workspace
 
     def _resolve_compact_threshold(self) -> int:
         """Derive the context-compaction threshold from the model's context window.
@@ -867,20 +915,8 @@ class AgentRunner:
         if self.tracer is None:
             return None
 
-        for method_name in (
-            "load_latest_checkpoint",
-            "get_latest_checkpoint",
-            "latest_checkpoint",
-        ):
-            method = getattr(self.tracer, method_name, None)
-            if not callable(method):
-                continue
-            payload = method(execution_id)
-            if inspect.isawaitable(payload):
-                payload = await payload
-            if isinstance(payload, dict):
-                return payload
-        return None
+        payload = await read_latest_checkpoint_payload(self.tracer, execution_id)
+        return payload if isinstance(payload, dict) else None
 
     async def _persist_injected_context(
         self,

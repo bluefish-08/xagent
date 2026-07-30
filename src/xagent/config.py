@@ -100,6 +100,8 @@ BACKGROUND_JOB_VISIBILITY_TIMEOUT_SECONDS = (
 BACKGROUND_JOB_MAX_RETRIES = "XAGENT_BACKGROUND_JOB_MAX_RETRIES"
 BACKGROUND_JOB_STALE_SECONDS = "XAGENT_BACKGROUND_JOB_STALE_SECONDS"
 BACKGROUND_JOB_SWEEP_INTERVAL_SECONDS = "XAGENT_BACKGROUND_JOB_SWEEP_INTERVAL_SECONDS"
+TASKLESS_UPLOAD_TTL_SECONDS = "XAGENT_TASKLESS_UPLOAD_TTL_SECONDS"
+ORPHAN_UPLOAD_SWEEP_INTERVAL_SECONDS = "XAGENT_ORPHAN_UPLOAD_SWEEP_INTERVAL_SECONDS"
 TRIGGER_DISPATCHER_ENABLED = "XAGENT_TRIGGER_DISPATCHER_ENABLED"
 TRIGGER_DISPATCHER_INTERVAL_SECONDS = "XAGENT_TRIGGER_DISPATCHER_INTERVAL_SECONDS"
 TRIGGER_DISPATCHER_BATCH_SIZE = "XAGENT_TRIGGER_DISPATCHER_BATCH_SIZE"
@@ -116,6 +118,8 @@ SHARE_TASK_CREATE_TOKEN_RATE_LIMIT = "XAGENT_SHARE_TASK_CREATE_TOKEN_RATE_LIMIT"
 SHARE_WS_TURN_RATE_LIMIT = "XAGENT_SHARE_WS_TURN_RATE_LIMIT"
 SHARE_WS_CONNECT_IP_RATE_LIMIT = "XAGENT_SHARE_WS_CONNECT_IP_RATE_LIMIT"
 SHARE_UPLOAD_RATE_LIMIT = "XAGENT_SHARE_UPLOAD_RATE_LIMIT"
+WIDGET_UPLOAD_RATE_LIMIT = "XAGENT_WIDGET_UPLOAD_RATE_LIMIT"
+WIDGET_UPLOAD_IP_RATE_LIMIT = "XAGENT_WIDGET_UPLOAD_IP_RATE_LIMIT"
 SHARE_RUN_QUOTA = "XAGENT_SHARE_RUN_QUOTA"
 SHARE_RUN_GUEST_QUOTA = "XAGENT_SHARE_RUN_GUEST_QUOTA"
 GMAIL_PUBSUB_PROJECT_ID = "XAGENT_GMAIL_PUBSUB_PROJECT_ID"
@@ -647,6 +651,39 @@ def get_background_job_sweep_interval_seconds() -> int:
     )
 
 
+def get_taskless_upload_ttl_seconds() -> int:
+    """Age after which an unbound task-less public upload is GC-eligible (#973).
+
+    A task-less public-share upload is bound to its task at run start; if the
+    guest never completes task creation it stays orphaned. Rows older than
+    this (and still unbound) are reaped. Default 48h — long enough that a slow
+    but real first turn is never reaped mid-flow.
+
+    Priority:
+        1. XAGENT_TASKLESS_UPLOAD_TTL_SECONDS environment variable
+        2. Default 172800 (48 hours)
+    """
+    return _get_positive_int_env(
+        TASKLESS_UPLOAD_TTL_SECONDS,
+        48 * 60 * 60,
+        minimum=60 * 60,
+    )
+
+
+def get_orphan_upload_sweep_interval_seconds() -> int:
+    """How often the orphan task-less-upload GC sweep runs (#973).
+
+    Priority:
+        1. XAGENT_ORPHAN_UPLOAD_SWEEP_INTERVAL_SECONDS environment variable
+        2. Default 3600 (hourly)
+    """
+    return _get_positive_int_env(
+        ORPHAN_UPLOAD_SWEEP_INTERVAL_SECONDS,
+        60 * 60,
+        minimum=60,
+    )
+
+
 def get_trigger_dispatcher_enabled() -> bool:
     """Return whether the backend should start prepared trigger runs."""
     return _get_bool_env(TRIGGER_DISPATCHER_ENABLED, True)
@@ -780,6 +817,24 @@ def get_share_ws_connect_ip_rate_limit() -> str:
 def get_share_upload_rate_limit() -> str:
     """Per-guest limit on public share file uploads (#973)."""
     return _get_rate_limit(SHARE_UPLOAD_RATE_LIMIT, "60/minute")
+
+
+def get_widget_upload_rate_limit() -> str:
+    """Per-widget-entity limit on public widget file uploads (#973).
+
+    Keyed on the embedded agent/workforce (not the widget ``guest_id``,
+    which is client-supplied and rotatable at will). Loose: one widget
+    serves many legitimate guests.
+    """
+    return _get_rate_limit(WIDGET_UPLOAD_RATE_LIMIT, "240/minute")
+
+
+def get_widget_upload_ip_rate_limit() -> str:
+    """Per-caller-IP limit on public widget file uploads (#973).
+
+    The tighter bucket: bounds one abuser without a trustworthy per-guest
+    key. Kept loose enough for enterprise NAT."""
+    return _get_rate_limit(WIDGET_UPLOAD_IP_RATE_LIMIT, "60/minute")
 
 
 def get_share_run_quota() -> str:
@@ -1012,6 +1067,85 @@ def get_web_dir() -> Path:
     return Path(__file__).parent / "web"
 
 
+class UploadsDirConfigurationError(Exception):
+    """The configured uploads directory has no single physical meaning.
+
+    Raised where the value is read, which for the web app is
+    ``app.py``'s module body: the failure lands during import, before the
+    application object exists, so no request-handling frame is on the stack to
+    swallow it and the process simply refuses to start. That -- not this
+    exception's place in the hierarchy -- is what keeps a misconfigured
+    deployment from being reported as a transient per-request failure.
+    """
+
+
+# First absolutized reading of each cwd-dependent uploads root, kept so the
+# root cannot move mid-process (see _require_unambiguous_uploads_dir). Keyed by
+# the configured spelling, so changing the configuration still takes effect.
+_pinned_relative_uploads_roots: dict[str, Path] = {}
+
+
+def _require_unambiguous_uploads_dir(uploads_dir: Path) -> Path:
+    """Reject an uploads dir whose two normalizations name different places.
+
+    Paths under the uploads root reach consumers that normalize differently,
+    and both normalizations are load-bearing:
+
+    - lexical (``canonical_sandbox_path``) is what sandbox mount identity and
+      desired-vs-observed spec comparison must use, because a path that keeps
+      ``..`` can never byte-match what a container backend reports;
+    - physical (``realpath``) is what ``TaskWorkspace``, the upload writers
+      and ``files.py``'s containment checks use, because files have to be
+      found.
+
+    They agree on every spelling but one: a symlink followed by ``..``, where
+    the lexical form discards the symlink the physical form follows. That
+    configuration makes one logical directory two real ones, so an uploaded
+    file can land where the sandbox never mounted and agent tools cannot see
+    it. Rejecting the input is what lets each consumer keep its own
+    normalization: none has to defend against this, and a new consumer cannot
+    reintroduce it by picking the "wrong" one.
+
+    An ordinary symlink is untouched -- following one is not a disagreement,
+    both spellings still name a single directory.
+
+    Returns the absolutized value rather than the configured one, so callers
+    receive the path this check actually examined. A relative or
+    ``~``/``$VAR``-prefixed value is resolved against the environment as it
+    stands here; returning it unresolved would let a later ``os.chdir`` (the
+    Python execution tool does exactly that, process-wide, while a task runs)
+    move the directory out from under the guarantee.
+    """
+    from .sandbox.base import canonical_sandbox_path
+
+    raw = str(uploads_dir)
+    expanded = Path(os.path.expandvars(raw)).expanduser()
+    if expanded.is_absolute():
+        absolute = expanded
+    else:
+        # A relative value means whatever the working directory says, and this
+        # process changes it: the Python execution tool chdirs process-wide for
+        # the duration of a task's code. Pinning the first reading keeps one
+        # root for the process, so two callers cannot compose paths from two
+        # different directories depending on when they asked.
+        absolute = _pinned_relative_uploads_roots.setdefault(raw, Path.cwd() / expanded)
+    canonical = canonical_sandbox_path(str(absolute))
+    if os.path.realpath(canonical) != os.path.realpath(absolute):
+        # Name whichever variable actually produced this root, so the
+        # operator edits the one that is set.
+        source = UPLOADS_DIR if os.getenv(UPLOADS_DIR) else WEB_DIR
+        raise UploadsDirConfigurationError(
+            f"The uploads root {str(uploads_dir)!r} (from {source}) names two "
+            f"different directories depending on how it is normalized: "
+            f"lexically it is {canonical!r}, resolving to "
+            f"{os.path.realpath(canonical)!r}, while resolving the configured "
+            f"spelling directly gives {os.path.realpath(absolute)!r}. A '..' "
+            "segment after a symlink does that. Configure the directory you "
+            "actually mean."
+        )
+    return absolute
+
+
 def get_uploads_dir() -> Path:
     """Get the uploads directory path.
 
@@ -1019,16 +1153,29 @@ def get_uploads_dir() -> Path:
     1. XAGENT_UPLOADS_DIR environment variable
     2. Default to WEB_DIR/uploads for backward compatibility
 
+    Validated here rather than at each consumer: this is the root every
+    workspace, upload, knowledge-base and sandbox-mount path is composed
+    from, so one check covers all of them -- see
+    :func:`_require_unambiguous_uploads_dir`. The validation is on the value
+    this function returns, not on one of the two branches that produce it:
+    ``XAGENT_WEB_DIR`` reaches the uploads root just as directly as
+    ``XAGENT_UPLOADS_DIR`` does, and an ambiguous spelling in either is the
+    same ambiguity downstream.
+
     Returns:
         Path object for uploads directory
+
+    Raises:
+        UploadsDirConfigurationError: The resulting root's lexical and
+            physical normalizations name different directories.
     """
     env_dir = os.getenv(UPLOADS_DIR)
     if env_dir:
-        return Path(env_dir)
-
-    # Default: web/uploads
-    web_dir = get_web_dir()
-    return web_dir / "uploads"
+        uploads_dir = Path(env_dir)
+    else:
+        # Default: web/uploads
+        uploads_dir = get_web_dir() / "uploads"
+    return _require_unambiguous_uploads_dir(uploads_dir)
 
 
 def get_frontend_dist_dir() -> Path:

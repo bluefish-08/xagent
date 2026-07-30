@@ -217,11 +217,6 @@ const en = {
       startingPrompts: "STARTING PROMPTS",
       chatWithAgents: "CHAT WITH AGENTS",
     },
-    agents: {
-      researcher: "Researcher Agent",
-      poster: "Poster Maker",
-      linkedin: "LinkedIn Post Creator",
-    },
     cards: {
       research: {
         title: "Research a topic in depth",
@@ -493,6 +488,22 @@ Build when you need.`,
       powered_by: "Powered by {appName}"
     }
   },
+  widgetSession: {
+    startNewConversation: "Start new conversation",
+    resetting: "Starting...",
+    resetFailed: "Could not start a new conversation. Please try again.",
+    startMessageFailed: "Could not send your message. Please try again.",
+    reloadRequired: "This conversation's state is unknown. Reload the page before continuing.",
+    expiryWarning: "This chat session will expire soon. Refresh the page to continue.",
+    expired: {
+      title: "Chat session expired",
+      description: "Refresh the page to start a new chat session.",
+    },
+    unavailable: {
+      title: "Chat unavailable",
+      description: "This chat cannot be opened right now. Please try again later.",
+    },
+  },
   channels: {
     page_title: "Channels Management",
     page_description: "Manage your communication channels and bots.",
@@ -635,6 +646,9 @@ Build when you need.`,
       auth_failed: "Incorrect username/email or password",
       network_failed: "Login failed, please try again later",
       google_failed: "Google login failed, please try again",
+      storage_unavailable: "Your browser is blocking local storage. Enable storage and try again.",
+      coordination_unavailable: "Your browser does not support the secure sign-in features this application requires.",
+      operation_failed: "Your sign-in session could not be updated. Please try again.",
     },
     google: {
       continue: "Continue with Google",
@@ -1543,7 +1557,8 @@ Build when you need.`,
       general_productivity: "General & Productivity",
       customer_service: "Customer Service",
       finance_lms_ops: "Finance, LMS & Ops",
-      security: "Security"
+      security: "Security",
+      operations: "Operations"
     },
     sections: {
       knowledge: "Knowledge & Research",
@@ -1570,6 +1585,7 @@ Build when you need.`,
       loggedIn: "Logged in",
       notLoggedIn: "Not logged in",
       logoutTitle: "Logout",
+      logoutFailed: "Unable to log out. Please try again.",
       defaultName: "User",
     },
   },
@@ -3319,7 +3335,6 @@ Build when you need.`,
     previewFile: "Preview File",
     filePrefix: "File:",
     queryPrefix: "Query:",
-    pathPrefix: "Path:",
     bashPrefix: "Bash:",
     searchPrefix: "Search:",
     workforceDelegation: "Workforce Delegation",
