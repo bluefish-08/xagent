@@ -1507,6 +1507,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                     days=DEFAULT_INDEX_POLICY.version_retention_days
                 )
             table.optimize(cleanup_older_than=cleanup_older_than)
+            # Pruning drops the versions cached handles point at, same reason
+            # the delete paths invalidate after mutating a table.
+            self.invalidate_table_cache(table_name)
             logger.info("Reindex completed for %s", table_name)
             return True
         except Exception as e:  # noqa: BLE001

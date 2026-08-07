@@ -3093,6 +3093,23 @@ def test_trigger_reindex_keeps_recent_versions(mock_get_connection: Mock) -> Non
 @patch(
     "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
 )
+def test_trigger_reindex_drops_the_cached_handle(mock_get_connection: Mock) -> None:
+    """Pruning removes the versions a cached handle points at, so it must go."""
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+    mock_conn.open_table.return_value = Mock()
+
+    store = LanceDBVectorIndexStore()
+    store._get_table("documents")
+    assert "documents" in store._table_cache
+
+    assert store.trigger_reindex("documents") is True
+    assert "documents" not in store._table_cache
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
 def test_compact_tables_only_touches_fragmented_tables(
     mock_get_connection: Mock,
 ) -> None:
