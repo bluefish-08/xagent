@@ -3022,3 +3022,155 @@ def test_vis_cascade_delete_documents_unauthenticated_non_admin_returns_empty():
     )
     assert result == {}
     conn.open_table.assert_not_called()
+
+
+# ============================================================================
+# Compaction Tests (xorbitsai/xagent#1140)
+# ============================================================================
+
+
+def _mock_table_with_fragments(count: int) -> Mock:
+    table = Mock()
+    table.stats.return_value = {"fragment_stats": {"num_fragments": count}}
+    table.index_stats.side_effect = ValueError("no such index")
+    return table
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_should_reindex_triggers_on_fragmentation(mock_get_connection: Mock) -> None:
+    """Fragment count at or above the threshold triggers compaction."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+    mock_conn.open_table.return_value = _mock_table_with_fragments(100)
+
+    store = LanceDBVectorIndexStore()
+    policy = IndexPolicy(compact_fragment_threshold=100)
+
+    assert store.should_reindex("collection_metadata", 0, policy) is True
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_should_reindex_skips_below_fragment_threshold(
+    mock_get_connection: Mock,
+) -> None:
+    """A table below the fragment threshold is left alone."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+    mock_conn.open_table.return_value = _mock_table_with_fragments(99)
+
+    store = LanceDBVectorIndexStore()
+    policy = IndexPolicy(compact_fragment_threshold=100)
+
+    assert store.should_reindex("collection_metadata", 0, policy) is False
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_trigger_reindex_keeps_recent_versions(mock_get_connection: Mock) -> None:
+    """Version pruning always leaves a non-zero safety margin for live readers."""
+    from datetime import timedelta
+
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+    mock_table = Mock()
+    mock_conn.open_table.return_value = mock_table
+
+    assert LanceDBVectorIndexStore().trigger_reindex("documents") is True
+    kwargs = mock_table.optimize.call_args.kwargs
+    assert kwargs["cleanup_older_than"] == timedelta(days=7)
+    assert kwargs["cleanup_older_than"] > timedelta(0)
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_compact_tables_only_touches_fragmented_tables(
+    mock_get_connection: Mock,
+) -> None:
+    """Every table is inspected; only the fragmented ones are optimized."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    fragmented = _mock_table_with_fragments(500)
+    healthy = _mock_table_with_fragments(3)
+    tables = {"documents": fragmented, "chunks": healthy}
+
+    mock_conn = Mock()
+    mock_conn.table_names.return_value = ["documents", "chunks"]
+    mock_conn.list_tables = None
+    del mock_conn.list_tables
+    mock_conn.open_table.side_effect = lambda name, *a, **k: tables[name]
+    mock_get_connection.return_value = mock_conn
+
+    store = LanceDBVectorIndexStore()
+    compacted = store.compact_tables(IndexPolicy(compact_fragment_threshold=100))
+
+    assert compacted == ["documents"]
+    fragmented.optimize.assert_called_once()
+    healthy.optimize.assert_not_called()
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_compact_tables_swallows_optimize_failure(mock_get_connection: Mock) -> None:
+    """A failing optimize is reported, not raised: maintenance is not the flow."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    broken = _mock_table_with_fragments(500)
+    broken.optimize.side_effect = RuntimeError("disk full")
+
+    mock_conn = Mock()
+    mock_conn.table_names.return_value = ["documents"]
+    del mock_conn.list_tables
+    mock_conn.open_table.return_value = broken
+    mock_get_connection.return_value = mock_conn
+
+    assert LanceDBVectorIndexStore().compact_tables(IndexPolicy()) == []
+
+
+def test_ingestion_compaction_hook_never_raises() -> None:
+    """Compaction failure must not break a successful ingestion."""
+    from xagent.core.tools.core.RAG_tools.pipelines.document_ingestion import (
+        _compact_storage_if_needed,
+    )
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+        side_effect=RuntimeError("store unavailable"),
+    ):
+        _compact_storage_if_needed()
+
+
+def test_compaction_reduces_fragments_and_prunes_versions(tmp_path: Any) -> None:
+    """End-to-end against real LanceDB: files collapse, recent versions survive."""
+    import lancedb
+    import pyarrow as pa
+
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    db = lancedb.connect(str(tmp_path))
+    schema = pa.schema([pa.field("name", pa.string())])
+    table = db.create_table("collection_metadata", schema=schema)
+    for i in range(12):
+        table.add([{"name": f"c{i}"}])
+
+    store = LanceDBVectorIndexStore()
+    policy = IndexPolicy(compact_fragment_threshold=10)
+    with patch.object(store, "_get_connection", return_value=db):
+        assert store.should_reindex("collection_metadata", 0, policy) is True
+        assert store.compact_tables(policy) == ["collection_metadata"]
+
+    handle = db.open_table("collection_metadata")
+    assert handle.stats()["fragment_stats"]["num_fragments"] == 1
+    assert len(handle.search().to_arrow()) == 12
+    # 7-day retention: nothing written during this test may be pruned.
+    assert len(handle.list_versions()) > 1

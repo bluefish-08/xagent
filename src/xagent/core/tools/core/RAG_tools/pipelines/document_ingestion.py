@@ -325,6 +325,23 @@ def _record_ingestion_status(
         )
 
 
+def _compact_storage_if_needed() -> None:
+    """Best-effort LanceDB compaction after a successful ingestion.
+
+    Every ingestion appends new data files and read latency scales with the file
+    count, so tables past the threshold get merged and stale versions pruned.
+    Maintenance must never fail the pipeline, hence the blanket except.
+    """
+    try:
+        from ..storage.factory import get_vector_index_store
+
+        compacted = get_vector_index_store().compact_tables()
+        if compacted:
+            logger.info("Compacted LanceDB tables: %s", ", ".join(compacted))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LanceDB compaction skipped: %s", exc)
+
+
 async def _compute_embeddings_async(
     chunks: List[ChunkForEmbedding],
     embedding_adapter: BaseEmbedding,
@@ -1415,6 +1432,8 @@ def _process_document_impl(
                 extra={"collection": collection, "doc_id": doc_id},
             )
             warnings.append(f"Collection statistics update failed: {stat_exc}")
+
+        _compact_storage_if_needed()
 
         _record_ingestion_status(
             collection,

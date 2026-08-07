@@ -178,6 +178,9 @@ class IndexPolicy:
         reindex_unindexed_ratio_threshold: Ratio threshold for triggering reindex.
         enable_immediate_reindex: Whether to reindex immediately after writes.
         enable_smart_reindex: Whether to use smart reindex based on unindexed ratio.
+        compact_fragment_threshold: Data-file count above which a table is compacted.
+        version_retention_days: Age below which old table versions are kept; the
+            safety margin that protects readers holding an older version.
     """
 
     enable_threshold_rows: int = DEFAULT_INDEX_ROW_THRESHOLD
@@ -193,6 +196,10 @@ class IndexPolicy:
     reindex_unindexed_ratio_threshold: float = 0.05
     enable_immediate_reindex: bool = False
     enable_smart_reindex: bool = True
+
+    # Compaction configuration
+    compact_fragment_threshold: int = 100
+    version_retention_days: int = 7
 
     def __post_init__(self) -> None:
         """Initialize default parameter dicts if None."""

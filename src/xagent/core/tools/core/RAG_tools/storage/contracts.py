@@ -1342,6 +1342,13 @@ class VectorIndexStore(ABC):
             True if reindex was triggered successfully.
         """
 
+    def compact_tables(self, policy: Optional[IndexPolicy] = None) -> List[str]:
+        """Compact fragmented tables; returns the names actually compacted.
+
+        Best-effort maintenance; backends without compaction return an empty list.
+        """
+        return []
+
     # --- Async index management variants ---
 
     @abstractmethod

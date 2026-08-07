@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple, cast
 
 import lancedb
@@ -16,6 +16,7 @@ from lancedb.db import DBConnection
 from xagent.providers.vector_store.lancedb import get_connection_from_env
 
 from ..core.config import (
+    DEFAULT_INDEX_POLICY,
     DEFAULT_VECTOR_STORE_DELETE_BATCH_SIZE,
     DEFAULT_VECTOR_STORE_SCAN_LIMIT,
     IndexPolicy,
@@ -47,6 +48,24 @@ from .lancedb_filter_utils import (
 from .logging_utils import log_audit, log_performance
 
 logger = logging.getLogger(__name__)
+
+
+def _fragment_count(table: Any) -> int:
+    """Number of on-disk data files backing ``table`` (0 when unavailable)."""
+    try:
+        stats = table.stats()
+        fragment_stats = (
+            stats["fragment_stats"] if isinstance(stats, dict) else stats.fragment_stats
+        )
+        count = (
+            fragment_stats["num_fragments"]
+            if isinstance(fragment_stats, dict)
+            else fragment_stats.num_fragments
+        )
+        return int(count)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not count fragments: %s", e)
+        return 0
 
 
 class LanceDBMetadataStore(MetadataStore):
@@ -1434,6 +1453,11 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             conn = self._get_connection()
             table = conn.open_table(table_name)
 
+            # Fragmentation: every append/merge_insert writes a new data file and
+            # read latency scales with the file count, not the row count.
+            if _fragment_count(table) >= policy.compact_fragment_threshold:
+                return True
+
             # Immediate reindex if enabled
             if policy.enable_immediate_reindex and total_upserted > 0:
                 return True
@@ -1467,8 +1491,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         finally:
             _safe_close_table(table)
 
-    def trigger_reindex(self, table_name: str) -> bool:
-        """Trigger reindex operation on the table (sync)."""
+    def trigger_reindex(
+        self, table_name: str, cleanup_older_than: Optional[timedelta] = None
+    ) -> bool:
+        """Compact data files, prune versions older than the retention window."""
         from ..LanceDB.schema_manager import _safe_close_table
 
         table = None
@@ -1476,7 +1502,11 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             logger.info("Triggering reindex for %s", table_name)
             conn = self._get_connection()
             table = conn.open_table(table_name)
-            table.optimize()
+            if cleanup_older_than is None:
+                cleanup_older_than = timedelta(
+                    days=DEFAULT_INDEX_POLICY.version_retention_days
+                )
+            table.optimize(cleanup_older_than=cleanup_older_than)
             logger.info("Reindex completed for %s", table_name)
             return True
         except Exception as e:  # noqa: BLE001
@@ -1484,6 +1514,27 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             return False
         finally:
             _safe_close_table(table)
+
+    def compact_tables(self, policy: Optional[IndexPolicy] = None) -> List[str]:
+        """Compact every fragmented table in the database; returns compacted names.
+
+        Best-effort maintenance: individual failures are logged, never raised.
+        """
+        policy = policy or DEFAULT_INDEX_POLICY
+        cleanup_older_than = timedelta(days=policy.version_retention_days)
+        compacted: List[str] = []
+        try:
+            table_names = list_table_names(self._get_connection())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Compaction skipped, cannot list tables: %s", e)
+            return compacted
+
+        for name in table_names:
+            if self.should_reindex(name, 0, policy) and self.trigger_reindex(
+                name, cleanup_older_than=cleanup_older_than
+            ):
+                compacted.append(name)
+        return compacted
 
     async def should_reindex_async(
         self, table_name: str, total_upserted: int, policy: IndexPolicy
