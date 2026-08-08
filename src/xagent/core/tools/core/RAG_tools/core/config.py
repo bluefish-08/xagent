@@ -178,9 +178,11 @@ class IndexPolicy:
         reindex_unindexed_ratio_threshold: Ratio threshold for triggering reindex.
         enable_immediate_reindex: Whether to reindex immediately after writes.
         enable_smart_reindex: Whether to use smart reindex based on unindexed ratio.
-        compact_fragment_threshold: Data-file count above which a table is compacted.
+        compact_fragment_threshold: Fragment count at or above which a table is
+            compacted.
         version_retention_days: Age below which old table versions are kept; the
-            safety margin that protects readers holding an older version.
+            safety margin that protects readers holding an older version. Must be
+            positive: zero drops every version but the latest.
     """
 
     enable_threshold_rows: int = DEFAULT_INDEX_ROW_THRESHOLD
@@ -203,6 +205,11 @@ class IndexPolicy:
 
     def __post_init__(self) -> None:
         """Initialize default parameter dicts if None."""
+        if self.version_retention_days <= 0:
+            raise ValueError(
+                "version_retention_days must be positive; a zero window deletes "
+                "every version but the latest and invalidates concurrent readers"
+            )
         if self.hnsw_params is None:
             object.__setattr__(self, "hnsw_params", DEFAULT_HNSW_PARAMS.copy())
         if self.ivfpq_params is None:

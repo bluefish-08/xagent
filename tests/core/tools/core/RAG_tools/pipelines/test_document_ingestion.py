@@ -1353,3 +1353,61 @@ def test_batch_embedding_retries_transient_failure(
 
     assert result.status == "success"
     assert calls["n"] == 2  # first attempt raised, retry succeeded
+
+
+def test_process_document_compacts_storage_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful ingestion must actually trigger LanceDB compaction.
+
+    Guards the wiring itself (xorbitsai/xagent#1140): without this, deleting the
+    ``_compact_storage_if_needed`` call leaves the whole suite green while
+    fragmentation silently comes back.
+    """
+    from unittest.mock import Mock, patch
+
+    _patch_pipeline_dependencies(monkeypatch)
+
+    store = Mock()
+    store.compact_tables.return_value = ["documents"]
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+        return_value=store,
+    ):
+        result = document_ingestion.process_document(
+            collection="demo",
+            source_path="/tmp/doc.pdf",
+            config=IngestionConfig(),
+        )
+
+    assert result.status == "success"
+    store.compact_tables.assert_called_once()
+    tables = store.compact_tables.call_args.args[0]
+    assert "collection_metadata" in tables
+    assert any(name.startswith("embeddings_") for name in tables)
+
+
+def test_process_document_succeeds_when_compaction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compaction is maintenance: its failure must not fail the ingestion."""
+    from unittest.mock import Mock, patch
+
+    _patch_pipeline_dependencies(monkeypatch)
+
+    store = Mock()
+    store.compact_tables.side_effect = RuntimeError("optimize exploded")
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+        return_value=store,
+    ):
+        result = document_ingestion.process_document(
+            collection="demo",
+            source_path="/tmp/doc.pdf",
+            config=IngestionConfig(),
+        )
+
+    assert result.status == "success"
+    store.compact_tables.assert_called_once()

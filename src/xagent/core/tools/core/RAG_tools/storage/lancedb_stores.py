@@ -1453,11 +1453,6 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             conn = self._get_connection()
             table = conn.open_table(table_name)
 
-            # Fragmentation: every append/merge_insert writes a new data file and
-            # read latency scales with the file count, not the row count.
-            if _fragment_count(table) >= policy.compact_fragment_threshold:
-                return True
-
             # Immediate reindex if enabled
             if policy.enable_immediate_reindex and total_upserted > 0:
                 return True
@@ -1518,26 +1513,58 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         finally:
             _safe_close_table(table)
 
-    def compact_tables(self, policy: Optional[IndexPolicy] = None) -> List[str]:
-        """Compact every fragmented table in the database; returns compacted names.
+    def should_compact(
+        self, table_name: str, policy: Optional[IndexPolicy] = None
+    ) -> bool:
+        """Whether a table has enough fragments that reads have degraded.
 
-        Best-effort maintenance: individual failures are logged, never raised.
+        Deliberately independent of :meth:`should_reindex`: index staleness and
+        file fragmentation are different problems, and ``optimize()`` bundles
+        compaction with index rebuilds, so reusing the reindex predicate would
+        rebuild large unrelated indices on every ingest.
+        """
+        from ..LanceDB.schema_manager import _safe_close_table
+
+        policy = policy or DEFAULT_INDEX_POLICY
+        table = None
+        try:
+            table = self._get_connection().open_table(table_name)
+            return _fragment_count(table) >= policy.compact_fragment_threshold
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not check fragmentation for %s: %s", table_name, e)
+            return False
+        finally:
+            _safe_close_table(table)
+
+    def compact_tables(
+        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
+    ) -> List[str]:
+        """Compact the fragmented tables among ``table_names``; returns those done.
+
+        Callers pass the tables they just wrote; sweeping the whole database on
+        every ingest costs more than it saves. Best-effort maintenance:
+        individual failures are logged, never raised.
         """
         policy = policy or DEFAULT_INDEX_POLICY
         cleanup_older_than = timedelta(days=policy.version_retention_days)
-        compacted: List[str] = []
-        try:
-            table_names = list_table_names(self._get_connection())
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Compaction skipped, cannot list tables: %s", e)
-            return compacted
+        return [
+            name
+            for name in table_names
+            if self.should_compact(name, policy)
+            and self.trigger_reindex(name, cleanup_older_than=cleanup_older_than)
+        ]
 
-        for name in table_names:
-            if self.should_reindex(name, 0, policy) and self.trigger_reindex(
-                name, cleanup_older_than=cleanup_older_than
-            ):
-                compacted.append(name)
-        return compacted
+    async def should_compact_async(
+        self, table_name: str, policy: Optional[IndexPolicy] = None
+    ) -> bool:
+        """Async version of should_compact; the check opens a table on disk."""
+        return await asyncio.to_thread(self.should_compact, table_name, policy)
+
+    async def compact_tables_async(
+        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
+    ) -> List[str]:
+        """Async version of compact_tables; ``optimize()`` blocks for seconds."""
+        return await asyncio.to_thread(self.compact_tables, table_names, policy)
 
     async def should_reindex_async(
         self, table_name: str, total_upserted: int, policy: IndexPolicy

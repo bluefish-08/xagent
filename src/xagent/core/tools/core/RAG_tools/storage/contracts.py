@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import Enum
 from typing import (
     Any,
@@ -1332,18 +1333,35 @@ class VectorIndexStore(ABC):
         """
 
     @abstractmethod
-    def trigger_reindex(self, table_name: str) -> bool:
+    def trigger_reindex(
+        self, table_name: str, cleanup_older_than: Optional[timedelta] = None
+    ) -> bool:
         """Trigger index rebuild operation.
 
         Args:
             table_name: Embeddings table name.
+            cleanup_older_than: Retention window for old table versions; versions
+                younger than this are always kept so concurrent readers stay
+                valid. ``None`` lets the backend apply its own safe default.
 
         Returns:
             True if reindex was triggered successfully.
         """
 
-    def compact_tables(self, policy: Optional[IndexPolicy] = None) -> List[str]:
-        """Compact fragmented tables; returns the names actually compacted.
+    def should_compact(
+        self, table_name: str, policy: Optional[IndexPolicy] = None
+    ) -> bool:
+        """Whether a table is fragmented enough to be worth compacting.
+
+        Separate from :meth:`should_reindex`: fragmentation is about read
+        latency, not index freshness. Backends without compaction return False.
+        """
+        return False
+
+    def compact_tables(
+        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
+    ) -> List[str]:
+        """Compact the fragmented tables among ``table_names``; returns those done.
 
         Best-effort maintenance; backends without compaction return an empty list.
         """
@@ -1385,6 +1403,18 @@ class VectorIndexStore(ABC):
         Note: Current implementation uses sync operations under the hood.
         True async I/O will be added in Phase 1B with RDB backend.
         """
+
+    async def should_compact_async(
+        self, table_name: str, policy: Optional[IndexPolicy] = None
+    ) -> bool:
+        """Async version of should_compact."""
+        return self.should_compact(table_name, policy)
+
+    async def compact_tables_async(
+        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
+    ) -> List[str]:
+        """Async version of compact_tables."""
+        return self.compact_tables(table_names, policy)
 
     @abstractmethod
     def migrate_embeddings_table(

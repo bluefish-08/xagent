@@ -325,17 +325,27 @@ def _record_ingestion_status(
         )
 
 
-def _compact_storage_if_needed() -> None:
+#: Tables every successful ingestion appends to, besides the embeddings table.
+_INGEST_TABLES = ("documents", "parses", "chunks", "collection_metadata")
+
+
+def _compact_storage_if_needed(embedding_model_id: Optional[str]) -> None:
     """Best-effort LanceDB compaction after a successful ingestion.
 
-    Every ingestion appends new data files and read latency scales with the file
-    count, so tables past the threshold get merged and stale versions pruned.
+    Every ingestion appends one file per table and read latency scales with the
+    fragment count, so fragmented tables get merged and stale versions pruned.
+    Scoped to the tables this ingestion wrote: sweeping the whole database on
+    every document (or every crawled page) costs more than it saves.
     Maintenance must never fail the pipeline, hence the blanket except.
     """
     try:
+        from ..LanceDB.model_tag_utils import to_model_tag
         from ..storage.factory import get_vector_index_store
 
-        compacted = get_vector_index_store().compact_tables()
+        tables = list(_INGEST_TABLES)
+        if embedding_model_id:
+            tables.append(f"embeddings_{to_model_tag(embedding_model_id)}")
+        compacted = get_vector_index_store().compact_tables(tables)
         if compacted:
             logger.info("Compacted LanceDB tables: %s", ", ".join(compacted))
     except Exception as exc:  # noqa: BLE001
@@ -1433,7 +1443,7 @@ def _process_document_impl(
             )
             warnings.append(f"Collection statistics update failed: {stat_exc}")
 
-        _compact_storage_if_needed()
+        _compact_storage_if_needed(embedding_config.id if embedding_config else None)
 
         _record_ingestion_status(
             collection,
