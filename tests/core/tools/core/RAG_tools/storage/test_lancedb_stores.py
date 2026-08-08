@@ -3030,10 +3030,19 @@ def test_vis_cascade_delete_documents_unauthenticated_non_admin_returns_empty():
 # ============================================================================
 
 
-def _mock_table_with_fragments(count: int) -> Mock:
+def _mock_table_with_fragments(count: int, versions: int = 1) -> Mock:
     table = Mock()
     table.stats.return_value = {"fragment_stats": {"num_fragments": count}}
+    table.list_versions.return_value = [{"version": i} for i in range(versions)]
     return table
+
+
+def _mock_conn_with_tables(**tables: Mock) -> Mock:
+    """Connection whose table listing matches the tables it can open."""
+    conn = Mock()
+    conn.list_tables.return_value = list(tables)
+    conn.open_table.side_effect = lambda name, *a, **k: tables[name]
+    return conn
 
 
 @patch(
@@ -3160,11 +3169,9 @@ def test_compact_tables_only_touches_fragmented_tables(
 
     fragmented = _mock_table_with_fragments(500)
     healthy = _mock_table_with_fragments(3)
-    tables = {"documents": fragmented, "chunks": healthy}
-
-    mock_conn = Mock()
-    mock_conn.open_table.side_effect = lambda name, *a, **k: tables[name]
-    mock_get_connection.return_value = mock_conn
+    mock_get_connection.return_value = _mock_conn_with_tables(
+        documents=fragmented, chunks=healthy
+    )
 
     store = LanceDBVectorIndexStore()
     compacted = store.compact_tables(["documents", "chunks"], IndexPolicy())
@@ -3177,25 +3184,54 @@ def test_compact_tables_only_touches_fragmented_tables(
 @patch(
     "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
 )
-def test_compact_tables_never_sweeps_unrelated_tables(
+def test_compact_tables_never_opens_unrelated_tables(
     mock_get_connection: Mock,
 ) -> None:
-    """Compaction is scoped to the caller's list; the database is never listed."""
+    """Only the caller's tables are opened, however many the database holds.
+
+    Listing names is a single cheap metadata call and is expected; opening every
+    table in the database is the cost this API exists to avoid.
+    """
     from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
 
-    mock_conn = Mock()
-    mock_conn.open_table.return_value = _mock_table_with_fragments(500)
+    mock_conn = _mock_conn_with_tables(
+        documents=_mock_table_with_fragments(500),
+        chunks=_mock_table_with_fragments(500),
+        parses=_mock_table_with_fragments(500),
+    )
     mock_get_connection.return_value = mock_conn
 
     store = LanceDBVectorIndexStore()
     assert store.compact_tables(["documents"], IndexPolicy()) == ["documents"]
 
-    mock_conn.table_names.assert_not_called()
-    mock_conn.list_tables.assert_not_called()
-    assert [c.args[0] for c in mock_conn.open_table.call_args_list] == [
-        "documents",
-        "documents",
-    ]
+    opened = {c.args[0] for c in mock_conn.open_table.call_args_list}
+    assert opened == {"documents"}
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_compact_tables_skips_names_that_do_not_exist(
+    mock_get_connection: Mock,
+) -> None:
+    """A missing table is skipped without opening anything.
+
+    Callers probe both spellings of the embeddings table name, so for any
+    vendor-prefixed model id one candidate is guaranteed not to exist.
+    """
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    mock_conn = _mock_conn_with_tables(documents=_mock_table_with_fragments(500))
+    mock_get_connection.return_value = mock_conn
+
+    store = LanceDBVectorIndexStore()
+    compacted = store.compact_tables(
+        ["embeddings_BAAI_bge_large_zh_v1_5", "documents"], IndexPolicy()
+    )
+
+    assert compacted == ["documents"]
+    opened = {c.args[0] for c in mock_conn.open_table.call_args_list}
+    assert "embeddings_BAAI_bge_large_zh_v1_5" not in opened
 
 
 @patch(
@@ -3301,22 +3337,20 @@ def test_compaction_collapses_fragments_and_retains_recent_versions(
 
     db = lancedb.connect(str(tmp_path))
     schema = pa.schema([pa.field("name", pa.string())])
-    table = db.create_table("collection_metadata", schema=schema)
+    table = db.create_table("documents", schema=schema)
     for i in range(12):
         table.add([{"name": f"c{i}"}])
 
     store = LanceDBVectorIndexStore()
     policy = IndexPolicy(compact_fragment_threshold=10)
     with patch.object(store, "_get_connection", return_value=db):
-        # collection_metadata has no vector index, so the fragment predicate is
-        # the only thing that can ever schedule it for compaction.
-        assert store.should_reindex("collection_metadata", 0, policy) is False
-        assert store.should_compact("collection_metadata", policy) is True
-        assert store.compact_tables(["collection_metadata"], policy) == [
-            "collection_metadata"
-        ]
+        # Append-driven table: one data file per write, so fragments are what
+        # schedule it. (Update-driven tables are covered separately below.)
+        assert store.should_reindex("documents", 0, policy) is False
+        assert store.should_compact("documents", policy) is True
+        assert store.compact_tables(["documents"], policy) == ["documents"]
 
-    handle = db.open_table("collection_metadata")
+    handle = db.open_table("documents")
     assert handle.stats()["fragment_stats"]["num_fragments"] == 1
     assert len(handle.search().to_arrow()) == 12
     # 7-day retention: nothing written during this test may be pruned.
@@ -3500,6 +3534,7 @@ def test_compact_tables_with_empty_list_does_nothing(
 
     assert LanceDBVectorIndexStore().compact_tables([]) == []
     mock_conn.open_table.assert_not_called()
+    mock_conn.list_tables.assert_not_called()  # short-circuits before any I/O
 
 
 @patch(
@@ -3564,3 +3599,131 @@ def test_maintenance_failures_never_log_at_error_level(
 
     assert [r.levelno for r in caplog.records if r.levelno >= logging.ERROR] == []
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_should_compact_catches_merge_insert_version_growth(tmp_path: Any) -> None:
+    """The collection_metadata case: real merge_insert upserts, no new fragments.
+
+    This is the table the whole fix exists for (229 MB in production). It is
+    only ever written through ``merge_insert(["name"])``, which rewrites the
+    matched rows instead of appending, so its fragment count stays pinned near
+    the row count and NEVER reaches the fragment threshold, however long it
+    degrades. Version history is what grows without bound and holds the disk.
+
+    Driven by real merge_insert rather than a mocked fragment count on purpose:
+    a mock said this table was fragmented, which is exactly why the gap was
+    invisible for four review rounds.
+    """
+    from datetime import datetime, timezone
+
+    import lancedb
+    import pyarrow as pa
+
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    db = lancedb.connect(str(tmp_path))
+    schema = pa.schema(
+        [
+            pa.field("name", pa.string()),
+            pa.field("description", pa.string()),
+            pa.field("updated_at", pa.timestamp("us")),
+        ]
+    )
+    rows = 20
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    table = db.create_table("collection_metadata", schema=schema)
+    table.add(
+        [{"name": f"c{i}", "description": "d", "updated_at": now} for i in range(rows)]
+    )
+
+    # Same upsert shape as MetadataStore.save_collection.
+    for i in range(120):
+        table.merge_insert(
+            "name"
+        ).when_matched_update_all().when_not_matched_insert_all().execute(
+            [
+                {
+                    "name": f"c{i % rows}",
+                    "description": f"rev-{i}",
+                    "updated_at": now,
+                }
+            ]
+        )
+
+    handle = db.open_table("collection_metadata")
+    fragments = handle.stats()["fragment_stats"]["num_fragments"]
+    versions = len(handle.list_versions())
+    assert handle.stats()["num_rows"] == rows  # updates, never appends
+
+    store = LanceDBVectorIndexStore()
+    with patch.object(store, "_get_connection", return_value=db):
+        # The premise: fragments plateau at the row count and stay far below
+        # the default threshold no matter how much history piles up.
+        assert fragments <= rows
+        assert fragments < IndexPolicy().compact_fragment_threshold
+        assert store.should_compact("collection_metadata", IndexPolicy()) is False
+
+        # The version criterion is the only thing that can catch this table.
+        policy = IndexPolicy(compact_version_threshold=versions)
+        assert store.should_compact("collection_metadata", policy) is True
+        assert store.compact_tables(["collection_metadata"], policy) == [
+            "collection_metadata"
+        ]
+
+    after = db.open_table("collection_metadata")
+    assert len(after.search().to_arrow()) == rows  # data intact
+
+
+def test_index_policy_rejects_non_positive_compaction_thresholds() -> None:
+    """A zero threshold would make every table qualify on every ingestion."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    for field in ("compact_fragment_threshold", "compact_version_threshold"):
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match=f"{field} must be positive"):
+                IndexPolicy(**{field: bad})
+
+
+def test_compaction_lock_lets_only_one_holder_through(tmp_path: Any) -> None:
+    """Two concurrent compactions must not both rewrite the same tables.
+
+    Without this, every loser of the commit race has already paid for a full
+    table rewrite by the time LanceDB rejects it.
+    """
+    import lancedb
+    import pyarrow as pa
+
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        _compaction_lock,
+    )
+
+    db = lancedb.connect(str(tmp_path))
+    table = db.create_table("documents", schema=pa.schema([pa.field("n", pa.string())]))
+    for i in range(12):
+        table.add([{"n": str(i)}])
+
+    store = LanceDBVectorIndexStore()
+    policy = IndexPolicy(compact_fragment_threshold=10)
+
+    # Hold the lock as if another worker were mid-compaction.
+    with _compaction_lock(db) as first:
+        assert first is True
+        with patch.object(store, "_get_connection", return_value=db):
+            assert store.compact_tables(["documents"], policy) == []
+
+    # Once released, the same call proceeds.
+    with patch.object(store, "_get_connection", return_value=db):
+        assert store.compact_tables(["documents"], policy) == ["documents"]
+
+
+def test_compaction_lock_degrades_to_unlocked_for_remote_uris() -> None:
+    """A non-local database URI cannot be flocked; compaction still runs."""
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        _compaction_lock,
+    )
+
+    conn = Mock()
+    conn.uri = "s3://bucket/lancedb"
+    with _compaction_lock(conn) as acquired:
+        assert acquired is True
