@@ -128,12 +128,15 @@ def _stale_version_count(table: Any, cutoff: datetime) -> int:
     run commits one more. This measures exactly what a compaction would reclaim,
     so a successful run drives it back to zero.
 
-    ponytail: O(retained versions); measured 3.9 ms at 100, 87 ms at 2000, and
-    bounded in practice because pruning keeps history near one retention window.
-    If it ever dominates, the manifest file count under ``<table>.lance/
-    _versions`` is the same total for ~0.7 ms, at the cost of depending on
-    on-disk layout -- but it cannot tell stale from fresh, so it would only work
-    as a pre-filter.
+    ponytail: O(retained versions), ~43 us each; measured 3.9 ms at 100 and
+    87 ms at 2000. Pruning bounds the *age* of history, not its size: versions
+    inside the retention window are write-rate x retention-days, so this grows
+    linearly with throughput. At 10k ingestions/day the ingestion_runs table
+    holds ~140k in-window versions, i.e. ~6 s of scanning on every ingestion --
+    unsolved, and the first thing to fix if a busy deployment slows down.
+    The upgrade path is scanning ``<table>.lance/_versions`` directly: the
+    manifests carry usable mtimes, so os.scandir gives both the count and the
+    stale/fresh split for ~0.7 ms, at the cost of depending on on-disk layout.
     """
     try:
         stale = 0

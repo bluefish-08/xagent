@@ -3753,13 +3753,20 @@ def test_compaction_lock_keeps_concurrent_workers_off_one_table(
         [
             sys.executable,
             "-c",
+            # Holds the lock through the real helper, so the test cannot drift
+            # out of step with how lock files are named.
             textwrap.dedent(f"""
                 import time
-                from filelock import FileLock
-                lock = FileLock({str(tmp_path / ".documents.compaction.lock")!r})
-                lock.acquire()
-                open({str(ready)!r}, "w").close()
-                time.sleep(30)
+                from unittest.mock import Mock
+                from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+                    _compaction_lock,
+                )
+                conn = Mock()
+                conn.uri = {str(tmp_path)!r}
+                with _compaction_lock(conn, "documents") as held:
+                    assert held is True
+                    open({str(ready)!r}, "w").close()
+                    time.sleep(30)
             """),
         ]
     )
@@ -3827,7 +3834,9 @@ def test_compaction_lock_does_not_swallow_body_exceptions(tmp_path: Any) -> None
         with _compaction_lock(conn, "documents"):
             raise ValueError("real failure from trigger_reindex")
 
-    # And the lock was released despite the exception.
+    # And the lock is takeable again afterwards, so the failure did not wedge it.
+    # (Only re-acquirability is asserted here; filelock also releases on __del__,
+    # so this cannot prove the explicit release ran.)
     with _compaction_lock(conn, "documents") as acquired:
         assert acquired is True
 
@@ -3977,3 +3986,86 @@ def test_compact_tables_warns_when_no_candidate_is_listed(
         r.levelno == logging.WARNING and "documents" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_stale_version_count_judges_aware_timestamps_by_instant() -> None:
+    """An aware timestamp is judged by the instant it names, not its wall clock.
+
+    LanceDB returns naive local timestamps today; this branch is what keeps that
+    assumption from silently inverting if it ever returns aware ones. Reading a
+    far zone's wall clock instead shifts a version by most of a day, in either
+    direction depending on the offset.
+    """
+    local_now = datetime.now()
+    cutoff = local_now - timedelta(hours=6)
+
+    # A zone at least 12 hours from local, on whichever side stays legal.
+    local_offset = local_now.astimezone().utcoffset() or timedelta(0)
+    shift = (
+        timedelta(hours=-12) if local_offset >= timedelta(0) else timedelta(hours=12)
+    )
+    far = timezone(local_offset + shift)
+
+    def _aware(hours_ago: int) -> datetime:
+        return (local_now - timedelta(hours=hours_ago)).astimezone().astimezone(far)
+
+    table = Mock()
+    # One version each side of the cutoff: any constant misreading of the offset
+    # moves both by the same amount and so flips exactly one of them.
+    table.list_versions.return_value = [
+        {"version": 1, "timestamp": _aware(1)},  # inside the window
+        {"version": 2, "timestamp": _aware(11)},  # outside it
+    ]
+
+    assert _stale_version_count(table, cutoff) == 1
+
+
+def test_should_compact_measures_the_retention_window_in_local_time() -> None:
+    """The cutoff comes from local time, matching LanceDB's naive timestamps.
+
+    Deriving it from utcnow() shifts the whole window by the UTC offset. West of
+    Greenwich that marks versions still inside the window as reclaimable, and
+    compaction then deletes versions live readers are holding.
+
+    Necessarily a no-op on a machine running at UTC, where the two clocks agree.
+    """
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    policy = IndexPolicy(compact_stale_version_threshold=1, version_retention_days=7)
+    boundary = datetime.now() - timedelta(days=policy.version_retention_days)
+
+    table = Mock()
+    table.stats.return_value = {"fragment_stats": {"num_fragments": 1}}
+    # Straddle the true cutoff by a minute, so any clock skew moves both across.
+    table.list_versions.return_value = [
+        {"version": 1, "timestamp": boundary - timedelta(minutes=1)},
+        {"version": 2, "timestamp": boundary + timedelta(minutes=1)},
+    ]
+
+    store = LanceDBVectorIndexStore()
+    with patch.object(
+        store, "_get_connection", return_value=_mock_conn_with_tables(t=table)
+    ):
+        assert store.should_compact("t", policy) is True
+
+
+def test_should_compact_fires_at_exactly_the_stale_version_threshold() -> None:
+    """The comparison is >=, so the threshold value itself must trigger."""
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    table = Mock()
+    table.stats.return_value = {"fragment_stats": {"num_fragments": 2}}
+    table.list_versions.return_value = _versions(stale=100, fresh=5)
+
+    store = LanceDBVectorIndexStore()
+    with patch.object(
+        store, "_get_connection", return_value=_mock_conn_with_tables(t=table)
+    ):
+        assert (
+            store.should_compact("t", IndexPolicy(compact_stale_version_threshold=100))
+            is True
+        )
+        assert (
+            store.should_compact("t", IndexPolicy(compact_stale_version_threshold=101))
+            is False
+        )
