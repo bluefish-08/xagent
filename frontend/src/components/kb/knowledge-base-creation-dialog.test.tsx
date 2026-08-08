@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const apiRequestMock = vi.hoisted(() => vi.fn())
 const toastErrorMock = vi.hoisted(() => vi.fn())
 const toastSuccessMock = vi.hoisted(() => vi.fn())
+const toastWarningMock = vi.hoisted(() => vi.fn())
 const inTeamMock = vi.hoisted(() => ({ value: false }))
 
 vi.mock("@/contexts/auth-context", () => ({
@@ -72,7 +73,7 @@ vi.mock("@/components/ui/sonner", () => ({
   toast: {
     error: toastErrorMock,
     success: toastSuccessMock,
-    warning: vi.fn(),
+    warning: toastWarningMock,
   },
 }))
 
@@ -212,7 +213,7 @@ function installApiMocks() {
     if (url === "http://api.local/api/jobs/capabilities") {
       return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
     }
-    if (url.endsWith("/reserve-team") || url.endsWith("/demote-personal")) {
+    if (url.endsWith("/reserve-team") || url.endsWith("/release-team-claim")) {
       return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
     }
     if (url === "http://api.local/api/kb/ingest/jobs") {
@@ -294,6 +295,7 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     apiRequestMock.mockReset()
     toastErrorMock.mockReset()
     toastSuccessMock.mockReset()
+    toastWarningMock.mockReset()
     inTeamMock.value = false
     installApiMocks()
   })
@@ -647,7 +649,7 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
 })
 
 const RESERVE_URL = "http://api.local/api/knowledge-bases/team-docs/reserve-team"
-const DEMOTE_URL = "http://api.local/api/knowledge-bases/team-docs/demote-personal"
+const RELEASE_URL = "http://api.local/api/knowledge-bases/team-docs/release-team-claim"
 
 function callsTo(url: string) {
   return apiRequestMock.mock.calls.filter(([called]) => called === url)
@@ -670,6 +672,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     apiRequestMock.mockReset()
     toastErrorMock.mockReset()
     toastSuccessMock.mockReset()
+    toastWarningMock.mockReset()
     inTeamMock.value = true
     installApiMocks()
   })
@@ -743,7 +746,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(firstCallIndex((url) => url === RESERVE_URL)).toBeLessThan(
       firstCallIndex((url) => url.includes("/api/kb/ingest"))
     )
-    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 
   it.each(["web", "cloud"] as const)("reserves the team name on the %s path", async (tab) => {
@@ -840,7 +843,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/kb/ingest"))
     ).toHaveLength(0)
     // Nothing was reserved, so nothing may be rolled back.
-    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
     expect(onSuccess).not.toHaveBeenCalled()
   })
 
@@ -858,9 +861,8 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       if (url.endsWith("/reserve-team")) {
         return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
       }
-      if (url.endsWith("/demote-personal")) {
-        // A rollback that itself fails must not become the reported error.
-        return Promise.reject(new Error("rollback exploded"))
+      if (url.endsWith("/release-team-claim")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
         return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
@@ -878,15 +880,148 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     fireEvent.click(screen.getByText("kb.dialog.createButton"))
 
     await waitFor(() => {
-      expect(callsTo(DEMOTE_URL)).toHaveLength(1)
+      expect(callsTo(RELEASE_URL)).toHaveLength(1)
     })
+    expect(callsTo(RELEASE_URL)[0][1]).toMatchObject({ method: "POST" })
     expect(toastErrorMock).toHaveBeenCalledWith(
       "kb.errors.uploadFailed",
       expect.objectContaining({ description: "ingest blew up" })
     )
+    expect(toastWarningMock).not.toHaveBeenCalled()
   })
 
-  it("keeps the reserved name once a file has actually landed in it", async () => {
+  // 403 (not the claim's creator), 404 and a thrown request all mean the same
+  // thing: the name is still claimed and nobody would otherwise notice.
+  it.each([
+    ["a 403 response", () => Promise.resolve(createJsonResponse({ detail: "forbidden" }, false))],
+    ["a rejected request", () => Promise.reject(new Error("rollback exploded"))],
+  ])("warns, but does not mask the ingest error, on %s from the release", async (_label, release) => {
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url.endsWith("/release-team-claim")) {
+        return release()
+      }
+      if (url === "http://api.local/api/kb/ingest/jobs") {
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    try {
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+
+      nameAndChooseTeam(container)
+      await goToStep3(container, "file")
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+      await waitFor(() => {
+        expect(toastWarningMock).toHaveBeenCalledWith("kb.ownership.releaseFailed")
+      })
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "kb.errors.uploadFailed",
+        expect.objectContaining({ description: "ingest blew up" })
+      )
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
+  })
+
+  it("treats a 409 from the release as the expected outcome, not a failure", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url.endsWith("/release-team-claim")) {
+        // The server saw a real collection behind the claim and refused.
+        return Promise.resolve({ ok: false, status: 409, json: vi.fn().mockResolvedValue({}) })
+      }
+      if (url === "http://api.local/api/kb/ingest/jobs") {
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "kb.errors.uploadFailed",
+        expect.objectContaining({ description: "ingest blew up" })
+      )
+    })
+    expect(toastWarningMock).not.toHaveBeenCalled()
+  })
+
+  it("reports a taken name when the reservation conflicts", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: vi.fn().mockResolvedValue({ detail: "Knowledge base already exists" }),
+        })
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      // "Failed to update ownership" would hide the one thing the user can act
+      // on: the name is taken, pick another.
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "kb.errors.uploadFailed",
+        expect.objectContaining({ description: "kb.errors.nameTaken" })
+      )
+    })
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
+  })
+
+  it("still releases once when only some files landed, leaving the verdict to the server", async () => {
     let ingestCalls = 0
     apiRequestMock.mockImplementation((url: string, options?: RequestInit) => {
       if (url === "http://api.local/api/models/?category=embedding") {
@@ -900,6 +1035,10 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       }
       if (url.endsWith("/reserve-team")) {
         return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url.endsWith("/release-team-claim")) {
+        // A collection exists now, so the server is the one that says no.
+        return Promise.resolve({ ok: false, status: 409, json: vi.fn().mockResolvedValue({}) })
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
         ingestCalls += 1
@@ -934,8 +1073,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
     })
-    // The collection exists now: demoting it would move a live team knowledge
-    // base back to personal storage rather than free an empty claim.
-    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
+    // The frontend no longer guesses whether the claim is empty: it always
+    // asks, and the 409 keeps the live team knowledge base intact.
+    expect(callsTo(RELEASE_URL)).toHaveLength(1)
+    expect(toastWarningMock).not.toHaveBeenCalled()
   })
 })

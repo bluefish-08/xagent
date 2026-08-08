@@ -342,21 +342,29 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
       { method: "POST" },
     )
+    // Collection names are global, so 409 means someone already owns this one.
+    if (response.status === 409) throw new Error(t("kb.errors.nameTaken"))
     if (!response.ok) throw new Error(t("kb.ownership.failed"))
     return true
   }
 
-  /** An ingest that wrote nothing must give the name back, or a teammate's later
-   *  personal knowledge base is silently resolved into team storage. */
+  /** A failed ingest must give the name back, or a teammate's later personal
+   *  knowledge base is silently resolved into team storage. Whether the claim is
+   *  really empty is the server's call: 409 means it is not, and keeping it is
+   *  then correct. Anything else non-ok leaves the name claimed, so say so —
+   *  but only ever as a warning, since the ingest error is what the user needs. */
   const releaseTeamName = async (collection: string) => {
     try {
-      await apiRequest(
-        `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/demote-personal`,
+      const response = await apiRequest(
+        `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/release-team-claim`,
         { method: "POST" },
       )
-    } catch {
-      // Never let the rollback replace the ingest error the user needs to see.
+      if (response.ok || response.status === 409) return
+      console.warn("Failed to release team claim:", response.status)
+    } catch (error) {
+      console.warn("Failed to release team claim:", error)
     }
+    toast.warning(t("kb.ownership.releaseFailed"))
   }
 
   const resetState = () => {
@@ -521,11 +529,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.(successfulCollections)
 
     } catch (err) {
-      // A collection that already took a file exists for real: releasing its name
-      // would demote a live team knowledge base instead of freeing an empty claim.
-      if (teamReserved && successfulCollections.length === 0) {
-        await releaseTeamName(trimmedCollectionName)
-      }
+      if (teamReserved) await releaseTeamName(trimmedCollectionName)
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.uploadFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -561,7 +565,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     const collectionName = trimmedCollectionName
     let teamReserved = false
-    let documentsCreated = 0
 
     try {
       const apiUrl = getApiUrl()
@@ -654,7 +657,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         throw new Error(t("kb.errors.webIngestFailed"))
       }
       setWebIngestionResult(result)
-      documentsCreated = result.documents_created || 0
       setWebIngestionProgress(100)
       if (result.status !== "success") {
         throw new Error(result.message || t("kb.errors.webIngestFailed"))
@@ -665,9 +667,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.([collectionName])
 
     } catch (err) {
-      if (teamReserved && documentsCreated === 0) {
-        await releaseTeamName(collectionName)
-      }
+      if (teamReserved) await releaseTeamName(collectionName)
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.webIngestFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -692,7 +692,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     const collectionName = trimmedCollectionName
     let teamReserved = false
-    let ingestedAny = false
 
     try {
       // Aggregate all selected files from all providers
@@ -773,7 +772,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       setIngestionResults(results)
 
       const failedResults = results.filter(result => result.status !== "success")
-      ingestedAny = failedResults.length < results.length
       if (failedResults.length > 0) {
         throw new Error(failedResults[0].message || t("kb.errors.cloudIngestFailed"))
       }
@@ -785,9 +783,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
-      if (teamReserved && !ingestedAny) {
-        await releaseTeamName(collectionName)
-      }
+      if (teamReserved) await releaseTeamName(collectionName)
       console.error("Cloud ingest error:", error)
       const rawMessage = error instanceof Error
         ? error.message

@@ -1885,10 +1885,12 @@ const zh = {
       teamSuccess: "知识库已共享给团队。",
       personalSuccess: "知识库已转回个人。",
       failed: "更新知识库归属失败",
+      releaseFailed: "该名称的团队登记未能释放；再次创建同名知识库会沿用这条登记。",
     },
     errors: {
       loadFailed: "知识库加载失败",
       nameRequired: "知识库名称不能为空",
+      nameTaken: "同名知识库已存在，请换一个名称。",
       createFailed: "创建知识库失败",
       uploadFileRequired: "请选择要上传的文件",
       uploadFailedFile: "上传文件失败: {name}",
