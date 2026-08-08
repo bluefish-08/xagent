@@ -879,11 +879,20 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                 {inTeam && (
                   <div className="space-y-1.5">
                     <Label>{t("kb.ownership.label")}</Label>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
                       <Card
                         id="kb-ownership-personal"
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center ${ownership === 'personal' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
+                        role="radio"
+                        tabIndex={0}
+                        aria-checked={ownership === 'personal'}
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${ownership === 'personal' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                         onClick={() => setOwnership("personal")}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            setOwnership("personal")
+                          }
+                        }}
                       >
                         <User className="w-5 h-5 text-primary mb-1" />
                         <span className="font-bold text-sm">{t("kb.ownership.personal")}</span>
@@ -891,8 +900,17 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       </Card>
                       <Card
                         id="kb-ownership-team"
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center ${ownership === 'team' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
+                        role="radio"
+                        tabIndex={0}
+                        aria-checked={ownership === 'team'}
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${ownership === 'team' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                         onClick={() => setOwnership("team")}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            setOwnership("team")
+                          }
+                        }}
                       >
                         <Users className="w-5 h-5 text-primary mb-1" />
                         <span className="font-bold text-sm">{t("kb.ownership.team")}</span>
@@ -906,26 +924,53 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
             {currentStep === 2 && (
               <div className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div role="radiogroup" aria-label={t("kb.dialog.steps.addContentTitle")} className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'file' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
+                    role="radio"
+                    tabIndex={0}
+                    aria-checked={activeImportTab === 'file'}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'file' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('file')}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault()
+                        setActiveImportTab('file')
+                      }
+                    }}
                   >
                     <Upload className="w-6 h-6 text-primary mb-2" />
                     <span className="font-bold text-base">{t("kb.dialog.tabs.file")}</span>
                     <span className="text-xs text-muted-foreground">{t("kb.dialog.fileUpload.supportedFormats")}</span>
                   </Card>
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'web' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
+                    role="radio"
+                    tabIndex={0}
+                    aria-checked={activeImportTab === 'web'}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'web' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('web')}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault()
+                        setActiveImportTab('web')
+                      }
+                    }}
                   >
                     <Globe className="w-6 h-6 text-primary mb-2" />
                     <span className="font-bold text-base">{t("kb.dialog.tabs.web")}</span>
                     <span className="text-xs text-muted-foreground">{t("kb.dialog.tabs.webDesc")}</span>
                   </Card>
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'cloud' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
+                    role="radio"
+                    tabIndex={0}
+                    aria-checked={activeImportTab === 'cloud'}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'cloud' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('cloud')}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault()
+                        setActiveImportTab('cloud')
+                      }
+                    }}
                   >
                     <Cloud className="w-6 h-6 text-primary mb-2" />
                     <span className="font-bold text-base">{t("kb.dialog.tabs.cloud")}</span>
@@ -1001,7 +1046,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       {t("kb.dialog.cloudConnect.description")}
                     </p>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
                       {cloudProviders.map((provider) => (
                         <Card
                           key={provider.id}
@@ -1086,7 +1131,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                         className="mt-1.5"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
                       <div>
                         <Label htmlFor="max_pages" className="text-sm font-medium">{t("kb.dialog.webImport.basic.maxPages")}</Label>
                         <Input

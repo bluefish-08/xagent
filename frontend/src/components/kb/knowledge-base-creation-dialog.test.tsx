@@ -633,7 +633,11 @@ function callsTo(url: string) {
 }
 
 function firstCallIndex(predicate: (url: string) => boolean) {
-  return apiRequestMock.mock.calls.findIndex(([url]) => predicate(String(url)))
+  const index = apiRequestMock.mock.calls.findIndex(([url]) => predicate(String(url)))
+  // Reject the miss here: a bare -1 makes `toBeLessThan` pass for a call that
+  // never happened, which is the opposite of what the ordering assertions mean.
+  expect(index).toBeGreaterThan(-1)
+  return index
 }
 
 /** Name the knowledge base and pick Team, which only exists when `inTeam`. */
@@ -681,6 +685,28 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(
       apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/knowledge-bases/"))
     ).toHaveLength(0)
+  })
+
+  it("moves the ownership choice with the keyboard, not just the mouse", () => {
+    // These are Cards standing in for radios, so the keyboard handling that a
+    // real radio would give for free has to be written out.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    const team = container.querySelector("#kb-ownership-team") as HTMLElement
+    const personal = container.querySelector("#kb-ownership-personal") as HTMLElement
+    expect(team.getAttribute("role")).toBe("radio")
+    expect(team.getAttribute("tabindex")).toBe("0")
+    expect(team.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.keyDown(team, { key: "Enter" })
+    expect(team.getAttribute("aria-checked")).toBe("true")
+    expect(personal.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.keyDown(personal, { key: " " })
+    expect(personal.getAttribute("aria-checked")).toBe("true")
+    expect(team.getAttribute("aria-checked")).toBe("false")
   })
 
   it("defaults to personal inside a team and reserves nothing", async () => {
