@@ -1336,16 +1336,20 @@ class VectorIndexStore(ABC):
     def trigger_reindex(
         self, table_name: str, cleanup_older_than: Optional[timedelta] = None
     ) -> bool:
-        """Trigger index rebuild operation.
+        """Optimize a table: compact data files, prune old versions, refresh indices.
+
+        Called for any table :meth:`compact_tables` selects, including ones with
+        no index at all, so compaction and version pruning — not the index
+        rebuild — are the parts callers can rely on.
 
         Args:
-            table_name: Embeddings table name.
+            table_name: Table to optimize; need not be an embeddings table.
             cleanup_older_than: Retention window for old table versions; versions
                 younger than this are always kept so concurrent readers stay
                 valid. ``None`` lets the backend apply its own safe default.
 
         Returns:
-            True if reindex was triggered successfully.
+            True if the table was optimized successfully.
         """
 
     def should_compact(

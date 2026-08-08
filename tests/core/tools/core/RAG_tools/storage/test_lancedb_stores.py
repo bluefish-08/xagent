@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from xagent.core.tools.core.RAG_tools.core.config import DEFAULT_INDEX_POLICY
 from xagent.core.tools.core.RAG_tools.core.exceptions import DatabaseOperationError
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
     LanceDBIngestionStatusStore,
@@ -3485,3 +3486,81 @@ def test_compaction_finds_the_embeddings_table_the_write_path_creates(
     # The name the write path really created must be asked for verbatim.
     assert created[0] in probed
     assert stats["fragment_stats"]["num_fragments"] == 1  # and really got compacted
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_compact_tables_with_empty_list_does_nothing(
+    mock_get_connection: Mock,
+) -> None:
+    """Empty input is a normal boundary: no work, no connection, no error."""
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+
+    assert LanceDBVectorIndexStore().compact_tables([]) == []
+    mock_conn.open_table.assert_not_called()
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_trigger_reindex_returns_false_for_unopenable_table(
+    mock_get_connection: Mock,
+) -> None:
+    """A table that cannot even be opened reports False rather than raising.
+
+    Distinct from the covered case where an opened table's optimize() fails:
+    this is the open_table branch, which the probe-both-spellings scheme hits
+    routinely, since one of the two candidate names usually does not exist.
+    """
+    mock_conn = Mock()
+    mock_conn.open_table.side_effect = FileNotFoundError("no such table")
+    mock_get_connection.return_value = mock_conn
+
+    assert LanceDBVectorIndexStore().trigger_reindex("embeddings_nope") is False
+
+
+def test_vector_index_store_contract_defaults_to_no_compaction() -> None:
+    """A backend that does not implement compaction inherits safe no-ops.
+
+    Calls the base-class bodies unbound: VectorIndexStore has 42 abstract
+    methods, so a stub subclass would be 40 lines of noise to test two.
+    """
+    from xagent.core.tools.core.RAG_tools.storage.contracts import VectorIndexStore
+
+    backend = Mock(spec=VectorIndexStore)
+
+    assert VectorIndexStore.should_compact(backend, "documents") is False
+    assert VectorIndexStore.compact_tables(backend, ["documents"]) == []
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_maintenance_failures_never_log_at_error_level(
+    mock_get_connection: Mock,
+    caplog: Any,
+) -> None:
+    """Compaction is best-effort, so its failures stay at WARNING.
+
+    should_reindex now runs on every ingestion; at ERROR a single unopenable
+    table would page on every upload for every collection, forever.
+    """
+    import logging
+
+    mock_conn = Mock()
+    mock_conn.open_table.side_effect = FileNotFoundError("no such table")
+    mock_get_connection.return_value = mock_conn
+
+    store = LanceDBVectorIndexStore()
+    with caplog.at_level(
+        logging.DEBUG, logger="xagent.core.tools.core.RAG_tools.storage.lancedb_stores"
+    ):
+        assert store.should_reindex("gone", 0, DEFAULT_INDEX_POLICY) is False
+        assert store.should_compact("gone") is False
+        assert store.trigger_reindex("gone") is False
+        assert store.compact_tables(["gone"]) == []
+
+    assert [r.levelno for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert any(r.levelno == logging.WARNING for r in caplog.records)

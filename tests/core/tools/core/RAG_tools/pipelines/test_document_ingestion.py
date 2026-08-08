@@ -1455,3 +1455,75 @@ def test_process_document_compacts_storage_after_failure(
     assert result.status != "success"
     store.compact_tables.assert_called_once()
     assert "ingestion_runs" in store.compact_tables.call_args.args[0]
+
+
+def test_process_document_compaction_covers_vendor_prefixed_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipeline level: a slashed model id must reach the table writes create.
+
+    The other pipeline tests use ``embedding-default``, which is idempotent
+    under ``to_model_tag`` -- one application and two produce the same string,
+    so their assertions cannot tell a single probe from a double one. A vendor
+    prefixed id can, because ``to_model_tag`` lowercases the vendor segment on
+    the second pass.
+    """
+    from unittest.mock import Mock, patch
+
+    _patch_pipeline_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        document_ingestion,
+        "_resolve_embedding_adapter",
+        lambda _cfg: (
+            EmbeddingModelConfig(
+                id="BAAI/bge-large-zh-v1.5",
+                model_name="bge-large-zh-v1.5",
+                model_provider="huggingface",
+                dimension=2,
+            ),
+            _StubEmbeddingAdapter(),
+        ),
+    )
+
+    store = Mock()
+    store.compact_tables.return_value = []
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+        return_value=store,
+    ):
+        result = document_ingestion.process_document(
+            collection="demo",
+            source_path="/tmp/doc.pdf",
+            config=IngestionConfig(),
+        )
+
+    assert result.status == "success"
+    assert set(store.compact_tables.call_args.args[0]) == {
+        "documents",
+        "parses",
+        "chunks",
+        "collection_metadata",
+        "ingestion_runs",
+        "embeddings_BAAI_bge_large_zh_v1_5",  # single-applied (legacy spelling)
+        "embeddings_baai_bge_large_zh_v1_5",  # double-applied (what writes make)
+    }
+
+
+def test_ingest_tables_are_real_schema_manager_tables() -> None:
+    """Every name in _INGEST_TABLES must correspond to a real ensure_*_table.
+
+    Binds the hardcoded list to the schema layer so a rename or typo cannot
+    leave it silently pointing at a table that does not exist.
+
+    Gap this does NOT close: a *new* table added to the ingest path is still
+    missed, because nothing enumerates which ensure_* calls ingestion makes.
+    """
+    from xagent.core.tools.core.RAG_tools.LanceDB import schema_manager
+
+    ensured = {
+        name[len("ensure_") : -len("_table")]
+        for name in dir(schema_manager)
+        if name.startswith("ensure_") and name.endswith("_table")
+    }
+    assert set(document_ingestion._INGEST_TABLES) <= ensured

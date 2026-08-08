@@ -204,7 +204,16 @@ class IndexPolicy:
     version_retention_days: int = 7
 
     def __post_init__(self) -> None:
-        """Initialize default parameter dicts if None."""
+        """Validate the retention window, then fill in default parameter dicts.
+
+        This is the only enforcement point for ``version_retention_days``, so
+        every construction path goes through it.
+
+        Raises:
+            ValueError: If ``version_retention_days`` is not positive. A zero or
+                negative window makes the backend delete every table version but
+                the latest, invalidating readers holding an older one.
+        """
         if self.version_retention_days <= 0:
             raise ValueError(
                 "version_retention_days must be positive; a zero window deletes "

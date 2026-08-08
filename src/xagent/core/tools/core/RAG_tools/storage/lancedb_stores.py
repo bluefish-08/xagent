@@ -1480,8 +1480,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
             return False
 
-        except Exception as e:
-            logger.error("Failed to check reindex status for %s: %s", table_name, e)
+        except Exception as e:  # noqa: BLE001
+            # warning, not error: every ingestion reaches this now, so a single
+            # unopenable table would shout ERROR on every upload forever after.
+            logger.warning("Failed to check reindex status for %s: %s", table_name, e)
             return False
         finally:
             _safe_close_table(table)
@@ -1494,7 +1496,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         table = None
         try:
-            logger.info("Triggering reindex for %s", table_name)
+            # Neutral wording: compact_tables routes tables here that have no
+            # index at all (collection_metadata, ingestion_runs, parses).
+            logger.info("Optimizing %s", table_name)
             conn = self._get_connection()
             table = conn.open_table(table_name)
             if cleanup_older_than is None:
@@ -1505,10 +1509,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # Pruning drops the versions cached handles point at, same reason
             # the delete paths invalidate after mutating a table.
             self.invalidate_table_cache(table_name)
-            logger.info("Reindex completed for %s", table_name)
+            logger.info("Optimized %s", table_name)
             return True
         except Exception as e:  # noqa: BLE001
-            logger.warning("Reindex failed for %s: %s", table_name, e)
+            logger.warning("Optimize failed for %s: %s", table_name, e)
             return False
         finally:
             _safe_close_table(table)
