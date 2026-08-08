@@ -882,7 +882,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     <div className="grid grid-cols-2 gap-4">
                       <Card
                         id="kb-ownership-personal"
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 transition-all text-center ${ownership === 'personal' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center ${ownership === 'personal' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                         onClick={() => setOwnership("personal")}
                       >
                         <User className="w-5 h-5 text-primary mb-1" />
@@ -891,7 +891,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       </Card>
                       <Card
                         id="kb-ownership-team"
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 transition-all text-center ${ownership === 'team' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center ${ownership === 'team' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                         onClick={() => setOwnership("team")}
                       >
                         <Users className="w-5 h-5 text-primary mb-1" />
