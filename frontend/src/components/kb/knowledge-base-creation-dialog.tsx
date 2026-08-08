@@ -908,7 +908,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
               <div className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 transition-all text-center ${activeImportTab === 'file' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'file' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('file')}
                   >
                     <Upload className="w-6 h-6 text-primary mb-2" />
@@ -916,7 +916,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     <span className="text-xs text-muted-foreground">{t("kb.dialog.fileUpload.supportedFormats")}</span>
                   </Card>
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 transition-all text-center ${activeImportTab === 'web' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'web' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('web')}
                   >
                     <Globe className="w-6 h-6 text-primary mb-2" />
@@ -924,7 +924,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     <span className="text-xs text-muted-foreground">{t("kb.dialog.tabs.webDesc")}</span>
                   </Card>
                   <Card
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 transition-all text-center ${activeImportTab === 'cloud' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center ${activeImportTab === 'cloud' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
                     onClick={() => setActiveImportTab('cloud')}
                   >
                     <Cloud className="w-6 h-6 text-primary mb-2" />
