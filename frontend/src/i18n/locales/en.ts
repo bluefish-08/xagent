@@ -1877,6 +1877,7 @@ Build when you need.`,
   },
   kb: {
     ownership: {
+      label: "Ownership",
       personal: "Personal",
       team: "Team",
       makeTeam: "Share with team",

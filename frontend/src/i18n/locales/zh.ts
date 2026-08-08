@@ -1877,6 +1877,7 @@ const zh = {
   },
   kb: {
     ownership: {
+      label: "归属",
       personal: "个人",
       team: "团队",
       makeTeam: "转为团队知识库",

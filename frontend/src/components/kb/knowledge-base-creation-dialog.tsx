@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select } from "@/components/ui/select"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { getApiUrl } from "@/lib/utils"
 import {
   getBackgroundJobFailureMessage,
@@ -29,6 +30,7 @@ import {
   normalizeKnowledgeBaseIngestionResult,
 } from "@/lib/kb-ingest-feedback"
 import { useI18n } from "@/contexts/i18n-context"
+import { useAuth } from "@/contexts/auth-context"
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { Model } from "@/lib/models"
 import {
@@ -112,10 +114,12 @@ interface KnowledgeBaseCreationDialogProps {
 
 export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: KnowledgeBaseCreationDialogProps) {
   const { t } = useI18n()
+  const { inTeam } = useAuth()
 
   // State from KnowledgeBasePage
   const [newCollectionName, setNewCollectionName] = useState("")
   const [newCollectionDescription, setNewCollectionDescription] = useState("")
+  const [ownership, setOwnership] = useState<"personal" | "team">("personal")
   const [activeImportTab, setActiveImportTab] = useState<"file" | "web" | "cloud">("file")
   const [currentStep, setCurrentStep] = useState(1)
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
@@ -330,8 +334,34 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     return false
   }
 
+  /** Ownership is resolved before the first byte is written, so a team knowledge
+   *  base has to claim its name up front or the files land in personal storage. */
+  const reserveTeamName = async (collection: string) => {
+    if (ownership !== "team") return false
+    const response = await apiRequest(
+      `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
+      { method: "POST" },
+    )
+    if (!response.ok) throw new Error(t("kb.ownership.failed"))
+    return true
+  }
+
+  /** An ingest that wrote nothing must give the name back, or a teammate's later
+   *  personal knowledge base is silently resolved into team storage. */
+  const releaseTeamName = async (collection: string) => {
+    try {
+      await apiRequest(
+        `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/demote-personal`,
+        { method: "POST" },
+      )
+    } catch {
+      // Never let the rollback replace the ingest error the user needs to see.
+    }
+  }
+
   const resetState = () => {
     setSelectedFiles([])
+    setOwnership("personal")
     setUploadProgress(0)
     setIngestionResults([])
     setWebIngestionResult(null)
@@ -373,9 +403,12 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setCompletedUploadCount(0)
 
     const successfulCollections: string[] = []
+    let teamReserved = false
 
     try {
       const apiUrl = getApiUrl()
+      // Once, before the loop: every file shares one collection.
+      teamReserved = await reserveTeamName(trimmedCollectionName)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       for (let i = 0; i < selectedFiles.length; i++) {
         const file = selectedFiles[i]
@@ -488,6 +521,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.(successfulCollections)
 
     } catch (err) {
+      // A collection that already took a file exists for real: releasing its name
+      // would demote a live team knowledge base instead of freeing an empty claim.
+      if (teamReserved && successfulCollections.length === 0) {
+        await releaseTeamName(trimmedCollectionName)
+      }
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.uploadFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -521,12 +559,15 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setWebIngestionProgress(0)
     setWebIngestionResult(null)
 
+    const collectionName = trimmedCollectionName
+    let teamReserved = false
+    let documentsCreated = 0
+
     try {
       const apiUrl = getApiUrl()
+      teamReserved = await reserveTeamName(collectionName)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       const formData = new FormData()
-
-      const collectionName = trimmedCollectionName
 
       formData.append("collection", collectionName)
       formData.append("start_url", webIngestionConfig.start_url)
@@ -613,6 +654,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         throw new Error(t("kb.errors.webIngestFailed"))
       }
       setWebIngestionResult(result)
+      documentsCreated = result.documents_created || 0
       setWebIngestionProgress(100)
       if (result.status !== "success") {
         throw new Error(result.message || t("kb.errors.webIngestFailed"))
@@ -623,6 +665,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.([collectionName])
 
     } catch (err) {
+      if (teamReserved && documentsCreated === 0) {
+        await releaseTeamName(collectionName)
+      }
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.webIngestFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -645,13 +690,17 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     let failedStatus: number | undefined
     setIngestionResults([])
 
+    const collectionName = trimmedCollectionName
+    let teamReserved = false
+    let ingestedAny = false
+
     try {
       // Aggregate all selected files from all providers
       const filesToIngest = Object.entries(cloudSelections).flatMap(([provider, files]) =>
         files.map(file => ({ provider, fileId: file.id, fileName: file.name }))
       )
 
-      const collectionName = trimmedCollectionName
+      teamReserved = await reserveTeamName(collectionName)
 
       // Prepare separators
       let separators: string[] | undefined = undefined
@@ -724,6 +773,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       setIngestionResults(results)
 
       const failedResults = results.filter(result => result.status !== "success")
+      ingestedAny = failedResults.length < results.length
       if (failedResults.length > 0) {
         throw new Error(failedResults[0].message || t("kb.errors.cloudIngestFailed"))
       }
@@ -735,6 +785,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
+      if (teamReserved && !ingestedAny) {
+        await releaseTeamName(collectionName)
+      }
       console.error("Cloud ingest error:", error)
       const rawMessage = error instanceof Error
         ? error.message
@@ -826,6 +879,25 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     className="mt-1.5 h-32"
                   />
                 </div>
+                {inTeam && (
+                  <div className="space-y-1.5">
+                    <Label>{t("kb.ownership.label")}</Label>
+                    <RadioGroup value={ownership} onValueChange={(v) => setOwnership(v as "personal" | "team")}>
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value="personal" id="kb-ownership-personal" />
+                        <Label htmlFor="kb-ownership-personal" className="font-normal cursor-pointer">
+                          {t("kb.ownership.personal")}
+                        </Label>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value="team" id="kb-ownership-team" />
+                        <Label htmlFor="kb-ownership-team" className="font-normal cursor-pointer">
+                          {t("kb.ownership.team")}
+                        </Label>
+                      </div>
+                    </RadioGroup>
+                  </div>
+                )}
               </div>
             )}
 

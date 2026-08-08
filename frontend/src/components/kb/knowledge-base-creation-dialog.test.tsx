@@ -5,6 +5,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const apiRequestMock = vi.hoisted(() => vi.fn())
 const toastErrorMock = vi.hoisted(() => vi.fn())
 const toastSuccessMock = vi.hoisted(() => vi.fn())
+const inTeamMock = vi.hoisted(() => ({ value: false }))
+
+vi.mock("@/contexts/auth-context", () => ({
+  useAuth: () => ({ inTeam: inTeamMock.value }),
+}))
+
+// Radios as plain inputs: the change bubbles to the group, which is all the
+// component's `onValueChange` contract needs.
+vi.mock("@/components/ui/radio-group", () => ({
+  RadioGroup: ({
+    value,
+    onValueChange,
+    children,
+  }: {
+    value: string
+    onValueChange: (next: string) => void
+    children: React.ReactNode
+  }) => (
+    <div
+      data-testid="ownership-radio"
+      data-value={value}
+      onChange={(event) => onValueChange((event.target as HTMLInputElement).value)}
+    >
+      {children}
+    </div>
+  ),
+  RadioGroupItem: ({ value, id }: { value: string; id: string }) => (
+    <input type="radio" id={id} value={value} />
+  ),
+}))
 
 vi.mock("@/lib/api-wrapper", () => ({
   apiRequest: apiRequestMock,
@@ -182,6 +212,9 @@ function installApiMocks() {
     if (url === "http://api.local/api/jobs/capabilities") {
       return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
     }
+    if (url.endsWith("/reserve-team") || url.endsWith("/demote-personal")) {
+      return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+    }
     if (url === "http://api.local/api/kb/ingest/jobs") {
       return Promise.resolve(
         createJsonResponse(
@@ -261,6 +294,7 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     apiRequestMock.mockReset()
     toastErrorMock.mockReset()
     toastSuccessMock.mockReset()
+    inTeamMock.value = false
     installApiMocks()
   })
 
@@ -609,5 +643,299 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     } finally {
       consoleErrorSpy.mockRestore()
     }
+  })
+})
+
+const RESERVE_URL = "http://api.local/api/knowledge-bases/team-docs/reserve-team"
+const DEMOTE_URL = "http://api.local/api/knowledge-bases/team-docs/demote-personal"
+
+function callsTo(url: string) {
+  return apiRequestMock.mock.calls.filter(([called]) => called === url)
+}
+
+function firstCallIndex(predicate: (url: string) => boolean) {
+  return apiRequestMock.mock.calls.findIndex(([url]) => predicate(String(url)))
+}
+
+/** Name the knowledge base and pick Team, which only exists when `inTeam`. */
+function nameAndChooseTeam(container: HTMLElement) {
+  fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+    target: { value: "team-docs" },
+  })
+  fireEvent.click(container.querySelector("#kb-ownership-team") as HTMLInputElement)
+}
+
+describe("KnowledgeBaseCreationDialog ownership", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset()
+    toastErrorMock.mockReset()
+    toastSuccessMock.mockReset()
+    inTeamMock.value = true
+    installApiMocks()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it("hides the selector and never touches the team endpoints outside a team", async () => {
+    // The open-source single-node build has no team and no /api/knowledge-bases
+    // routes: the selector must not render and no request may be made.
+    inTeamMock.value = false
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+    expect(container.querySelector("#kb-ownership-team")).toBeNull()
+    expect(screen.queryByTestId("ownership-radio")).toBeNull()
+
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    expect(
+      apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/knowledge-bases/"))
+    ).toHaveLength(0)
+  })
+
+  it("defaults to personal inside a team and reserves nothing", async () => {
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    expect(screen.getByTestId("ownership-radio").getAttribute("data-value")).toBe("personal")
+
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    expect(callsTo(RESERVE_URL)).toHaveLength(0)
+  })
+
+  it("reserves the team name once, before the first of several file ingests", async () => {
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file", 2)
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledWith(["team-docs", "team-docs"])
+    })
+    // Once, not once per file: the loop shares one collection.
+    expect(callsTo(RESERVE_URL)).toHaveLength(1)
+    expect(callsTo(RESERVE_URL)[0][1]).toMatchObject({ method: "POST" })
+    // Ownership is resolved before the first byte is written, so ordering is
+    // the whole point of the call.
+    expect(firstCallIndex((url) => url === RESERVE_URL)).toBeLessThan(
+      firstCallIndex((url) => url.includes("/api/kb/ingest"))
+    )
+    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
+  })
+
+  it.each(["web", "cloud"] as const)("reserves the team name on the %s path", async (tab) => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url === "http://api.local/api/kb/ingest-web/jobs") {
+        return Promise.resolve(
+          createJsonResponse(
+            createSucceededJob({
+              status: "success",
+              collection: "team-docs",
+              total_urls_found: 1,
+              pages_crawled: 1,
+              pages_failed: 0,
+              documents_created: 1,
+              chunks_created: 1,
+              embeddings_created: 1,
+              crawled_urls: ["https://example.com/docs"],
+              failed_urls: {},
+              message: "ok",
+              warnings: [],
+              elapsed_time_ms: 0,
+            })
+          )
+        )
+      }
+      if (url === "http://api.local/api/kb/ingest-cloud") {
+        return Promise.resolve(createJsonResponse([{ status: "success", message: "ok", doc_id: "d1" }]))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, tab)
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo(RESERVE_URL)).toHaveLength(1)
+    })
+    expect(firstCallIndex((url) => url === RESERVE_URL)).toBeLessThan(
+      firstCallIndex((url) => url.includes("/api/kb/ingest"))
+    )
+  })
+
+  it("does not ingest at all when the reservation is refused", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve(createJsonResponse({ detail: "taken" }, false))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "kb.errors.uploadFailed",
+        expect.objectContaining({ description: "kb.ownership.failed" })
+      )
+    })
+    // Ingesting anyway would write the files into personal storage under a name
+    // the user asked to be a team knowledge base.
+    expect(
+      apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/kb/ingest"))
+    ).toHaveLength(0)
+    // Nothing was reserved, so nothing may be rolled back.
+    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
+    expect(onSuccess).not.toHaveBeenCalled()
+  })
+
+  it("releases the reserved name when the ingest fails, without hiding why", async () => {
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url.endsWith("/demote-personal")) {
+        // A rollback that itself fails must not become the reported error.
+        return Promise.reject(new Error("rollback exploded"))
+      }
+      if (url === "http://api.local/api/kb/ingest/jobs") {
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo(DEMOTE_URL)).toHaveLength(1)
+    })
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      "kb.errors.uploadFailed",
+      expect.objectContaining({ description: "ingest blew up" })
+    )
+  })
+
+  it("keeps the reserved name once a file has actually landed in it", async () => {
+    let ingestCalls = 0
+    apiRequestMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team")) {
+        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      }
+      if (url === "http://api.local/api/kb/ingest/jobs") {
+        ingestCalls += 1
+        if (ingestCalls > 1) {
+          return Promise.resolve(createJsonResponse({ message: "second file blew up" }, false))
+        }
+        return Promise.resolve(
+          createJsonResponse(
+            createSucceededJob({
+              status: "success",
+              collection: (options?.body as FormData).get("collection"),
+              document_count: 1,
+              chunks_count: 1,
+              message: "ok",
+            })
+          )
+        )
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file", 2)
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
+    })
+    // The collection exists now: demoting it would move a live team knowledge
+    // base back to personal storage rather than free an empty claim.
+    expect(callsTo(DEMOTE_URL)).toHaveLength(0)
   })
 })
