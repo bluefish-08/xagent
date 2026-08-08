@@ -181,12 +181,18 @@ class IndexPolicy:
         compact_fragment_threshold: Fragment count at or above which a table is
             compacted. Catches append-heavy tables, where reads slow down with
             the file count. Must be positive.
-        compact_version_threshold: Retained-version count at or above which a
-            table is compacted. Catches update-heavy tables such as
-            ``collection_metadata``, whose ``merge_insert`` upserts rewrite rows
-            instead of appending: their fragment count plateaus around the row
-            count while version history, and the disk it holds, grows without
-            bound. Must be positive.
+        compact_stale_version_threshold: Number of versions already older than
+            ``version_retention_days`` -- that is, versions the next compaction
+            can actually delete -- at or above which a table is compacted.
+            Catches update-heavy tables such as ``collection_metadata``, whose
+            ``merge_insert`` upserts rewrite rows instead of appending: their
+            fragment count plateaus around the row count while version history,
+            and the disk it holds, grows without bound.
+            Counting only reclaimable versions is what keeps the trigger from
+            ratcheting: counting *all* versions would stay above any threshold
+            forever once crossed, since compaction cannot remove versions still
+            inside the retention window and each run commits another one.
+            Must be positive.
         version_retention_days: Age below which old table versions are kept; the
             safety margin that protects readers holding an older version. Must be
             positive: zero drops every version but the latest.
@@ -208,7 +214,7 @@ class IndexPolicy:
 
     # Compaction configuration
     compact_fragment_threshold: int = 100
-    compact_version_threshold: int = 1000
+    compact_stale_version_threshold: int = 100
     version_retention_days: int = 7
 
     def __post_init__(self) -> None:
@@ -229,7 +235,10 @@ class IndexPolicy:
                 "version_retention_days must be positive; a zero window deletes "
                 "every version but the latest and invalidates concurrent readers"
             )
-        for field_name in ("compact_fragment_threshold", "compact_version_threshold"):
+        for field_name in (
+            "compact_fragment_threshold",
+            "compact_stale_version_threshold",
+        ):
             if getattr(self, field_name) <= 0:
                 raise ValueError(
                     f"{field_name} must be positive; a non-positive threshold "

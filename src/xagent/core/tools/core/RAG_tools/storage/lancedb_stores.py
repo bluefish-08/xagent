@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
 import lancedb
 import pyarrow as pa  # type: ignore
+from filelock import FileLock, Timeout
 from lancedb.db import DBConnection
 
 from xagent.providers.vector_store.lancedb import get_connection_from_env
@@ -70,65 +71,84 @@ def _fragment_count(table: Any) -> int:
 
 
 @contextmanager
-def _compaction_lock(conn: Any) -> Iterator[bool]:
-    """Yield whether this process took the database-wide compaction lock.
+def _compaction_lock(conn: Any, table_name: str) -> Iterator[bool]:
+    """Yield whether this process took the compaction lock for one table.
 
     Concurrent ``optimize()`` calls each rewrite the table in full and then all
     but one lose the commit, so the losers waste a complete rewrite. A
-    non-blocking ``flock`` keeps one worker doing the work; the rest skip, which
+    non-blocking lock keeps one worker doing the work; the rest skip, which
     costs nothing because the next ingestion compacts instead.
 
-    Yields True (unlocked) when locking is unavailable -- a non-local database
-    URI, or a platform without ``fcntl`` -- leaving the previous behaviour.
+    Per table, not per database: the work is per table, so a database-wide lock
+    would let one worker's collection starve another's embeddings table.
 
-    ponytail: one lock for the whole database, not per table. Compaction is rare
-    and short; split it per table if two collections ever contend measurably.
+    Yields True (unlocked) when locking is unavailable -- a non-local database
+    URI, or an unwritable directory -- which just restores the old behaviour.
     """
     uri = str(getattr(conn, "uri", "") or "")
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - non-Unix
-        yield True
-        return
-
     if not uri or "://" in uri or not os.path.isdir(uri):
         yield True
         return
 
-    handle = None
     try:
-        handle = open(os.path.join(uri, ".compaction.lock"), "w")
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            yield False
-            return
-        yield True
+        lock = FileLock(os.path.join(uri, f".{table_name}.compaction.lock"), timeout=0)
     except Exception as e:  # noqa: BLE001
         logger.debug("Compaction lock unavailable, proceeding unlocked: %s", e)
         yield True
+        return
+
+    try:
+        lock.acquire()
+    except Timeout:
+        yield False
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Compaction lock unavailable, proceeding unlocked: %s", e)
+        yield True
+        return
+
+    # Nothing but the caller's body runs under this try, so an exception from
+    # the body propagates untouched instead of being caught and re-yielded.
+    try:
+        yield True
     finally:
-        if handle is not None:
-            handle.close()  # releases the flock
+        lock.release()
 
 
-def _version_count(table: Any) -> int:
-    """Number of retained versions of ``table`` (0 when unavailable).
+def _stale_version_count(table: Any, cutoff: datetime) -> int:
+    """How many of ``table``'s versions predate ``cutoff`` (0 when unavailable).
 
     Update-heavy tables never accumulate fragments -- ``merge_insert`` rewrites
     rows rather than appending -- so version history is the only signal that
     they need compacting.
 
-    ponytail: O(retained versions); measured 3.9 ms at 100, 87 ms at 2000. That
-    is affordable because the count only gets large on tables we are about to
-    spend far longer optimizing. If it ever dominates, the manifest file count
-    under ``<table>.lance/_versions`` is the same number for ~0.7 ms, at the
-    cost of depending on on-disk layout.
+    Counts only versions old enough for the next ``optimize()`` to delete, never
+    the total. Totals ratchet: once past a threshold they stay past it, because
+    compaction cannot remove versions still inside the retention window and each
+    run commits one more. This measures exactly what a compaction would reclaim,
+    so a successful run drives it back to zero.
+
+    ponytail: O(retained versions); measured 3.9 ms at 100, 87 ms at 2000, and
+    bounded in practice because pruning keeps history near one retention window.
+    If it ever dominates, the manifest file count under ``<table>.lance/
+    _versions`` is the same total for ~0.7 ms, at the cost of depending on
+    on-disk layout -- but it cannot tell stale from fresh, so it would only work
+    as a pre-filter.
     """
     try:
-        return len(table.list_versions())
+        stale = 0
+        for entry in table.list_versions():
+            ts = entry["timestamp"] if isinstance(entry, dict) else entry.timestamp
+            # LanceDB reports naive timestamps in *local* time, not UTC, so the
+            # cutoff must be local too; mixing in utcnow() skews the window by
+            # the whole UTC offset.
+            if ts.tzinfo is not None:
+                ts = ts.astimezone().replace(tzinfo=None)
+            if ts < cutoff:
+                stale += 1
+        return stale
     except Exception as e:  # noqa: BLE001
-        logger.debug("Could not count versions: %s", e)
+        logger.debug("Could not count stale versions: %s", e)
         return 0
 
 
@@ -1593,10 +1613,13 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         * fragments -- append-heavy tables (documents, chunks, embeddings) gain
           a data file per write and reads slow down with the file count;
-        * versions -- update-heavy tables (collection_metadata) upsert via
+        * stale versions -- update-heavy tables (collection_metadata) upsert via
           ``merge_insert``, which rewrites rows instead of appending, so
           fragments plateau near the row count and never reach the threshold
           while version history grows without bound and holds the disk.
+
+        Both measure something a compaction removes, so both fall back to zero
+        after a successful run and cannot latch the trigger on permanently.
 
         Deliberately independent of :meth:`should_reindex`: index staleness is a
         third, unrelated problem, and ``optimize()`` bundles compaction with
@@ -1606,14 +1629,18 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         from ..LanceDB.schema_manager import _safe_close_table
 
         policy = policy or DEFAULT_INDEX_POLICY
+        cutoff = datetime.now() - timedelta(days=policy.version_retention_days)
         table = None
         try:
             table = self._get_connection().open_table(table_name)
-            # Fragments first: it is a flat ~0.2 ms, while counting versions
-            # costs more the worse the table is.
+            # Fragments are a flat ~0.2 ms, so they go first, but note this only
+            # short-circuits when the answer is already True. A healthy table
+            # always pays for the version scan; that cost stays bounded because
+            # pruning keeps history near one retention window.
             return (
                 _fragment_count(table) >= policy.compact_fragment_threshold
-                or _version_count(table) >= policy.compact_version_threshold
+                or _stale_version_count(table, cutoff)
+                >= policy.compact_stale_version_threshold
             )
         except Exception as e:  # noqa: BLE001
             logger.debug("Could not check fragmentation for %s: %s", table_name, e)
@@ -1631,10 +1658,11 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         skipped without opening anything -- callers probe more than one spelling
         of the embeddings table, so a miss is routine, not exceptional.
 
-        Holds a database-wide advisory lock: concurrent ``optimize()`` calls all
+        Takes a per-table advisory lock: concurrent ``optimize()`` calls all
         rewrite the table and then all but one lose the commit, so the losers
-        burn a full rewrite for nothing. Whoever cannot take the lock skips,
-        which is free -- the next ingestion will compact instead.
+        burn a full rewrite for nothing. Whoever cannot take a table's lock
+        skips that table -- free, the next ingestion compacts instead -- and
+        moves on to the rest, so one busy table cannot starve the others.
 
         Best-effort maintenance: individual failures are logged, never raised.
         """
@@ -1643,26 +1671,36 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         policy = policy or DEFAULT_INDEX_POLICY
         cleanup_older_than = timedelta(days=policy.version_retention_days)
+        conn = self._get_connection()
         try:
-            existing = set(list_table_names(self._get_connection()))
+            existing = set(list_table_names(conn))
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not list tables, skipping compaction: %s", e)
             return []
 
         candidates = [name for name in table_names if name in existing]
         if not candidates:
+            # list_table_names() returns [] rather than raising when it cannot
+            # read the listing, so without this compaction would switch itself
+            # off permanently and silently.
+            logger.warning(
+                "None of the tables to compact were found in the database "
+                "listing (asked for %s); skipping compaction",
+                ", ".join(table_names),
+            )
             return []
 
-        with _compaction_lock(self._get_connection()) as acquired:
-            if not acquired:
-                logger.info("Another process is compacting; skipping this round")
-                return []
-            return [
-                name
-                for name in candidates
-                if self.should_compact(name, policy)
-                and self.trigger_reindex(name, cleanup_older_than=cleanup_older_than)
-            ]
+        compacted: List[str] = []
+        for name in candidates:
+            with _compaction_lock(conn, name) as acquired:
+                if not acquired:
+                    logger.debug("%s is being compacted elsewhere; skipping", name)
+                    continue
+                if self.should_compact(name, policy) and self.trigger_reindex(
+                    name, cleanup_older_than=cleanup_older_than
+                ):
+                    compacted.append(name)
+        return compacted
 
     async def should_reindex_async(
         self, table_name: str, total_upserted: int, policy: IndexPolicy
