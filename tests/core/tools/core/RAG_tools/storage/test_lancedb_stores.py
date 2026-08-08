@@ -3247,6 +3247,7 @@ def test_ingestion_compaction_hook_scopes_to_written_tables() -> None:
         "parses",
         "chunks",
         "collection_metadata",
+        "ingestion_runs",
         "embeddings_text_embedding_v4",
     }
 
@@ -3313,6 +3314,45 @@ def test_compaction_prunes_versions_outside_the_retention_window(
     handle = db.open_table("documents")
     assert len(handle.list_versions()) < before
     assert len(handle.search().to_arrow()) == 12  # data survives the pruning
+
+
+def test_compaction_preserves_live_rows_of_a_delete_add_table(
+    tmp_path: Any,
+) -> None:
+    """``ingestion_runs`` upserts by delete+add; compaction must keep the winners.
+
+    That pattern is the fastest source of fragmentation (two versions per run)
+    and the one where a wrong compaction would be most visible: superseded rows
+    must stay gone and the surviving status must be the last one written.
+    """
+    import lancedb
+    import pyarrow as pa
+
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    db = lancedb.connect(str(tmp_path))
+    schema = pa.schema(
+        [pa.field("doc_id", pa.string()), pa.field("status", pa.string())]
+    )
+    table = db.create_table("ingestion_runs", schema=schema)
+    for i in range(10):
+        table.delete(f"doc_id = 'd{i}'")
+        table.add([{"doc_id": f"d{i}", "status": "running"}])
+    # Re-run every doc: each is deleted then re-added with a terminal status.
+    for i in range(10):
+        table.delete(f"doc_id = 'd{i}'")
+        table.add([{"doc_id": f"d{i}", "status": "success"}])
+
+    store = LanceDBVectorIndexStore()
+    policy = IndexPolicy(compact_fragment_threshold=10)
+    with patch.object(store, "_get_connection", return_value=db):
+        assert store.should_compact("ingestion_runs", policy) is True
+        assert store.compact_tables(["ingestion_runs"], policy) == ["ingestion_runs"]
+
+    rows = db.open_table("ingestion_runs").search().to_arrow().to_pylist()
+    assert {r["doc_id"] for r in rows} == {f"d{i}" for i in range(10)}
+    assert all(r["status"] == "success" for r in rows)  # no tombstone resurrection
+    assert len(rows) == 10  # no duplicates from the superseded versions
 
 
 @patch(

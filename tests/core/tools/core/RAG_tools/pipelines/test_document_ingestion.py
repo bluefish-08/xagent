@@ -1385,6 +1385,8 @@ def test_process_document_compacts_storage_after_success(
     store.compact_tables.assert_called_once()
     tables = store.compact_tables.call_args.args[0]
     assert "collection_metadata" in tables
+    # Fastest-growing table of all: delete+add per run, on failures too.
+    assert "ingestion_runs" in tables
     assert any(name.startswith("embeddings_") for name in tables)
 
 

@@ -325,8 +325,16 @@ def _record_ingestion_status(
         )
 
 
-#: Tables every successful ingestion appends to, besides the embeddings table.
-_INGEST_TABLES = ("documents", "parses", "chunks", "collection_metadata")
+#: Tables every ingestion writes, besides the embeddings table. ``ingestion_runs``
+#: grows fastest of all: :func:`_record_ingestion_status` does a delete plus an
+#: add, so it gains two versions per run, on the failure path as well.
+_INGEST_TABLES = (
+    "documents",
+    "parses",
+    "chunks",
+    "collection_metadata",
+    "ingestion_runs",
+)
 
 
 def _compact_storage_if_needed(embedding_model_id: Optional[str]) -> None:
