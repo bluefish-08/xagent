@@ -10,7 +10,6 @@ import { Textarea } from "@/components/ui/textarea"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select } from "@/components/ui/select"
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { getApiUrl } from "@/lib/utils"
 import {
   getBackgroundJobFailureMessage,
@@ -48,6 +47,8 @@ import {
   ChevronUp,
   ArrowRight,
   ArrowLeft,
+  User,
+  Users,
 } from "lucide-react"
 import { toast } from "@/components/ui/sonner"
 import { CloudConnectDialog, CloudFile } from "./cloud-connect-dialog"
@@ -843,7 +844,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
           <div className="flex-1 overflow-y-auto px-6 pb-6">
             {currentStep === 1 && (
-              <div className="space-y-6 mt-4">
+              <div className="space-y-6">
                 <div>
                   <Label htmlFor="collection_name" className="text-sm font-medium">{t("kb.dialog.basicInfo.nameLabel")} <span className="text-destructive">*</span></Label>
                   <Input
@@ -878,27 +879,33 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                 {inTeam && (
                   <div className="space-y-1.5">
                     <Label>{t("kb.ownership.label")}</Label>
-                    <RadioGroup value={ownership} onValueChange={(v) => setOwnership(v as "personal" | "team")}>
-                      <div className="flex items-center space-x-2">
-                        <RadioGroupItem value="personal" id="kb-ownership-personal" />
-                        <Label htmlFor="kb-ownership-personal" className="font-normal cursor-pointer">
-                          {t("kb.ownership.personal")}
-                        </Label>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <RadioGroupItem value="team" id="kb-ownership-team" />
-                        <Label htmlFor="kb-ownership-team" className="font-normal cursor-pointer">
-                          {t("kb.ownership.team")}
-                        </Label>
-                      </div>
-                    </RadioGroup>
+                    <div className="grid grid-cols-2 gap-4">
+                      <Card
+                        id="kb-ownership-personal"
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 transition-all text-center ${ownership === 'personal' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                        onClick={() => setOwnership("personal")}
+                      >
+                        <User className="w-5 h-5 text-primary mb-1" />
+                        <span className="font-bold text-sm">{t("kb.ownership.personal")}</span>
+                        <span className="text-xs text-muted-foreground">{t("kb.ownership.personalDesc")}</span>
+                      </Card>
+                      <Card
+                        id="kb-ownership-team"
+                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 transition-all text-center ${ownership === 'team' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
+                        onClick={() => setOwnership("team")}
+                      >
+                        <Users className="w-5 h-5 text-primary mb-1" />
+                        <span className="font-bold text-sm">{t("kb.ownership.team")}</span>
+                        <span className="text-xs text-muted-foreground">{t("kb.ownership.teamDesc")}</span>
+                      </Card>
+                    </div>
                   </div>
                 )}
               </div>
             )}
 
             {currentStep === 2 && (
-              <div className="space-y-6 mt-4">
+              <div className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                   <Card
                     className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 transition-all text-center ${activeImportTab === 'file' ? 'border-primary bg-primary/5 border-2' : 'hover:bg-muted'}`}
@@ -1109,7 +1116,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
             )}
 
             {currentStep === 3 && (
-              <div className="space-y-6 mt-4">
+              <div className="space-y-6">
                 <div className="bg-primary/5 rounded-lg p-4 flex flex-col gap-2 border border-primary/20">
                   <div className="flex items-center gap-2 font-bold text-sm">
                     <Database className="w-4 h-4 text-primary" />

@@ -1886,6 +1886,8 @@ const zh = {
       personalSuccess: "知识库已转回个人。",
       failed: "更新知识库归属失败",
       releaseFailed: "该名称的团队登记未能释放；再次创建同名知识库会沿用这条登记。",
+      personalDesc: "仅你自己可见",
+      teamDesc: "团队成员都可见",
     },
     errors: {
       loadFailed: "知识库加载失败",

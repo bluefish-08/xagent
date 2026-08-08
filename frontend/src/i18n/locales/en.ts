@@ -1886,6 +1886,8 @@ Build when you need.`,
       personalSuccess: "Knowledge base is personal again.",
       failed: "Failed to update knowledge base ownership",
       releaseFailed: "The team reservation for this name was not released; creating it again will reuse the reservation.",
+      personalDesc: "Only you can see it",
+      teamDesc: "Everyone on your team can see it",
     },
     errors: {
       loadFailed: "Failed to load knowledge base",

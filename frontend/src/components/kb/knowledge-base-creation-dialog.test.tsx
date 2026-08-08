@@ -12,31 +12,6 @@ vi.mock("@/contexts/auth-context", () => ({
   useAuth: () => ({ inTeam: inTeamMock.value }),
 }))
 
-// Radios as plain inputs: the change bubbles to the group, which is all the
-// component's `onValueChange` contract needs.
-vi.mock("@/components/ui/radio-group", () => ({
-  RadioGroup: ({
-    value,
-    onValueChange,
-    children,
-  }: {
-    value: string
-    onValueChange: (next: string) => void
-    children: React.ReactNode
-  }) => (
-    <div
-      data-testid="ownership-radio"
-      data-value={value}
-      onChange={(event) => onValueChange((event.target as HTMLInputElement).value)}
-    >
-      {children}
-    </div>
-  ),
-  RadioGroupItem: ({ value, id }: { value: string; id: string }) => (
-    <input type="radio" id={id} value={value} />
-  ),
-}))
-
 vi.mock("@/lib/api-wrapper", () => ({
   apiRequest: apiRequestMock,
   parseApiResponse: async (response: { json: () => Promise<unknown> }) => ({
@@ -90,6 +65,8 @@ vi.mock("lucide-react", () => {
     FileText: Icon,
     Cloud: Icon,
     Database: Icon,
+    User: Icon,
+    Users: Icon,
     ChevronDown: Icon,
     ChevronUp: Icon,
     ArrowRight: Icon,
@@ -693,7 +670,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       target: { value: "team-docs" },
     })
     expect(container.querySelector("#kb-ownership-team")).toBeNull()
-    expect(screen.queryByTestId("ownership-radio")).toBeNull()
+    expect(container.querySelector("#kb-ownership-personal")).toBeNull()
 
     await goToStep3(container, "file")
     fireEvent.click(screen.getByText("kb.dialog.createButton"))
@@ -711,7 +688,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
     )
 
-    expect(screen.getByTestId("ownership-radio").getAttribute("data-value")).toBe("personal")
+    expect(container.querySelector("#kb-ownership-personal")?.className).toContain("border-primary")
 
     fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
       target: { value: "team-docs" },
