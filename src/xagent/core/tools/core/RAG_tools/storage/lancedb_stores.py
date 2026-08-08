@@ -1554,18 +1554,6 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             and self.trigger_reindex(name, cleanup_older_than=cleanup_older_than)
         ]
 
-    async def should_compact_async(
-        self, table_name: str, policy: Optional[IndexPolicy] = None
-    ) -> bool:
-        """Async version of should_compact; the check opens a table on disk."""
-        return await asyncio.to_thread(self.should_compact, table_name, policy)
-
-    async def compact_tables_async(
-        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
-    ) -> List[str]:
-        """Async version of compact_tables; ``optimize()`` blocks for seconds."""
-        return await asyncio.to_thread(self.compact_tables, table_names, policy)
-
     async def should_reindex_async(
         self, table_name: str, total_upserted: int, policy: IndexPolicy
     ) -> bool:

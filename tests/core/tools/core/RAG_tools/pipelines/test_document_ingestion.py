@@ -1384,10 +1384,16 @@ def test_process_document_compacts_storage_after_success(
     assert result.status == "success"
     store.compact_tables.assert_called_once()
     tables = store.compact_tables.call_args.args[0]
-    assert "collection_metadata" in tables
-    # Fastest-growing table of all: delete+add per run, on failures too.
-    assert "ingestion_runs" in tables
-    assert any(name.startswith("embeddings_") for name in tables)
+    # Exact names, not a prefix match: a wrongly-derived embeddings table name
+    # silently resolves to nothing and skips the table this fix exists for.
+    assert set(tables) == {
+        "documents",
+        "parses",
+        "chunks",
+        "collection_metadata",
+        "ingestion_runs",
+        "embeddings_embedding_default",
+    }
 
 
 def test_process_document_succeeds_when_compaction_fails(
@@ -1413,3 +1419,39 @@ def test_process_document_succeeds_when_compaction_fails(
 
     assert result.status == "success"
     store.compact_tables.assert_called_once()
+
+
+def test_process_document_compacts_storage_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed ingestion must still compact: it fragmented the tables too.
+
+    Failed runs write ingestion_runs (delete+add) and whatever steps completed,
+    so a deployment with a high failure rate is exactly the one that must not
+    stop compacting (xorbitsai/xagent#1140 lists failed uploads as a symptom).
+    """
+    from unittest.mock import Mock, patch
+
+    _patch_pipeline_dependencies(monkeypatch)
+
+    def _boom(**_: object) -> dict:
+        raise RuntimeError("chunking exploded")
+
+    monkeypatch.setattr(document_ingestion, "chunk_document", _boom)
+
+    store = Mock()
+    store.compact_tables.return_value = []
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+        return_value=store,
+    ):
+        result = document_ingestion.process_document(
+            collection="demo",
+            source_path="/tmp/doc.pdf",
+            config=IngestionConfig(),
+        )
+
+    assert result.status != "success"
+    store.compact_tables.assert_called_once()
+    assert "ingestion_runs" in store.compact_tables.call_args.args[0]

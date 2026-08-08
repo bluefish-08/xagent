@@ -1404,18 +1404,6 @@ class VectorIndexStore(ABC):
         True async I/O will be added in Phase 1B with RDB backend.
         """
 
-    async def should_compact_async(
-        self, table_name: str, policy: Optional[IndexPolicy] = None
-    ) -> bool:
-        """Async version of should_compact."""
-        return self.should_compact(table_name, policy)
-
-    async def compact_tables_async(
-        self, table_names: Sequence[str], policy: Optional[IndexPolicy] = None
-    ) -> List[str]:
-        """Async version of compact_tables."""
-        return self.compact_tables(table_names, policy)
-
     @abstractmethod
     def migrate_embeddings_table(
         self,
