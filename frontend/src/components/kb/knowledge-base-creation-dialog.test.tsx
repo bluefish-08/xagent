@@ -647,6 +647,21 @@ function callsTo(url: string) {
   return apiRequestMock.mock.calls.filter(([called]) => called === url)
 }
 
+/** Override one route, leaving every other route on the installed mock.
+
+    Replacing the whole implementation means restating the embedding-model,
+    user-default and jobs-capability routes in each test, which buries the one
+    line that actually differs. */
+function mockRoute(
+  match: (url: string) => boolean,
+  respond: (url: string, options?: RequestInit) => unknown
+) {
+  const base = apiRequestMock.getMockImplementation()!
+  apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
+    match(url) ? respond(url, options) : base(url, options)
+  )
+}
+
 function firstCallIndex(predicate: (url: string) => boolean) {
   const index = apiRequestMock.mock.calls.findIndex(([url]) => predicate(String(url)))
   // Reject the miss here: a bare -1 makes `toBeLessThan` pass for a call that
@@ -977,11 +992,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     // deployment is mid-upgrade rather than a build without teams. The two
     // existing callers of promote-team surface that; a silent downgrade would
     // hand the user the ownership they did not pick and say nothing.
-    const base = apiRequestMock.getMockImplementation()!
-    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
-      url.endsWith("/reserve-team")
-        ? Promise.resolve(createJsonResponse({ detail: "Not Found" }, 404))
-        : base(url, options)
+    mockRoute(
+      (url) => url.endsWith("/reserve-team"),
+      () => Promise.resolve(createJsonResponse({ detail: "Not Found" }, 404))
     )
 
     const onSuccess = vi.fn()
@@ -1005,11 +1018,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
   it("does not fall back to personal when the server refuses the reservation", async () => {
     // 403 is a real answer ("you are in no team"), not a missing endpoint:
     // creating a personal knowledge base here would ignore what was asked for.
-    const base = apiRequestMock.getMockImplementation()!
-    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
-      url.endsWith("/reserve-team")
-        ? Promise.resolve(createJsonResponse({ detail: "You are not in a team" }, 403))
-        : base(url, options)
+    mockRoute(
+      (url) => url.endsWith("/reserve-team"),
+      () => Promise.resolve(createJsonResponse({ detail: "You are not in a team" }, 403))
     )
 
     const onSuccess = vi.fn()
@@ -1250,11 +1261,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     // fetchWithRetry retries POST with no idempotent-method allowlist, so a
     // network fault can leave a committed reservation behind a thrown request.
     // A claim nobody knows about has no TTL and no UI to find it.
-    const base = apiRequestMock.getMockImplementation()!
-    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
-      url.endsWith("/reserve-team")
-        ? Promise.reject(new Error("network down"))
-        : base(url, options)
+    mockRoute(
+      (url) => url.endsWith("/reserve-team"),
+      () => Promise.reject(new Error("network down"))
     )
 
     const { container } = render(
