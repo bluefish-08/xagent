@@ -28,6 +28,7 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
 )
 from xagent.core.tools.core.RAG_tools.pipelines import document_ingestion
 from xagent.core.tools.core.RAG_tools.progress.manager import ProgressManager
+from xagent.core.tools.core.RAG_tools.storage.factory import StorageFactory
 
 
 class _StubEmbeddingAdapter(BaseEmbedding):
@@ -1371,10 +1372,7 @@ def test_process_document_compacts_storage_after_success(
     store = Mock()
     store.compact_tables.return_value = ["documents"]
 
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         result = document_ingestion.process_document(
             collection="demo",
             source_path="/tmp/doc.pdf",
@@ -1390,6 +1388,7 @@ def test_process_document_compacts_storage_after_success(
         "documents",
         "parses",
         "chunks",
+        "collection_config",
         "collection_metadata",
         "ingestion_runs",
         "embeddings_embedding_default",
@@ -1407,10 +1406,7 @@ def test_process_document_succeeds_when_compaction_fails(
     store = Mock()
     store.compact_tables.side_effect = RuntimeError("optimize exploded")
 
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         result = document_ingestion.process_document(
             collection="demo",
             source_path="/tmp/doc.pdf",
@@ -1442,10 +1438,7 @@ def test_process_document_compacts_storage_after_failure(
     store = Mock()
     store.compact_tables.return_value = []
 
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         result = document_ingestion.process_document(
             collection="demo",
             source_path="/tmp/doc.pdf",
@@ -1488,10 +1481,7 @@ def test_process_document_compaction_covers_vendor_prefixed_model_ids(
     store = Mock()
     store.compact_tables.return_value = []
 
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         result = document_ingestion.process_document(
             collection="demo",
             source_path="/tmp/doc.pdf",
@@ -1503,6 +1493,7 @@ def test_process_document_compaction_covers_vendor_prefixed_model_ids(
         "documents",
         "parses",
         "chunks",
+        "collection_config",
         "collection_metadata",
         "ingestion_runs",
         "embeddings_BAAI_bge_large_zh_v1_5",  # single-applied (legacy spelling)
@@ -1511,13 +1502,13 @@ def test_process_document_compaction_covers_vendor_prefixed_model_ids(
 
 
 def test_ingest_tables_are_real_schema_manager_tables() -> None:
-    """Every name in _INGEST_TABLES must correspond to a real ensure_*_table.
+    """_INGEST_TABLES is pinned exactly, and so is everything left out of it.
 
-    Binds the hardcoded list to the schema layer so a rename or typo cannot
-    leave it silently pointing at a table that does not exist.
-
-    Gap this does NOT close: a *new* table added to the ingest path is still
-    missed, because nothing enumerates which ensure_* calls ingestion makes.
+    Equality rather than a subset check: a subset assertion catches a typo'd
+    name but is structurally blind to an *omitted* one, which is how
+    ``collection_config`` stayed uncovered. Pinning the leftovers means a new
+    ``ensure_*_table`` forces a deliberate in-or-out decision here rather than
+    silently defaulting to never compacted.
     """
     from xagent.core.tools.core.RAG_tools.LanceDB import schema_manager
 
@@ -1526,4 +1517,16 @@ def test_ingest_tables_are_real_schema_manager_tables() -> None:
         for name in dir(schema_manager)
         if name.startswith("ensure_") and name.endswith("_table")
     }
-    assert set(document_ingestion._INGEST_TABLES) <= ensured
+    assert set(document_ingestion._INGEST_TABLES) == {
+        "documents",
+        "parses",
+        "chunks",
+        "collection_config",
+        "collection_metadata",
+        "ingestion_runs",
+    }
+    assert ensured - set(document_ingestion._INGEST_TABLES) == {
+        "embeddings",  # named per model tag; the caller appends it
+        "main_pointers",  # grows with collection count, not ingest count
+        "prompt_templates",  # same
+    }

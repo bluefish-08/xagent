@@ -328,10 +328,14 @@ def _record_ingestion_status(
 #: Tables every ingestion writes, besides the embeddings table. ``ingestion_runs``
 #: grows fastest of all: :func:`_record_ingestion_status` does a delete plus an
 #: add, so it gains two versions per run, on the failure path as well.
+#: ``collection_config`` is written by the same upload, just before and outside
+#: this pipeline (``_save_collection_config_with_snapshot``), with the same
+#: unconditional delete+add; nothing else would ever compact it.
 _INGEST_TABLES = (
     "documents",
     "parses",
     "chunks",
+    "collection_config",
     "collection_metadata",
     "ingestion_runs",
 )
@@ -350,7 +354,7 @@ def _compact_storage_if_needed(embedding_model_id: Optional[str]) -> None:
     """
     try:
         from ..LanceDB.model_tag_utils import embeddings_table_name, to_model_tag
-        from ..storage.factory import get_vector_index_store
+        from ..storage.factory import StorageFactory
 
         tables = list(_INGEST_TABLES)
         if embedding_model_id:
@@ -363,7 +367,7 @@ def _compact_storage_if_needed(embedding_model_id: Optional[str]) -> None:
                 embeddings_table_name(embedding_model_id),
                 embeddings_table_name(to_model_tag(embedding_model_id)),
             ]
-        store = get_vector_index_store()
+        store = StorageFactory.get_factory().get_vector_index_store()
         compacted = store.compact_tables(list(dict.fromkeys(tables)))
         if compacted:
             logger.info("Compacted LanceDB tables: %s", ", ".join(compacted))

@@ -92,12 +92,6 @@ def _compaction_lock(conn: Any, table_name: str) -> Iterator[bool]:
 
     try:
         lock = FileLock(os.path.join(uri, f".{table_name}.compaction.lock"), timeout=0)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("Compaction lock unavailable, proceeding unlocked: %s", e)
-        yield True
-        return
-
-    try:
         lock.acquire()
     except Timeout:
         yield False
@@ -112,7 +106,12 @@ def _compaction_lock(conn: Any, table_name: str) -> Iterator[bool]:
     try:
         yield True
     finally:
-        lock.release()
+        # release() can raise, and this is maintenance: never let it become the
+        # caller's exception, or mask one already propagating from the body.
+        try:
+            lock.release()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not release compaction lock for %s: %s", table_name, e)
 
 
 def _stale_version_count(table: Any, cutoff: datetime) -> int:
@@ -128,7 +127,7 @@ def _stale_version_count(table: Any, cutoff: datetime) -> int:
     run commits one more. This measures exactly what a compaction would reclaim,
     so a successful run drives it back to zero.
 
-    ponytail: O(retained versions), ~43 us each; measured 3.9 ms at 100 and
+    Cost: O(retained versions), ~43 us each; measured 3.9 ms at 100 and
     87 ms at 2000. Pruning bounds the *age* of history, not its size: versions
     inside the retention window are write-rate x retention-days, so this grows
     linearly with throughput. At 10k ingestions/day the ingestion_runs table
@@ -1636,10 +1635,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         table = None
         try:
             table = self._get_connection().open_table(table_name)
-            # Fragments are a flat ~0.2 ms, so they go first, but note this only
-            # short-circuits when the answer is already True. A healthy table
-            # always pays for the version scan; that cost stays bounded because
-            # pruning keeps history near one retention window.
+            # Fragment stats are the cheaper probe -- ~0.2 ms at 50 fragments,
+            # ~2.2 ms at 1000, so it grows too, just far slower -- hence first.
+            # ``or`` short-circuits only on True, so a healthy table always pays
+            # the version scan: ~4 ms at 100 retained versions, ~124 ms at 1000.
             return (
                 _fragment_count(table) >= policy.compact_fragment_threshold
                 or _stale_version_count(table, cutoff)
@@ -1674,11 +1673,11 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         policy = policy or DEFAULT_INDEX_POLICY
         cleanup_older_than = timedelta(days=policy.version_retention_days)
-        conn = self._get_connection()
         try:
+            conn = self._get_connection()
             existing = set(list_table_names(conn))
         except Exception as e:  # noqa: BLE001
-            logger.warning("Could not list tables, skipping compaction: %s", e)
+            logger.warning("Could not reach the database, skipping compaction: %s", e)
             return []
 
         candidates = [name for name in table_names if name in existing]
@@ -1718,6 +1717,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
     async def trigger_reindex_async(self, table_name: str) -> bool:
         """Async version of trigger_reindex.
+
+        Delegates to the sync path, so it also compacts data files and prunes
+        versions past the retention window -- not just an index rebuild. Uses
+        the backend default window, having no ``cleanup_older_than`` parameter.
 
         Note: Current implementation uses sync operations under the hood.
         True async I/O will be added in Phase 1B with RDB backend.

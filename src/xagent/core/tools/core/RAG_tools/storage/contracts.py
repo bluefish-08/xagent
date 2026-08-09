@@ -1398,11 +1398,15 @@ class VectorIndexStore(ABC):
     async def trigger_reindex_async(self, table_name: str) -> bool:
         """Async version of trigger_reindex.
 
+        Same optimization as the sync form -- compaction, version pruning, index
+        refresh -- but always with the backend's default retention window, since
+        there is no ``cleanup_older_than`` parameter here.
+
         Args:
-            table_name: Embeddings table name.
+            table_name: Table to optimize; need not be an embeddings table.
 
         Returns:
-            True if reindex was triggered successfully.
+            True if the table was optimized successfully.
 
         Note: Current implementation uses sync operations under the hood.
         True async I/O will be added in Phase 1B with RDB backend.

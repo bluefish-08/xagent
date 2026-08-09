@@ -9,6 +9,7 @@ import pytest
 
 from xagent.core.tools.core.RAG_tools.core.config import DEFAULT_INDEX_POLICY
 from xagent.core.tools.core.RAG_tools.core.exceptions import DatabaseOperationError
+from xagent.core.tools.core.RAG_tools.storage.factory import StorageFactory
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
     LanceDBIngestionStatusStore,
     LanceDBMainPointerStore,
@@ -3278,8 +3279,9 @@ def test_ingestion_compaction_hook_never_raises() -> None:
         _compact_storage_if_needed,
     )
 
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
+    with patch.object(
+        StorageFactory,
+        "get_vector_index_store",
         side_effect=RuntimeError("store unavailable"),
     ):
         _compact_storage_if_needed("embedding-default")
@@ -3293,10 +3295,7 @@ def test_ingestion_compaction_hook_scopes_to_written_tables() -> None:
 
     store = Mock()
     store.compact_tables.return_value = []
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         _compact_storage_if_needed("text-embedding-v4")
 
     names = store.compact_tables.call_args.args[0]
@@ -3304,6 +3303,7 @@ def test_ingestion_compaction_hook_scopes_to_written_tables() -> None:
         "documents",
         "parses",
         "chunks",
+        "collection_config",
         "collection_metadata",
         "ingestion_runs",
         "embeddings_text_embedding_v4",
@@ -3329,10 +3329,7 @@ def test_ingestion_compaction_hook_covers_vendor_prefixed_model_ids() -> None:
 
     store = Mock()
     store.compact_tables.return_value = []
-    with patch(
-        "xagent.core.tools.core.RAG_tools.storage.factory.get_vector_index_store",
-        return_value=store,
-    ):
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         _compact_storage_if_needed(model_id)
 
     names = store.compact_tables.call_args.args[0]
@@ -3340,6 +3337,7 @@ def test_ingestion_compaction_hook_covers_vendor_prefixed_model_ids() -> None:
         "documents",
         "parses",
         "chunks",
+        "collection_config",
         "collection_metadata",
         "ingestion_runs",
         "embeddings_BAAI_bge_large_zh_v1_5",  # single-applied (legacy spelling)
@@ -3524,10 +3522,8 @@ def test_compaction_finds_the_embeddings_table_the_write_path_creates(
             return real_compact_tables(names, policy)
 
         with patch.object(store, "compact_tables", _record):
-            with patch(
-                "xagent.core.tools.core.RAG_tools.storage.factory."
-                "get_vector_index_store",
-                return_value=store,
+            with patch.object(
+                StorageFactory, "get_vector_index_store", return_value=store
             ):
                 with patch(
                     "xagent.core.tools.core.RAG_tools.storage.lancedb_stores."
@@ -3946,6 +3942,81 @@ def test_should_compact_counts_only_reclaimable_versions() -> None:
             store.should_compact("t", IndexPolicy(compact_stale_version_threshold=200))
             is False
         )
+
+
+def test_should_compact_probes_fragments_first_and_only_once() -> None:
+    """Pins the operand order of the ``or`` and bounds the probes per call.
+
+    ``or`` short-circuits only when the left side is already True, so which
+    operand comes first *is* the cost model: swap them and every ingestion pays
+    the version scan even when fragments alone settle the answer -- ~2.2 ms
+    against ~124 ms at 1000 retained versions. A doubled probe is the same bill
+    twice. Neither shows up as a failure anywhere else in the suite.
+    """
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    policy = IndexPolicy(compact_fragment_threshold=10)
+    calls: List[str] = []
+
+    def _recording_table(fragments: int) -> Mock:
+        table = Mock()
+
+        def stats() -> Dict[str, Any]:
+            calls.append("stats")
+            return {"fragment_stats": {"num_fragments": fragments}}
+
+        def list_versions() -> List[Dict[str, Any]]:
+            calls.append("list_versions")
+            return _versions(stale=0, fresh=3)
+
+        table.stats.side_effect = stats
+        table.list_versions.side_effect = list_versions
+        return table
+
+    store = LanceDBVectorIndexStore()
+
+    # Fragmented: settled by the cheap probe, so the scan is never reached.
+    with patch.object(
+        store,
+        "_get_connection",
+        return_value=_mock_conn_with_tables(t=_recording_table(50)),
+    ):
+        assert store.should_compact("t", policy) is True
+    assert calls == ["stats"]
+
+    # Healthy: both run, each exactly once, and fragments still go first.
+    calls.clear()
+    with patch.object(
+        store,
+        "_get_connection",
+        return_value=_mock_conn_with_tables(t=_recording_table(2)),
+    ):
+        assert store.should_compact("t", policy) is False
+    assert calls == ["stats", "list_versions"]
+
+
+def test_compact_tables_never_raises_from_the_connection() -> None:
+    """The "logged, never raised" promise has to cover opening the database.
+
+    ``_get_connection()`` used to sit outside every try in ``compact_tables``,
+    so an unreachable database raised straight out of a method documented as
+    best-effort; only the caller's own blanket except hid it.
+    """
+    store = LanceDBVectorIndexStore()
+    with patch.object(store, "_get_connection", side_effect=RuntimeError("no db")):
+        assert store.compact_tables(["documents"]) == []
+
+
+def test_compaction_lock_never_raises_from_release(tmp_path: Any) -> None:
+    """A failing unlock is maintenance noise, not the caller's exception."""
+    from filelock import FileLock
+
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import _compaction_lock
+
+    conn = _mock_conn_with_tables(tmp_path)
+    with patch.object(FileLock, "release", side_effect=RuntimeError("lock gone")):
+        with _compaction_lock(conn, "documents") as acquired:
+            assert acquired is True  # really locked, so release really runs
 
 
 def test_stale_version_count_returns_zero_when_unsupported() -> None:
