@@ -750,6 +750,24 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(team.getAttribute("aria-checked")).toBe("true")
   })
 
+  it("jumps to the first and last option with Home and End", () => {
+    // APG lists both alongside the arrow keys for a radiogroup.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    const personal = container.querySelector("#kb-ownership-personal") as HTMLElement
+    const team = container.querySelector("#kb-ownership-team") as HTMLElement
+
+    fireEvent.keyDown(personal, { key: "End" })
+    expect(team.getAttribute("aria-checked")).toBe("true")
+    expect(document.activeElement).toBe(team)
+
+    fireEvent.keyDown(team, { key: "Home" })
+    expect(personal.getAttribute("aria-checked")).toBe("true")
+    expect(document.activeElement).toBe(personal)
+  })
+
   it("associates the group with its visible label instead of repeating it", () => {
     // A second copy of the text as `aria-label` would be read out twice and
     // still leave the label unassociated with the group.

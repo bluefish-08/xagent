@@ -163,9 +163,10 @@ function SelectableCardGroup<T extends string>({
       : event.key === "ArrowLeft" || event.key === "ArrowUp"
         ? -1
         : 0
-    if (step === 0) return
+    const jump = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : -1
+    if (step === 0 && jump < 0) return
     event.preventDefault()
-    const next = (index + step + options.length) % options.length
+    const next = step === 0 ? jump : (index + step + options.length) % options.length
     onSelect(options[next].value)
     cards[next].focus()
   }
