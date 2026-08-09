@@ -993,7 +993,12 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
     })
-    expect(toastWarningMock).toHaveBeenCalledWith("kb.ownership.reserveUnavailable")
+    // Warned only once the result is on screen, and long enough to outlive the
+    // success toast — an ingest runs far longer than a default toast.
+    expect(toastWarningMock).toHaveBeenCalledWith(
+      "kb.ownership.reserveUnavailable",
+      expect.objectContaining({ duration: 12000 }),
+    )
     expect(toastErrorMock).not.toHaveBeenCalled()
     // Nothing was claimed, so nothing may be released.
     expect(callsTo(RELEASE_URL)).toHaveLength(0)

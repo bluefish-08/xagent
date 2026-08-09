@@ -215,6 +215,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   const [newCollectionName, setNewCollectionName] = useState("")
   const [newCollectionDescription, setNewCollectionDescription] = useState("")
   const [ownership, setOwnership] = useState<"personal" | "team">("personal")
+  const downgradedToPersonal = useRef(false)
+
+  /** The team endpoint was missing, so this became a personal knowledge base. */
+  const warnIfDowngraded = () => {
+    if (!downgradedToPersonal.current) return
+    downgradedToPersonal.current = false
+    toast.warning(t("kb.ownership.reserveUnavailable"), { duration: 12000 })
+  }
   const [activeImportTab, setActiveImportTab] = useState<"file" | "web" | "cloud">("file")
   const [currentStep, setCurrentStep] = useState(1)
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
@@ -456,7 +464,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // refusal: fall back to personal rather than creating nothing at all. A 403
     // is a real "you are in no team" and still fails.
     if (response.status === 404) {
-      toast.warning(t("kb.ownership.reserveUnavailable"))
+      // Warn once the outcome is known: an ingest runs for tens of seconds, so a
+      // toast fired here would expire long before the user sees what was created.
+      downgradedToPersonal.current = true
       return false
     }
     if (!response.ok) {
@@ -536,6 +546,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     try {
       const apiUrl = getApiUrl()
       // Once, before the loop: every file shares one collection.
+      downgradedToPersonal.current = false
       teamReserved = await reserveTeamName(trimmedCollectionName)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       for (let i = 0; i < selectedFiles.length; i++) {
@@ -646,6 +657,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       resetState()
       onOpenChange(false)
+      warnIfDowngraded()
       onSuccess?.(successfulCollections)
 
     } catch (err) {
@@ -664,6 +676,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       // on a slow network to be told why the ingest failed.
       if (teamReserved) await releaseTeamName(trimmedCollectionName)
       if (successfulCollections.length > 0) {
+        warnIfDowngraded()
         onSuccess?.(successfulCollections)
       }
     } finally {
@@ -690,6 +703,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     try {
       const apiUrl = getApiUrl()
+      downgradedToPersonal.current = false
       teamReserved = await reserveTeamName(collectionName)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       const formData = new FormData()
@@ -786,6 +800,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       resetState()
       onOpenChange(false)
+      warnIfDowngraded()
       onSuccess?.([collectionName])
 
     } catch (err) {
@@ -821,6 +836,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         files.map(file => ({ provider, fileId: file.id, fileName: file.name }))
       )
 
+      downgradedToPersonal.current = false
       teamReserved = await reserveTeamName(collectionName)
 
       // Prepare separators
@@ -903,6 +919,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       // Reset and close
       resetState()
       onOpenChange(false)
+      warnIfDowngraded()
       onSuccess?.()
     } catch (error) {
       console.error("Cloud ingest error:", error)
