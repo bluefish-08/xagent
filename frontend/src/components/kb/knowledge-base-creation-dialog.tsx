@@ -107,6 +107,96 @@ function buildWebIngestionErrorResult(
   }
 }
 
+const SELECTABLE_CARD_SIZES = {
+  sm: { card: "p-4 gap-1", icon: "w-5 h-5 mb-1", label: "text-sm" },
+  md: { card: "p-6 gap-2", icon: "w-6 h-6 mb-2", label: "text-base" },
+}
+
+interface SelectableCardOption<T extends string> {
+  value: T
+  id?: string
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  description: string
+}
+
+/** Cards standing in for radios: a Card gives none of the keyboard behaviour a
+ *  radio group gets for free, so the tab stop follows the selection and the
+ *  arrow keys move it. */
+function SelectableCardGroup<T extends string>({
+  options,
+  selected,
+  onSelect,
+  size = "sm",
+  className,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
+}: {
+  options: ReadonlyArray<SelectableCardOption<T>>
+  selected: T
+  onSelect: (value: T) => void
+  size?: keyof typeof SELECTABLE_CARD_SIZES
+  className?: string
+  "aria-label"?: string
+  "aria-labelledby"?: string
+}) {
+  const styles = SELECTABLE_CARD_SIZES[size]
+
+  // One handler on the group: keydown bubbles, and the card's position among its
+  // siblings is the index into `options`.
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const cards = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]'))
+    const index = cards.indexOf(event.target as HTMLElement)
+    if (index < 0) return
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      onSelect(options[index].value)
+      return
+    }
+
+    const step = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -1
+        : 0
+    if (step === 0) return
+    event.preventDefault()
+    const next = (index + step + options.length) % options.length
+    onSelect(options[next].value)
+    cards[next].focus()
+  }
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      className={className}
+      onKeyDown={handleKeyDown}
+    >
+      {options.map((option) => {
+        const isSelected = option.value === selected
+        return (
+          <Card
+            key={option.value}
+            id={option.id}
+            role="radio"
+            tabIndex={isSelected ? 0 : -1}
+            aria-checked={isSelected}
+            className={`${styles.card} cursor-pointer flex flex-col items-center justify-center border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-muted"}`}
+            onClick={() => onSelect(option.value)}
+          >
+            <option.icon className={`${styles.icon} text-primary`} />
+            <span className={`font-bold ${styles.label}`}>{option.label}</span>
+            <span className="text-xs text-muted-foreground">{option.description}</span>
+          </Card>
+        )
+      })}
+    </div>
+  )
+}
+
 interface KnowledgeBaseCreationDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -878,45 +968,29 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                 </div>
                 {inTeam && (
                   <div className="space-y-1.5">
-                    <Label>{t("kb.ownership.label")}</Label>
-                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
-                      <Card
-                        id="kb-ownership-personal"
-                        role="radio"
-                        tabIndex={0}
-                        aria-checked={ownership === 'personal'}
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${ownership === 'personal' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
-                        onClick={() => setOwnership("personal")}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault()
-                            setOwnership("personal")
-                          }
-                        }}
-                      >
-                        <User className="w-5 h-5 text-primary mb-1" />
-                        <span className="font-bold text-sm">{t("kb.ownership.personal")}</span>
-                        <span className="text-xs text-muted-foreground">{t("kb.ownership.personalDesc")}</span>
-                      </Card>
-                      <Card
-                        id="kb-ownership-team"
-                        role="radio"
-                        tabIndex={0}
-                        aria-checked={ownership === 'team'}
-                        className={`p-4 cursor-pointer flex flex-col items-center justify-center gap-1 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${ownership === 'team' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
-                        onClick={() => setOwnership("team")}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault()
-                            setOwnership("team")
-                          }
-                        }}
-                      >
-                        <Users className="w-5 h-5 text-primary mb-1" />
-                        <span className="font-bold text-sm">{t("kb.ownership.team")}</span>
-                        <span className="text-xs text-muted-foreground">{t("kb.ownership.teamDesc")}</span>
-                      </Card>
-                    </div>
+                    <Label id="kb-ownership-label">{t("kb.ownership.label")}</Label>
+                    <SelectableCardGroup
+                      aria-labelledby="kb-ownership-label"
+                      className="grid grid-cols-2 gap-4"
+                      selected={ownership}
+                      onSelect={setOwnership}
+                      options={[
+                        {
+                          value: "personal",
+                          id: "kb-ownership-personal",
+                          icon: User,
+                          label: t("kb.ownership.personal"),
+                          description: t("kb.ownership.personalDesc"),
+                        },
+                        {
+                          value: "team",
+                          id: "kb-ownership-team",
+                          icon: Users,
+                          label: t("kb.ownership.team"),
+                          description: t("kb.ownership.teamDesc"),
+                        },
+                      ]}
+                    />
                   </div>
                 )}
               </div>
@@ -924,60 +998,33 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
             {currentStep === 2 && (
               <div className="space-y-6">
-                <div role="radiogroup" aria-label={t("kb.dialog.steps.addContentTitle")} className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                  <Card
-                    role="radio"
-                    tabIndex={0}
-                    aria-checked={activeImportTab === 'file'}
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'file' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
-                    onClick={() => setActiveImportTab('file')}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault()
-                        setActiveImportTab('file')
-                      }
-                    }}
-                  >
-                    <Upload className="w-6 h-6 text-primary mb-2" />
-                    <span className="font-bold text-base">{t("kb.dialog.tabs.file")}</span>
-                    <span className="text-xs text-muted-foreground">{t("kb.dialog.fileUpload.supportedFormats")}</span>
-                  </Card>
-                  <Card
-                    role="radio"
-                    tabIndex={0}
-                    aria-checked={activeImportTab === 'web'}
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'web' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
-                    onClick={() => setActiveImportTab('web')}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault()
-                        setActiveImportTab('web')
-                      }
-                    }}
-                  >
-                    <Globe className="w-6 h-6 text-primary mb-2" />
-                    <span className="font-bold text-base">{t("kb.dialog.tabs.web")}</span>
-                    <span className="text-xs text-muted-foreground">{t("kb.dialog.tabs.webDesc")}</span>
-                  </Card>
-                  <Card
-                    role="radio"
-                    tabIndex={0}
-                    aria-checked={activeImportTab === 'cloud'}
-                    className={`p-6 cursor-pointer flex flex-col items-center justify-center gap-2 border-2 transition-colors text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${activeImportTab === 'cloud' ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}
-                    onClick={() => setActiveImportTab('cloud')}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault()
-                        setActiveImportTab('cloud')
-                      }
-                    }}
-                  >
-                    <Cloud className="w-6 h-6 text-primary mb-2" />
-                    <span className="font-bold text-base">{t("kb.dialog.tabs.cloud")}</span>
-                    <span className="text-xs text-muted-foreground">{t("kb.dialog.tabs.cloudDesc")}</span>
-                  </Card>
-
-                </div>
+                <SelectableCardGroup
+                  aria-label={t("kb.dialog.steps.addContentTitle")}
+                  className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"
+                  size="md"
+                  selected={activeImportTab}
+                  onSelect={setActiveImportTab}
+                  options={[
+                    {
+                      value: "file",
+                      icon: Upload,
+                      label: t("kb.dialog.tabs.file"),
+                      description: t("kb.dialog.fileUpload.supportedFormats"),
+                    },
+                    {
+                      value: "web",
+                      icon: Globe,
+                      label: t("kb.dialog.tabs.web"),
+                      description: t("kb.dialog.tabs.webDesc"),
+                    },
+                    {
+                      value: "cloud",
+                      icon: Cloud,
+                      label: t("kb.dialog.tabs.cloud"),
+                      description: t("kb.dialog.tabs.cloudDesc"),
+                    },
+                  ]}
+                />
 
                 {activeImportTab === 'file' && (
                   <div className="space-y-4 w-full bg-white rounded-lg p-4 border border-dashed">

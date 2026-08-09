@@ -697,7 +697,6 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     const team = container.querySelector("#kb-ownership-team") as HTMLElement
     const personal = container.querySelector("#kb-ownership-personal") as HTMLElement
     expect(team.getAttribute("role")).toBe("radio")
-    expect(team.getAttribute("tabindex")).toBe("0")
     expect(team.getAttribute("aria-checked")).toBe("false")
 
     fireEvent.keyDown(team, { key: "Enter" })
@@ -707,6 +706,46 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     fireEvent.keyDown(personal, { key: " " })
     expect(personal.getAttribute("aria-checked")).toBe("true")
     expect(team.getAttribute("aria-checked")).toBe("false")
+  })
+
+  it("keeps one tab stop and moves the choice with the arrow keys", () => {
+    // The APG radiogroup pattern: tab reaches the group once, arrows choose
+    // inside it. Two tab stops would make the group a keyboard trap to walk.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    const personal = container.querySelector("#kb-ownership-personal") as HTMLElement
+    const team = container.querySelector("#kb-ownership-team") as HTMLElement
+    expect(personal.getAttribute("tabindex")).toBe("0")
+    expect(team.getAttribute("tabindex")).toBe("-1")
+
+    fireEvent.keyDown(personal, { key: "ArrowRight" })
+    expect(team.getAttribute("aria-checked")).toBe("true")
+    // The tab stop follows the selection, and so does the focus, or the arrow
+    // key would strand the user on a card that is no longer tabbable.
+    expect(team.getAttribute("tabindex")).toBe("0")
+    expect(personal.getAttribute("tabindex")).toBe("-1")
+    expect(document.activeElement).toBe(team)
+
+    // Wrapping keeps every option reachable from either end of the group.
+    fireEvent.keyDown(team, { key: "ArrowRight" })
+    expect(personal.getAttribute("aria-checked")).toBe("true")
+    fireEvent.keyDown(personal, { key: "ArrowUp" })
+    expect(team.getAttribute("aria-checked")).toBe("true")
+  })
+
+  it("associates the group with its visible label instead of repeating it", () => {
+    // A second copy of the text as `aria-label` would be read out twice and
+    // still leave the label unassociated with the group.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    const group = container.querySelector('[role="radiogroup"]') as HTMLElement
+    expect(group.getAttribute("aria-labelledby")).toBe("kb-ownership-label")
+    expect(group.getAttribute("aria-label")).toBeNull()
+    expect(container.querySelector("#kb-ownership-label")?.textContent).toBe("kb.ownership.label")
   })
 
   it("defaults to personal inside a team and reserves nothing", async () => {
