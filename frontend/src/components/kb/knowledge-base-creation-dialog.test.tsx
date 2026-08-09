@@ -133,8 +133,12 @@ vi.mock("@/components/ui/select", () => ({
   Select: () => <div />,
 }))
 
+// Keeps the padding prop visible: the step bodies are empty divs, so nothing
+// else here would notice the stepper losing the gap above the step body.
 vi.mock("@/components/ui/stepper", () => ({
-  Stepper: () => <div />,
+  Stepper: ({ contentClassName }: { contentClassName?: string }) => (
+    <div data-testid="stepper" data-content-class={contentClassName} />
+  ),
 }))
 
 vi.mock("./cloud-connect-dialog", () => ({
@@ -340,6 +344,13 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
       expect(container.querySelector("#collection_name")?.getAttribute("aria-invalid")).toBe("false")
     })
     expect(screen.queryByText("kb.errors.nameRequired")).toBeNull()
+  })
+
+  it("keeps the step body clear of the step indicator", async () => {
+    // The stepper carries no bottom margin any more and every step body passed
+    // to it is empty, so this padding is the whole gap.
+    render(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
+    expect(screen.getByTestId("stepper").getAttribute("data-content-class")).toBe("pt-6")
   })
 
   it("previews the name the user typed", async () => {

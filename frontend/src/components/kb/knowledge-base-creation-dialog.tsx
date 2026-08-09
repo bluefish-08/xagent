@@ -953,6 +953,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
             <div className="mt-6">
               <Stepper
                 currentStep={currentStep}
+                contentClassName="pt-6"
                 steps={[
                   { label: t("kb.dialog.steps.nameIt"), content: <div /> },
                   { label: t("kb.dialog.steps.addContent"), content: <div /> },
