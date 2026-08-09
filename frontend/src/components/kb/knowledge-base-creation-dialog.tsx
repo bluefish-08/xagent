@@ -31,7 +31,7 @@ import {
 import { useI18n } from "@/contexts/i18n-context"
 import type { TranslationKey } from "@/i18n/translations"
 import { useAuth } from "@/contexts/auth-context"
-import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
+import { apiRequest, getApiErrorMessage, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { Model } from "@/lib/models"
 import {
   Upload,
@@ -449,7 +449,17 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       rejectName("kb.errors.nameTaken")
       throw new Error(t("kb.errors.nameTaken"))
     }
-    if (!response.ok) throw new Error(t("kb.ownership.reserveFailed"))
+    // 404 is a deployment gap (endpoint missing, or no team record), not a
+    // refusal: fall back to personal rather than creating nothing at all. A 403
+    // is a real "you are in no team" and still fails.
+    if (response.status === 404) {
+      toast.warning(t("kb.ownership.reserveUnavailable"))
+      return false
+    }
+    if (!response.ok) {
+      const parsed = await parseApiResponse(response)
+      throw new Error(getApiErrorMessage(response, parsed, t("kb.ownership.reserveFailed")))
+    }
     return true
   }
 

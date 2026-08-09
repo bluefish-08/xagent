@@ -26,6 +26,11 @@ vi.mock("@/lib/api-wrapper", () => ({
     parsed: { data?: { detail?: string; message?: string } | null },
     messages: { generic: string }
   ) => parsed?.data?.detail || parsed?.data?.message || messages.generic,
+  getApiErrorMessage: (
+    _response: unknown,
+    parsed: { data?: { detail?: string; message?: string } | null },
+    generic: string
+  ) => parsed?.data?.detail || parsed?.data?.message || generic,
   isJsonRecord: (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
   UPLOAD_ERROR_MESSAGES: {},
 }))
@@ -903,7 +908,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({}))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve(createJsonResponse({ detail: "taken" }, 500))
+        return Promise.resolve(createJsonResponse({ detail: "team storage is offline" }, 500))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -919,9 +924,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     fireEvent.click(screen.getByText("kb.dialog.createButton"))
 
     await waitFor(() => {
+      // The server's sentence, not the generic fallback: it is the only thing
+      // that says what to do about it.
       expect(toastErrorMock).toHaveBeenCalledWith(
         "kb.errors.uploadFailed",
-        expect.objectContaining({ description: "kb.ownership.reserveFailed" })
+        expect.objectContaining({ description: "team storage is offline" })
       )
     })
     // Ingesting anyway would write the files into personal storage under a name
@@ -931,6 +938,66 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     ).toHaveLength(0)
     // Nothing was reserved, so nothing may be rolled back.
     expect(callsTo(RELEASE_URL)).toHaveLength(0)
+    expect(onSuccess).not.toHaveBeenCalled()
+  })
+
+  it("creates a personal knowledge base when the backend has no reserve endpoint", async () => {
+    // Deployment ordering: an overlay with the promote endpoints but not these
+    // answers 404. Failing here would leave the user with no knowledge base at
+    // all — worse than the personal one they used to get.
+    const base = apiRequestMock.getMockImplementation()!
+    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
+      url.endsWith("/reserve-team")
+        ? Promise.resolve(createJsonResponse({ detail: "Not Found" }, 404))
+        : base(url, options)
+    )
+
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
+    })
+    expect(toastWarningMock).toHaveBeenCalledWith("kb.ownership.reserveUnavailable")
+    expect(toastErrorMock).not.toHaveBeenCalled()
+    // Nothing was claimed, so nothing may be released.
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
+  })
+
+  it("does not fall back to personal when the server refuses the reservation", async () => {
+    // 403 is a real answer ("you are in no team"), not a missing endpoint:
+    // creating a personal knowledge base here would ignore what was asked for.
+    const base = apiRequestMock.getMockImplementation()!
+    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
+      url.endsWith("/reserve-team")
+        ? Promise.resolve(createJsonResponse({ detail: "You are not in a team" }, 403))
+        : base(url, options)
+    )
+
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "kb.errors.uploadFailed",
+        expect.objectContaining({ description: "You are not in a team" })
+      )
+    })
+    expect(
+      apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/kb/ingest"))
+    ).toHaveLength(0)
     expect(onSuccess).not.toHaveBeenCalled()
   })
 
