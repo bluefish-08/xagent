@@ -400,7 +400,6 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
               detail:
                 "Knowledge base name unavailable: test.",
             },
-            false,
             409
           )
         )
@@ -767,9 +766,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(callsTo(RESERVE_URL)).toHaveLength(0)
   })
 
-  it("stops reserving when the team context disappears while the dialog is open", async () => {
-    // A token refresh re-runs the team lookup, which drops `inTeam` until the
-    // request comes back — the ownership cards disappear with it.
+  it("still reserves when a token refresh transiently drops the team context", async () => {
+    // A token refresh re-runs the team lookup, dropping `inTeam` for the length
+    // of one request and taking the cards with it. Skipping the claim there
+    // would hand the user a personal KB after they asked for a team one — the
+    // exact complaint in #1140. The server holds the authoritative answer.
     const { container, rerender } = render(
       <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
     )
@@ -787,8 +788,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
     })
-    // A choice the user can no longer make or see must not be acted on.
-    expect(callsTo(RESERVE_URL)).toHaveLength(0)
+    // The choice the user actually made still reaches the server, which is the
+    // only party that can say whether they are still in a team.
+    expect(callsTo(RESERVE_URL)).toHaveLength(1)
   })
 
   it("forgets the ownership choice when the dialog is closed and reopened", async () => {

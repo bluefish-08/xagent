@@ -435,10 +435,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
   /** Ownership is resolved before the first byte is written, so a team knowledge
    *  base has to claim its name up front or the files land in personal storage.
-   *  `inTeam` is re-read here because a token refresh can drop the team context
-   *  while the dialog is open, taking the ownership cards with it. */
+   *  Deliberately not gated on `inTeam`: a token refresh drops it for the length
+   *  of one request, and skipping the claim there would silently create a
+   *  personal KB after the user asked for a team one. The server decides. */
   const reserveTeamName = async (collection: string) => {
-    if (!inTeam || ownership !== "team") return false
+    if (ownership !== "team") return false
     const response = await apiRequest(
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
       { method: "POST" },
