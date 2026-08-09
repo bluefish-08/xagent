@@ -314,9 +314,10 @@ def test_kb_document_job_reads_staged_file_and_publishes_canonical(
 
     from xagent.web.jobs.kb_tasks import handle_kb_ingest_document
 
+    published_config: list[dict] = []
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
-        lambda *args, **kwargs: None,
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
+        lambda *args, **kwargs: published_config.append(kwargs),
     )
 
     SessionLocal = _init_test_db(tmp_path / "kb-staged-ingest.db")
@@ -380,6 +381,7 @@ def test_kb_document_job_reads_staged_file_and_publishes_canonical(
         )
         assert file_record is not None
         assert str(file_record.file_id) == file_id
+        assert [call["documents_created"] for call in published_config] == [1]
     finally:
         db.close()
 
@@ -426,7 +428,7 @@ def test_kb_document_job_full_worker_path_new_target_end_to_end(tmp_path, monkey
     initialize_storage_manager(str(storage_root), str(uploads_dir))
 
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
         lambda *args, **kwargs: None,
     )
     stub_config = EmbeddingModelConfig(
@@ -513,7 +515,7 @@ def test_kb_document_job_supersedes_older_generation_for_same_target(
     from xagent.web.services.kb_ingest_targets import admit_kb_ingest_target
 
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
         lambda *args, **kwargs: None,
     )
 
@@ -733,13 +735,13 @@ def test_kb_document_job_skips_canonical_rollback_when_generation_turns_stale(
         assert result["status"] == "superseded"
         assert result["published"] is False
         assert not staged_file.exists()
-        assert metadata_store.save_collection_config.await_count == 1
+        metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
     finally:
         db.close()
 
 
-def test_kb_document_job_existing_collection_failure_restores_previous_config(
+def test_kb_document_job_existing_collection_failure_keeps_previous_config(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv(CELERY_ENABLED, "false")
@@ -806,19 +808,13 @@ def test_kb_document_job_existing_collection_failure_restores_previous_config(
         with pytest.raises(BackgroundJobHandlerError):
             handle_kb_ingest_document(db, job)
 
-        assert metadata_store.save_collection_config.await_count == 2
-        restore_call = metadata_store.save_collection_config.await_args_list[-1]
-        assert restore_call.kwargs == {
-            "collection": "existing-kb",
-            "config_json": '{"chunk_size":111}',
-            "user_id": int(user.id),
-        }
+        metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
     finally:
         db.close()
 
 
-def test_kb_document_job_exception_restores_previous_config_before_retry(
+def test_kb_document_job_exception_keeps_previous_config_before_retry(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv(CELERY_ENABLED, "false")
@@ -879,13 +875,7 @@ def test_kb_document_job_exception_restores_previous_config_before_retry(
             handle_kb_ingest_document(db, job)
 
         assert staged_file.exists()
-        assert metadata_store.save_collection_config.await_count == 2
-        restore_call = metadata_store.save_collection_config.await_args_list[-1]
-        assert restore_call.kwargs == {
-            "collection": "existing-kb",
-            "config_json": '{"chunk_size":111}',
-            "user_id": int(user.id),
-        }
+        metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
     finally:
         db.close()
@@ -967,7 +957,7 @@ def test_kb_web_job_cleans_new_collection_metadata_on_ingest_error(
     from xagent.web.jobs.kb_tasks import handle_kb_ingest_web
 
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
         lambda *args, **kwargs: None,
     )
 
@@ -1040,7 +1030,7 @@ def test_kb_web_job_keeps_new_collection_metadata_when_error_has_successful_docs
     from xagent.web.jobs.kb_tasks import handle_kb_ingest_web
 
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
         lambda *args, **kwargs: None,
     )
 
@@ -1113,7 +1103,7 @@ def test_kb_web_job_keeps_new_collection_metadata_when_side_effects_may_remain(
     from xagent.web.jobs.kb_tasks import handle_kb_ingest_web
 
     monkeypatch.setattr(
-        "xagent.web.jobs.kb_tasks._save_job_collection_config_with_snapshot",
+        "xagent.web.jobs.kb_tasks._save_job_collection_config_after_ingest",
         lambda *args, **kwargs: None,
     )
 
@@ -1177,7 +1167,7 @@ def test_kb_web_job_keeps_new_collection_metadata_when_side_effects_may_remain(
         db.close()
 
 
-def test_kb_web_job_existing_collection_failure_restores_previous_config(
+def test_kb_web_job_existing_collection_failure_keeps_previous_config(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv(CELERY_ENABLED, "false")
@@ -1243,21 +1233,13 @@ def test_kb_web_job_existing_collection_failure_restores_previous_config(
         with pytest.raises(BackgroundJobHandlerError):
             handle_kb_ingest_web(db, job)
 
-        assert metadata_store.save_collection_config.await_count == 2
-        restore_call = metadata_store.save_collection_config.await_args_list[-1]
-        assert restore_call.kwargs == {
-            "collection": "existing-web-kb",
-            "config_json": '{"chunk_size":111}',
-            "user_id": int(user.id),
-        }
+        metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
     finally:
         db.close()
 
 
-def test_kb_web_job_existing_collection_partial_restores_previous_config(
-    tmp_path, monkeypatch
-):
+def test_kb_web_job_partial_publishes_new_config(tmp_path, monkeypatch):
     monkeypatch.setenv(CELERY_ENABLED, "false")
     monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
 
@@ -1320,13 +1302,10 @@ def test_kb_web_job_existing_collection_partial_restores_previous_config(
         result = handle_kb_ingest_web(db, job)
 
         assert result["status"] == "partial"
-        assert metadata_store.save_collection_config.await_count == 2
-        restore_call = metadata_store.save_collection_config.await_args_list[-1]
-        assert restore_call.kwargs == {
-            "collection": "existing-web-kb",
-            "config_json": '{"chunk_size":111}',
-            "user_id": int(user.id),
-        }
+        saved = metadata_store.save_collection_config.await_args_list
+        assert len(saved) == 1
+        assert saved[0].kwargs["collection"] == "existing-web-kb"
+        assert '"chunk_size":2048' in saved[0].kwargs["config_json"]
         metadata_store.delete_collection_metadata.assert_not_awaited()
     finally:
         db.close()

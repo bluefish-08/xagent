@@ -79,7 +79,7 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
 
     monkeypatch.setattr(
         kb_module,
-        "_restore_or_cleanup_collection_config_after_failed_ingest",
+        "_cleanup_collection_metadata_after_failed_ingest",
         fake_restore,
     )
     api_result = KBApiOperationResult(
@@ -88,17 +88,14 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
     user = User()
     user.id = 7
 
-    updated = (
-        await kb_module._restore_or_cleanup_collection_config_after_failed_api_ingest(
-            api_result=api_result,
-            snapshot="snapshot",
-            collection_existed_before=True,
-            collection_name="demo",
-            user=user,
-            context="ingest",
-            successful_documents=1,
-            rollback_complete=False,
-        )
+    updated = await kb_module._cleanup_collection_metadata_after_failed_api_ingest(
+        api_result=api_result,
+        collection_existed_before=True,
+        collection_name="demo",
+        user=user,
+        context="ingest",
+        successful_documents=1,
+        rollback_complete=False,
     )
 
     assert updated.rollback_complete is False
@@ -106,7 +103,6 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
     assert facade.single_cleanup_inputs == [(updated, 1)]
     assert restore_calls == [
         {
-            "snapshot": "snapshot",
             "collection_existed_before": True,
             "collection_name": "demo",
             "user": user,
@@ -130,7 +126,7 @@ async def test_api_failed_batch_ingest_config_cleanup_uses_api_outcome_decision(
 
     monkeypatch.setattr(
         kb_module,
-        "_restore_or_cleanup_collection_config_after_failed_ingest",
+        "_cleanup_collection_metadata_after_failed_ingest",
         fake_restore,
     )
     api_results = [
@@ -140,9 +136,8 @@ async def test_api_failed_batch_ingest_config_cleanup_uses_api_outcome_decision(
     user = User()
     user.id = 9
 
-    await kb_module._restore_or_cleanup_collection_config_after_failed_batch_api_ingest(
+    await kb_module._cleanup_collection_metadata_after_failed_batch_api_ingest(
         api_results=api_results,
-        snapshot="snapshot",
         collection_existed_before=False,
         collection_name="demo",
         user=user,
@@ -153,7 +148,6 @@ async def test_api_failed_batch_ingest_config_cleanup_uses_api_outcome_decision(
     assert facade.batch_cleanup_inputs == [(api_results, 1)]
     assert restore_calls == [
         {
-            "snapshot": "snapshot",
             "collection_existed_before": False,
             "collection_name": "demo",
             "user": user,
@@ -183,18 +177,17 @@ def test_background_failed_ingest_config_cleanup_reuses_api_helper(
 
     monkeypatch.setattr(
         kb_module,
-        "_restore_or_cleanup_collection_config_after_failed_api_ingest",
+        "_cleanup_collection_metadata_after_failed_api_ingest",
         fake_api_helper,
     )
 
-    kb_tasks._restore_or_cleanup_failed_job_collection_config_after_api_ingest(
+    kb_tasks._cleanup_failed_job_collection_metadata_after_api_ingest(
         db,  # type: ignore[arg-type]
         {
             "collection": "job-kb",
             "collection_existed_before": False,
         },
         api_result=api_result,
-        snapshot="snapshot",
         context="background document ingest",
         successful_documents=2,
         rollback_complete=True,
@@ -203,7 +196,6 @@ def test_background_failed_ingest_config_cleanup_reuses_api_helper(
     assert calls == [
         {
             "api_result": api_result,
-            "snapshot": "snapshot",
             "collection_existed_before": False,
             "collection_name": "job-kb",
             "user": user,
@@ -225,25 +217,23 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
     payload = {"collection": "job-kb"}
     monkeypatch.setattr(
         kb_tasks,
-        "_restore_or_cleanup_failed_job_collection_config",
+        "_cleanup_failed_job_collection_metadata",
         fallback,
     )
     monkeypatch.setattr(
         kb_tasks,
-        "_restore_or_cleanup_failed_job_collection_config_after_api_ingest",
+        "_cleanup_failed_job_collection_metadata_after_api_ingest",
         api_helper,
     )
 
     kb_tasks._cleanup_failed_web_collection_metadata_if_new(
         db,  # type: ignore[arg-type]
         payload,
-        snapshot="snapshot",
     )
 
     fallback.assert_called_once_with(
         db,
         payload,
-        snapshot="snapshot",
         context="background web ingest",
         successful_documents=0,
     )

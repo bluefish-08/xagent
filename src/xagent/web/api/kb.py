@@ -1043,19 +1043,8 @@ async def _cleanup_failed_new_collection_metadata(
     )
 
 
-def _collection_or_config_existed_before(
-    collection_existed_before: bool,
-    snapshot: Optional["_CollectionConfigSnapshot"],
-) -> bool:
-    """Treat config-only collections as pre-existing for rollback decisions."""
-    return collection_existed_before or (
-        snapshot is not None and snapshot.previous_config_json is not None
-    )
-
-
-async def _restore_or_cleanup_collection_config_after_failed_ingest(
+async def _cleanup_collection_metadata_after_failed_ingest(
     *,
-    snapshot: Optional["_CollectionConfigSnapshot"],
     collection_existed_before: bool,
     collection_name: str,
     user: User,
@@ -1063,60 +1052,18 @@ async def _restore_or_cleanup_collection_config_after_failed_ingest(
     successful_documents: int = 0,
     side_effects_may_remain: bool = False,
 ) -> None:
-    """Restore previous config or clean up only truly empty new collections."""
-    if (
-        snapshot is not None
-        and not snapshot.saved
-        and not snapshot.previous_config_known
-    ):
-        logger.warning(
-            "Skipping failed-ingest collection metadata cleanup because previous "
-            "config state is unknown: %s/user_%s",
-            collection_name,
-            int(user.id),
-        )
-        return
-
-    effective_collection_existed_before = _collection_or_config_existed_before(
-        collection_existed_before,
-        snapshot,
-    )
-    config_only_existed_before = (
-        not collection_existed_before
-        and snapshot is not None
-        and snapshot.previous_config_json is not None
-    )
-    if effective_collection_existed_before:
-        await _restore_collection_config_after_failed_ingest(
-            snapshot=snapshot,
-            collection_existed_before=effective_collection_existed_before,
-            context=context,
-        )
-        if (
-            config_only_existed_before
-            and successful_documents == 0
-            and not side_effects_may_remain
-            and snapshot is not None
-        ):
-            if await _get_api_compatibility_facade().delete_collection_metadata_entry(
-                collection_name
-            ):
-                logger.info(
-                    "Removed collection metadata created by failed %s while "
-                    "preserving previous config: %s/user_%s",
-                    context,
-                    collection_name,
-                    int(user.id),
-                )
+    """Clean up only truly empty new collections; config is saved after ingest."""
+    if collection_existed_before:
         return
 
     if successful_documents > 0 or side_effects_may_remain:
         if side_effects_may_remain:
             logger.warning(
                 "Skipping failed-ingest collection metadata cleanup for %s/user_%s "
-                "because rollback side effects may remain",
+                "during %s because rollback side effects may remain",
                 collection_name,
                 int(user.id),
+                context,
             )
         return
 
@@ -1126,10 +1073,9 @@ async def _restore_or_cleanup_collection_config_after_failed_ingest(
     )
 
 
-async def _restore_or_cleanup_collection_config_after_failed_api_ingest(
+async def _cleanup_collection_metadata_after_failed_api_ingest(
     *,
     api_result: KBApiOperationResult[Any],
-    snapshot: Optional["_CollectionConfigSnapshot"],
     collection_existed_before: bool,
     collection_name: str,
     user: User,
@@ -1147,8 +1093,7 @@ async def _restore_or_cleanup_collection_config_after_failed_api_ingest(
         api_result,
         successful_documents=successful_documents,
     )
-    await _restore_or_cleanup_collection_config_after_failed_ingest(
-        snapshot=snapshot,
+    await _cleanup_collection_metadata_after_failed_ingest(
         collection_existed_before=collection_existed_before,
         collection_name=collection_name,
         user=user,
@@ -1159,10 +1104,9 @@ async def _restore_or_cleanup_collection_config_after_failed_api_ingest(
     return api_result
 
 
-async def _restore_or_cleanup_collection_config_after_failed_batch_api_ingest(
+async def _cleanup_collection_metadata_after_failed_batch_api_ingest(
     *,
     api_results: list[KBApiOperationResult[Any]],
-    snapshot: Optional["_CollectionConfigSnapshot"],
     collection_existed_before: bool,
     collection_name: str,
     user: User,
@@ -1176,8 +1120,7 @@ async def _restore_or_cleanup_collection_config_after_failed_batch_api_ingest(
             successful_documents=successful_documents,
         )
     )
-    await _restore_or_cleanup_collection_config_after_failed_ingest(
-        snapshot=snapshot,
+    await _cleanup_collection_metadata_after_failed_ingest(
         collection_existed_before=collection_existed_before,
         collection_name=collection_name,
         user=user,
@@ -3265,13 +3208,8 @@ class RollbackFailureError(RuntimeError):
     """Raised when best-effort ingest rollback cannot complete cleanly."""
 
 
-@dataclass
-class _CollectionConfigSnapshot:
-    collection: str
-    user_id: int
-    previous_config_json: Optional[str]
-    previous_config_known: bool
-    saved: bool
+class CollectionConfigSaveError(RuntimeError):
+    """Raised when a successful ingest cannot be published as a visible collection."""
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -3280,56 +3218,20 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-async def _save_collection_config_with_snapshot(
+async def _save_collection_config_after_ingest(
     *,
     collection: str,
     config_json: str,
     user: User,
     context: str,
-) -> _CollectionConfigSnapshot:
-    """Save collection config while retaining the caller's previous config."""
-    previous_config_json: Optional[str] = None
-    previous_config_known = False
+    documents_created: int,
+) -> None:
+    """Publish the collection config only once ingest actually produced documents.
 
-    try:
-        loaded = await _get_api_compatibility_facade().get_collection_config(
-            collection=collection,
-            user_id=int(user.id),
-            is_admin=False,
-        )
-        if isinstance(loaded, str):
-            previous_config_json = loaded
-            previous_config_known = True
-        elif loaded is None:
-            previous_config_known = True
-        else:
-            logger.warning(
-                "Unexpected collection config snapshot type during %s: %s",
-                context,
-                type(loaded).__name__,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to snapshot collection config during %s: %s",
-            context,
-            exc,
-        )
-
-    if not previous_config_known:
-        logger.warning(
-            "Skipping collection config save during %s because previous config "
-            "state could not be read for %s/user_%s",
-            context,
-            collection,
-            int(user.id),
-        )
-        return _CollectionConfigSnapshot(
-            collection=collection,
-            user_id=int(user.id),
-            previous_config_json=previous_config_json,
-            previous_config_known=previous_config_known,
-            saved=False,
-        )
+    Saving it up front made a failed ingest leave a visible, empty collection.
+    """
+    if documents_created <= 0:
+        return
 
     try:
         await _get_api_compatibility_facade().save_collection_config(
@@ -3337,75 +3239,11 @@ async def _save_collection_config_with_snapshot(
             config_json=config_json,
             user_id=int(user.id),
         )
-        return _CollectionConfigSnapshot(
-            collection=collection,
-            user_id=int(user.id),
-            previous_config_json=previous_config_json,
-            previous_config_known=previous_config_known,
-            saved=True,
-        )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to save collection config during %s: %s", context, exc)
-        return _CollectionConfigSnapshot(
-            collection=collection,
-            user_id=int(user.id),
-            previous_config_json=previous_config_json,
-            previous_config_known=previous_config_known,
-            saved=False,
-        )
-
-
-async def _restore_collection_config_after_failed_ingest(
-    *,
-    snapshot: Optional[_CollectionConfigSnapshot],
-    collection_existed_before: bool,
-    context: str,
-) -> None:
-    """Undo the config save made before an ingest that ultimately failed."""
-    if snapshot is None or not snapshot.saved:
-        return
-
-    try:
-        if snapshot.previous_config_json is not None:
-            await _get_api_compatibility_facade().save_collection_config(
-                collection=snapshot.collection,
-                config_json=snapshot.previous_config_json,
-                user_id=snapshot.user_id,
-            )
-            logger.info(
-                "Restored previous collection config after failed %s: %s/user_%s",
-                context,
-                snapshot.collection,
-                snapshot.user_id,
-            )
-            return
-
-        if not snapshot.previous_config_known:
-            logger.warning(
-                "Skipping collection config deletion after failed %s because "
-                "previous config state is unknown: %s/user_%s",
-                context,
-                snapshot.collection,
-                snapshot.user_id,
-            )
-            return
-
-        await _get_api_compatibility_facade().delete_collection_metadata(
-            collection_name=snapshot.collection,
-            user_id=snapshot.user_id,
-            is_admin=False,
-            delete_orphaned_metadata=not collection_existed_before,
-        )
-        logger.info(
-            "Removed collection config created by failed %s: %s/user_%s",
-            context,
-            snapshot.collection,
-            snapshot.user_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise RollbackFailureError(
-            "Failed to restore collection config after failed "
-            f"{context} for {snapshot.collection}/user_{snapshot.user_id}: {exc}"
+        raise CollectionConfigSaveError(
+            f"Ingested {documents_created} document(s) into '{collection}' but "
+            f"saving the collection config during {context} failed, so the "
+            f"knowledge base stays hidden; please retry the import: {exc}"
         ) from exc
 
 
@@ -4026,17 +3864,6 @@ async def ingest(
 
     progress_manager = get_progress_manager()
 
-    config_snapshot = await _save_collection_config_with_snapshot(
-        collection=safe_collection,
-        config_json=config.model_dump_json(exclude_unset=True),
-        user=_user,
-        context="ingest",
-    )
-    effective_collection_existed_before = _collection_or_config_existed_before(
-        collection_existed_before,
-        config_snapshot,
-    )
-
     try:
         file_record = _upsert_uploaded_file_record(
             db,
@@ -4078,7 +3905,7 @@ async def ingest(
                         result=result,
                         file_path=file_path,
                         file_record=file_record,
-                        collection_existed_before=effective_collection_existed_before,
+                        collection_existed_before=collection_existed_before,
                         uploaded_file_existed_before=uploaded_file_existed_before,
                         file_backup_path=file_backup_path,
                         had_existing_file=had_existing_file,
@@ -4089,17 +3916,6 @@ async def ingest(
             api_result = rollback_execution.operation_result
             if rollback_execution.error is not None:
                 raise rollback_execution.error
-            if effective_collection_existed_before:
-                api_result = (
-                    await _restore_or_cleanup_collection_config_after_failed_api_ingest(
-                        api_result=api_result,
-                        snapshot=config_snapshot,
-                        collection_existed_before=collection_existed_before,
-                        collection_name=collection,
-                        user=_user,
-                        context="ingest",
-                    )
-                )
 
         if result.status == "error":
             return JSONResponse(
@@ -4119,6 +3935,15 @@ async def ingest(
                 content={**result.model_dump(), "status": "error"},
             )
 
+        # Success here means exactly one document landed, so publish the config.
+        await _save_collection_config_after_ingest(
+            collection=safe_collection,
+            config_json=config.model_dump_json(exclude_unset=True),
+            user=_user,
+            context="ingest",
+            documents_created=1,
+        )
+
         if file_backup_path is not None and file_backup_path.exists():
             try:
                 file_backup_path.unlink()
@@ -4129,7 +3954,7 @@ async def ingest(
             status_code=200,
             content={**result.model_dump(), "file_id": file_record.file_id},
         )
-    except RollbackFailureError:
+    except (RollbackFailureError, CollectionConfigSaveError):
         raise
     except Exception:
         if file_record is not None:
@@ -4149,7 +3974,7 @@ async def ingest(
                         result=rollback_result,
                         file_path=file_path,
                         file_record=file_record,
-                        collection_existed_before=effective_collection_existed_before,
+                        collection_existed_before=collection_existed_before,
                         uploaded_file_existed_before=uploaded_file_existed_before,
                         file_backup_path=file_backup_path,
                         had_existing_file=had_existing_file,
@@ -4160,17 +3985,6 @@ async def ingest(
             rollback_api_result = rollback_execution.operation_result
             if rollback_execution.error is not None:
                 raise rollback_execution.error
-            if effective_collection_existed_before:
-                rollback_api_result = (
-                    await _restore_or_cleanup_collection_config_after_failed_api_ingest(
-                        api_result=rollback_api_result,
-                        snapshot=config_snapshot,
-                        collection_existed_before=collection_existed_before,
-                        collection_name=collection,
-                        user=_user,
-                        context="ingest",
-                    )
-                )
         else:
             rollback_api_result = KBApiOperationResult(
                 result=IngestionResult(
@@ -4192,9 +4006,8 @@ async def ingest(
             rollback_api_result = rollback_execution.operation_result
             if rollback_execution.error is not None:
                 raise rollback_execution.error
-            await _restore_or_cleanup_collection_config_after_failed_api_ingest(
+            await _cleanup_collection_metadata_after_failed_api_ingest(
                 api_result=rollback_api_result,
-                snapshot=config_snapshot,
                 collection_existed_before=collection_existed_before,
                 collection_name=collection,
                 user=_user,
@@ -4471,17 +4284,6 @@ async def ingest_cloud(
 
     await _ensure_collection_access(safe_collection, _user, allow_create=True)
 
-    config_snapshot = await _save_collection_config_with_snapshot(
-        collection=safe_collection,
-        config_json=config.model_dump_json(exclude_unset=True),
-        user=_user,
-        context="ingest_cloud",
-    )
-    effective_collection_existed_before = _collection_or_config_existed_before(
-        collection_existed_before,
-        config_snapshot,
-    )
-
     # Concurrency limit for cloud ingestion to avoid overloading
     semaphore = asyncio.Semaphore(5)
 
@@ -4645,7 +4447,7 @@ async def ingest_cloud(
                                     result=result,
                                     file_path=file_path,
                                     file_record=file_record,
-                                    collection_existed_before=effective_collection_existed_before,
+                                    collection_existed_before=collection_existed_before,
                                     uploaded_file_existed_before=uploaded_file_existed_before,
                                     file_backup_path=file_backup_path,
                                     had_existing_file=had_existing_file,
@@ -4701,7 +4503,7 @@ async def ingest_cloud(
                                 result=rollback_result,
                                 file_path=file_path,
                                 file_record=file_record,
-                                collection_existed_before=effective_collection_existed_before,
+                                collection_existed_before=collection_existed_before,
                                 uploaded_file_existed_before=uploaded_file_existed_before,
                                 file_backup_path=file_backup_path,
                                 had_existing_file=had_existing_file,
@@ -4781,20 +4583,26 @@ async def ingest_cloud(
     api_results = await asyncio.gather(*[process_file(f) for f in request.files])
     results = [api_result.result for api_result in api_results]
 
+    successful_documents = sum(1 for result in results if result.status == "success")
     has_failure = any(result.status in {"error", "partial"} for result in results)
 
     if has_failure:
-        await _restore_or_cleanup_collection_config_after_failed_batch_api_ingest(
+        await _cleanup_collection_metadata_after_failed_batch_api_ingest(
             api_results=list(api_results),
-            snapshot=config_snapshot,
             collection_existed_before=collection_existed_before,
             collection_name=safe_collection,
             user=_user,
             context="ingest_cloud",
-            successful_documents=sum(
-                1 for result in results if result.status == "success"
-            ),
+            successful_documents=successful_documents,
         )
+
+    await _save_collection_config_after_ingest(
+        collection=safe_collection,
+        config_json=config.model_dump_json(exclude_unset=True),
+        user=_user,
+        context="ingest_cloud",
+        documents_created=successful_documents,
+    )
 
     return results
 
@@ -5506,12 +5314,6 @@ async def ingest_web(
         except ValueError:
             collection_existed_before = False
 
-        config_snapshot = await _save_collection_config_with_snapshot(
-            collection=safe_collection,
-            config_json=ingestion_config.model_dump_json(exclude_unset=True),
-            user=_user,
-            context="ingest_web",
-        )
         # Track processed URLs to prevent duplicate UploadedFile records
         # Key: URL hash, Value: file_id
         # Note: For large-scale web ingestion (>10000 pages), consider using
@@ -5707,10 +5509,18 @@ async def ingest_web(
                 result,
             )
 
+        # Partial crawls still leave real documents behind, so publish on any of them.
+        await _save_collection_config_after_ingest(
+            collection=safe_collection,
+            config_json=ingestion_config.model_dump_json(exclude_unset=True),
+            user=_user,
+            context="ingest_web",
+            documents_created=int(result.documents_created or 0),
+        )
+
         if result.status == "error":
-            await _restore_or_cleanup_collection_config_after_failed_api_ingest(
+            await _cleanup_collection_metadata_after_failed_api_ingest(
                 api_result=api_result,
-                snapshot=config_snapshot,
                 collection_existed_before=collection_existed_before,
                 collection_name=safe_collection,
                 user=_user,
@@ -5726,9 +5536,8 @@ async def ingest_web(
                 _user.id,
                 result.message,
             )
-            await _restore_or_cleanup_collection_config_after_failed_api_ingest(
+            await _cleanup_collection_metadata_after_failed_api_ingest(
                 api_result=api_result,
-                snapshot=config_snapshot,
                 collection_existed_before=collection_existed_before,
                 collection_name=safe_collection,
                 user=_user,
@@ -5740,16 +5549,11 @@ async def ingest_web(
 
     except HTTPException:
         raise
+    except CollectionConfigSaveError as e:
+        logger.error("Web ingestion could not publish collection config: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except (ValueError, KeyError, TypeError) as e:
-        if "config_snapshot" in locals():
-            await _restore_or_cleanup_collection_config_after_failed_ingest(
-                snapshot=config_snapshot,
-                collection_existed_before=collection_existed_before,
-                collection_name=safe_collection,
-                user=_user,
-                context="ingest_web",
-            )
-        elif "collection_existed_before" in locals() and not collection_existed_before:
+        if "collection_existed_before" in locals() and not collection_existed_before:
             await _cleanup_failed_new_collection_metadata(
                 collection_name=safe_collection,
                 user=_user,
@@ -5759,15 +5563,7 @@ async def ingest_web(
             status_code=400, detail=f"Data format error: {str(e)}"
         ) from e
     except Exception as e:
-        if "config_snapshot" in locals():
-            await _restore_or_cleanup_collection_config_after_failed_ingest(
-                snapshot=config_snapshot,
-                collection_existed_before=collection_existed_before,
-                collection_name=safe_collection,
-                user=_user,
-                context="ingest_web",
-            )
-        elif "collection_existed_before" in locals() and not collection_existed_before:
+        if "collection_existed_before" in locals() and not collection_existed_before:
             await _cleanup_failed_new_collection_metadata(
                 collection_name=safe_collection,
                 user=_user,

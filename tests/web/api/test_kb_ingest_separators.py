@@ -1395,6 +1395,7 @@ def test_ingest_web_error_cleans_new_collection_config(app_with_kb):
         )
 
     assert response.status_code == 500
+    metadata_store.save_collection_config.assert_not_awaited()
     metadata_store.delete_collection_metadata.assert_awaited_once_with(
         collection_name="web_new_collection",
         user_id=1,
@@ -1455,10 +1456,10 @@ def test_ingest_web_error_with_successful_docs_keeps_new_collection_config(
     metadata_store.delete_collection.assert_not_awaited()
 
 
-def test_ingest_web_error_with_rollback_side_effects_keeps_new_collection_config(
+def test_ingest_web_error_with_rollback_side_effects_skips_metadata_cleanup(
     app_with_kb,
 ):
-    """A single-page rollback failure should not orphan rows by deleting config."""
+    """A single-page rollback failure should not orphan rows by deleting metadata."""
     metadata_store = MagicMock()
     metadata_store.get_collection_config = AsyncMock(return_value=None)
     metadata_store.save_collection_config = AsyncMock()
@@ -1504,11 +1505,11 @@ def test_ingest_web_error_with_rollback_side_effects_keeps_new_collection_config
     assert response.status_code == 500
     assert response.json()["side_effects_may_remain"] is True
     metadata_store.delete_collection_metadata.assert_not_awaited()
-    metadata_store.save_collection_config.assert_awaited_once()
+    metadata_store.save_collection_config.assert_not_awaited()
 
 
-def test_ingest_web_existing_collection_error_restores_previous_config(app_with_kb):
-    """POST ingest-web should restore old config when an existing collection fails."""
+def test_ingest_web_existing_collection_error_keeps_previous_config(app_with_kb):
+    """POST ingest-web should leave an existing collection's config untouched."""
     metadata_store = MagicMock()
     metadata_store.get_collection_config = AsyncMock(return_value='{"chunk_size":333}')
     metadata_store.save_collection_config = AsyncMock()
@@ -1552,20 +1553,14 @@ def test_ingest_web_existing_collection_error_restores_previous_config(app_with_
         )
 
     assert response.status_code == 500
-    assert metadata_store.save_collection_config.await_count == 2
-    restore_call = metadata_store.save_collection_config.await_args_list[-1]
-    assert restore_call.kwargs == {
-        "collection": "web_existing_collection",
-        "config_json": '{"chunk_size":333}',
-        "user_id": 1,
-    }
+    metadata_store.save_collection_config.assert_not_awaited()
     metadata_store.delete_collection_metadata.assert_not_awaited()
 
 
-def test_ingest_web_config_only_collection_error_restores_previous_config(
+def test_ingest_web_config_only_collection_error_drops_ghost_config(
     app_with_kb,
 ):
-    """A config-only web collection should restore old config on failed ingest."""
+    """A config-only ghost must be cleaned up, not refreshed, by a failed ingest."""
     metadata_store = MagicMock()
     metadata_store.get_collection_config = AsyncMock(return_value='{"chunk_size":333}')
     metadata_store.save_collection_config = AsyncMock()
@@ -1611,21 +1606,17 @@ def test_ingest_web_config_only_collection_error_restores_previous_config(
         )
 
     assert response.status_code == 500
-    assert metadata_store.save_collection_config.await_count == 2
-    restore_call = metadata_store.save_collection_config.await_args_list[-1]
-    assert restore_call.kwargs == {
-        "collection": "web_config_only_collection",
-        "config_json": '{"chunk_size":333}',
-        "user_id": 1,
-    }
-    metadata_store.delete_collection_metadata.assert_not_awaited()
-    metadata_store.delete_collection.assert_awaited_once_with(
-        "web_config_only_collection"
+    metadata_store.save_collection_config.assert_not_awaited()
+    metadata_store.delete_collection_metadata.assert_awaited_once_with(
+        collection_name="web_config_only_collection",
+        user_id=1,
+        is_admin=False,
+        delete_orphaned_metadata=True,
     )
 
 
-def test_ingest_web_existing_collection_partial_restores_previous_config(app_with_kb):
-    """POST ingest-web should restore old config when an existing collection is partial."""
+def test_ingest_web_existing_collection_partial_publishes_new_config(app_with_kb):
+    """A partial web crawl created documents, so its config must be committed."""
     metadata_store = MagicMock()
     metadata_store.get_collection_config = AsyncMock(return_value='{"chunk_size":555}')
     metadata_store.save_collection_config = AsyncMock()
@@ -1669,13 +1660,10 @@ def test_ingest_web_existing_collection_partial_restores_previous_config(app_wit
 
     assert response.status_code == 200
     assert response.json()["status"] == "partial"
-    assert metadata_store.save_collection_config.await_count == 2
-    restore_call = metadata_store.save_collection_config.await_args_list[-1]
-    assert restore_call.kwargs == {
-        "collection": "web_existing_collection",
-        "config_json": '{"chunk_size":555}',
-        "user_id": 1,
-    }
+    saved = metadata_store.save_collection_config.await_args_list
+    assert len(saved) == 1
+    assert saved[0].kwargs["collection"] == "web_existing_collection"
+    assert '"chunk_size":2048' in saved[0].kwargs["config_json"]
     metadata_store.delete_collection_metadata.assert_not_awaited()
 
 
