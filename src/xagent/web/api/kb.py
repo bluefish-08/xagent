@@ -1043,6 +1043,39 @@ async def _cleanup_failed_new_collection_metadata(
     )
 
 
+async def _collection_or_config_exists_now(
+    collection_existed_before: bool,
+    *,
+    collection_name: str,
+    user_id: int,
+    context: str,
+) -> bool:
+    """Re-check at failure time: a sibling ingest may have published the config.
+
+    The flag is stamped at request/job submission time, so it goes stale while
+    concurrent ingests into the same new collection are running.
+    """
+    if collection_existed_before:
+        return True
+    try:
+        config = await _get_api_compatibility_facade().get_collection_config(
+            collection=collection_name,
+            user_id=user_id,
+            is_admin=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Unreadable state must not authorize a destructive rollback.
+        logger.warning(
+            "Failed to re-check collection config during %s for %s/user_%s: %s",
+            context,
+            collection_name,
+            user_id,
+            exc,
+        )
+        return True
+    return config is not None
+
+
 async def _cleanup_collection_metadata_after_failed_ingest(
     *,
     collection_existed_before: bool,
@@ -1152,7 +1185,12 @@ async def _rollback_failed_ingestion(
     doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
 
     try:
-        if not collection_existed_before:
+        if not await _collection_or_config_exists_now(
+            collection_existed_before,
+            collection_name=collection_name,
+            user_id=user_id,
+            context="failed-ingest rollback",
+        ):
             collection_records = vector_store.list_document_records(
                 collection_name=collection_name,
                 user_id=user_id,
@@ -3935,6 +3973,13 @@ async def ingest(
                 content={**result.model_dump(), "status": "error"},
             )
 
+        # The ingest is committed; the backup has nothing left to restore.
+        if file_backup_path is not None and file_backup_path.exists():
+            try:
+                file_backup_path.unlink()
+            except OSError:
+                logger.warning("Failed to remove ingest backup %s", file_backup_path)
+
         # Success here means exactly one document landed, so publish the config.
         await _save_collection_config_after_ingest(
             collection=safe_collection,
@@ -3944,18 +3989,15 @@ async def ingest(
             documents_created=1,
         )
 
-        if file_backup_path is not None and file_backup_path.exists():
-            try:
-                file_backup_path.unlink()
-            except OSError:
-                logger.warning("Failed to remove ingest backup %s", file_backup_path)
-
         return JSONResponse(
             status_code=200,
             content={**result.model_dump(), "file_id": file_record.file_id},
         )
-    except (RollbackFailureError, CollectionConfigSaveError):
+    except RollbackFailureError:
         raise
+    except CollectionConfigSaveError as e:
+        logger.error("Document ingestion could not publish collection config: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception:
         if file_record is not None:
             rollback_result = IngestionResult(
@@ -4596,13 +4638,17 @@ async def ingest_cloud(
             successful_documents=successful_documents,
         )
 
-    await _save_collection_config_after_ingest(
-        collection=safe_collection,
-        config_json=config.model_dump_json(exclude_unset=True),
-        user=_user,
-        context="ingest_cloud",
-        documents_created=successful_documents,
-    )
+    try:
+        await _save_collection_config_after_ingest(
+            collection=safe_collection,
+            config_json=config.model_dump_json(exclude_unset=True),
+            user=_user,
+            context="ingest_cloud",
+            documents_created=successful_documents,
+        )
+    except CollectionConfigSaveError as e:
+        logger.error("Cloud ingestion could not publish collection config: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return results
 
@@ -5508,6 +5554,20 @@ async def ingest_web(
                 api_result,
                 result,
             )
+
+        # A crawl that recorded no failures but ingested nothing (robots.txt, empty
+        # site) still publishes no collection, so it must not report success.
+        if result.status != "error" and int(result.documents_created or 0) <= 0:
+            result = result.model_copy(
+                update={
+                    "status": "error",
+                    "message": (
+                        f"{result.message}. No pages were ingested, so the "
+                        "knowledge base was not created."
+                    ),
+                }
+            )
+            api_result = _get_api_compatibility_facade().with_result(api_result, result)
 
         # Partial crawls still leave real documents behind, so publish on any of them.
         await _save_collection_config_after_ingest(

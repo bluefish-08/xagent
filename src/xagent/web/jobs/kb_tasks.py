@@ -77,17 +77,22 @@ def _save_job_collection_config_after_ingest(
     if user is None:
         return
 
-    from ..api.kb import _save_collection_config_after_ingest
+    from ..api.kb import CollectionConfigSaveError, _save_collection_config_after_ingest
 
-    asyncio.run(
-        _save_collection_config_after_ingest(
-            collection=str(payload["collection"]),
-            config_json=ingestion_config.model_dump_json(exclude_unset=True),
-            user=user,
-            context=context,
-            documents_created=documents_created,
+    try:
+        asyncio.run(
+            _save_collection_config_after_ingest(
+                collection=str(payload["collection"]),
+                config_json=ingestion_config.model_dump_json(exclude_unset=True),
+                user=user,
+                context=context,
+                documents_created=documents_created,
+            )
         )
-    )
+    except CollectionConfigSaveError as exc:
+        # The documents already landed; a retry would re-run against consumed
+        # staging state and end up deleting the collection.
+        raise BackgroundJobHandlerError(str(exc), retryable=False) from exc
 
 
 def _cleanup_failed_job_collection_metadata(
@@ -101,7 +106,7 @@ def _cleanup_failed_job_collection_metadata(
     user = _get_job_user(
         db,
         payload,
-        context=f"restore failed-ingest collection config during {context}",
+        context=f"clean up failed-ingest collection metadata during {context}",
     )
     if user is None:
         return
@@ -134,7 +139,7 @@ def _cleanup_failed_job_collection_metadata_after_api_ingest(
     user = _get_job_user(
         db,
         payload,
-        context=f"restore failed-ingest collection config during {context}",
+        context=f"clean up failed-ingest collection metadata during {context}",
     )
     if user is None:
         return
@@ -390,8 +395,22 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
         _cleanup_failed_web_collection_metadata_if_new(db, payload)
         raise
 
-    result_payload = result.model_dump(mode="json")
     documents_created = int(result.documents_created or 0)
+    # A crawl that recorded no failures but ingested nothing publishes no
+    # collection, so it must not report success.
+    if result.status != "error" and documents_created <= 0:
+        result = result.model_copy(
+            update={
+                "status": "error",
+                "message": (
+                    f"{result.message}. No pages were ingested, so the "
+                    "knowledge base was not created."
+                ),
+            }
+        )
+        api_result = _get_api_compatibility_facade().with_result(api_result, result)
+
+    result_payload = result.model_dump(mode="json")
     # Partial crawls still leave real documents behind, so publish on any of them.
     _save_job_collection_config_after_ingest(
         db,
@@ -559,7 +578,7 @@ def _cleanup_failed_staged_job_collection_metadata_if_current(
 ) -> bool:
     if not _is_staged_document_generation_latest(db, payload):
         logger.info(
-            "Skipping collection config restore for superseded KB ingest generation: "
+            "Skipping collection config publish for superseded KB ingest generation: "
             "%s/user_%s generation=%s",
             payload.get("collection"),
             payload.get("user_id"),

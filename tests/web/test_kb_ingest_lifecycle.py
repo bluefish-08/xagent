@@ -238,3 +238,118 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
         successful_documents=0,
     )
     api_helper.assert_not_called()
+
+
+class _ConfigLookupFacade:
+    """Facade stub whose collection config lookup drives rollback scoping."""
+
+    def __init__(self, config: Any) -> None:
+        self._config = config
+        self.lookups: list[tuple[str, int]] = []
+
+    async def get_collection_config(
+        self,
+        *,
+        collection: str,
+        user_id: int,
+        is_admin: bool = False,
+    ) -> Any:
+        self.lookups.append((collection, user_id))
+        if isinstance(self._config, Exception):
+            raise self._config
+        return self._config
+
+
+@pytest.mark.parametrize(
+    ("stored_config", "expected"),
+    [
+        ('{"chunk_size": 512}', True),
+        (None, False),
+        (RuntimeError("config store down"), True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_collection_or_config_exists_now_rechecks_at_failure_time(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_config: Any,
+    expected: bool,
+) -> None:
+    facade = _ConfigLookupFacade(stored_config)
+    monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
+
+    assert (
+        await kb_module._collection_or_config_exists_now(
+            False,
+            collection_name="shared-kb",
+            user_id=3,
+            context="test",
+        )
+        is expected
+    )
+    assert facade.lookups == [("shared-kb", 3)]
+
+
+@pytest.mark.asyncio
+async def test_rollback_keeps_collection_published_by_a_sibling_ingest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale collection_existed_before must not delete a sibling job's work."""
+    from pathlib import Path
+
+    facade = _ConfigLookupFacade('{"chunk_size": 512}')
+    delete_collection = MagicMock()
+    monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
+    monkeypatch.setattr(kb_module, "delete_collection", delete_collection)
+    monkeypatch.setattr(kb_module, "get_vector_index_store", MagicMock())
+    monkeypatch.setattr(kb_module, "_restore_ingest_file_backup", MagicMock())
+    monkeypatch.setattr(kb_module, "clear_ingestion_status", MagicMock())
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+    file_record = MagicMock()
+    file_record.file_id = "file-1"
+
+    await kb_module._rollback_failed_ingestion(
+        db=MagicMock(),
+        user=user,
+        collection_name="shared-kb",
+        result=IngestionResult(status="error", message="failed", doc_id="doc-1"),
+        file_path=Path("/tmp/does-not-matter.pdf"),
+        file_record=file_record,
+        collection_existed_before=False,
+        uploaded_file_existed_before=True,
+        file_backup_path=None,
+        had_existing_file=False,
+    )
+
+    delete_collection.assert_not_called()
+
+
+def test_job_config_save_failure_is_not_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying after the documents landed would delete the collection."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+    from xagent.web.jobs import kb_tasks
+    from xagent.web.jobs.exceptions import BackgroundJobHandlerError
+
+    user = User()
+    user.id = 13
+    monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: user)
+
+    async def fail_save(**kwargs: Any) -> None:
+        raise kb_module.CollectionConfigSaveError("config store down")
+
+    monkeypatch.setattr(kb_module, "_save_collection_config_after_ingest", fail_save)
+
+    with pytest.raises(BackgroundJobHandlerError) as excinfo:
+        kb_tasks._save_job_collection_config_after_ingest(
+            MagicMock(),
+            {"collection": "job-kb", "user_id": 13},
+            IngestionConfig(),
+            context="background document ingest",
+            documents_created=1,
+        )
+
+    assert excinfo.value.retryable is False

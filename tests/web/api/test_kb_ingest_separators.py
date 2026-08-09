@@ -1206,12 +1206,12 @@ async def _fake_run_web_ingestion(
     return WebIngestionResult(
         status="success",
         collection=collection,
-        total_urls_found=0,
-        pages_crawled=0,
+        total_urls_found=1,
+        pages_crawled=1,
         pages_failed=0,
-        documents_created=0,
-        chunks_created=0,
-        embeddings_created=0,
+        documents_created=1,
+        chunks_created=1,
+        embeddings_created=1,
         message="ok",
         elapsed_time_ms=0,
     )
@@ -1723,3 +1723,54 @@ def test_ingest_web_surfaces_embedding_configuration_fix_guidance(app_with_kb):
     )
     assert "Current embedding_model_id: 'text-embedding-v4'." in message
     assert "How to fix:" in message
+
+
+def test_ingest_web_zero_pages_without_failures_reports_error(app_with_kb):
+    """A crawl that ingested nothing publishes no KB, so it must not report success."""
+    metadata_store = MagicMock()
+    metadata_store.get_collection_config = AsyncMock(return_value=None)
+    metadata_store.save_collection_config = AsyncMock()
+    metadata_store.delete_collection_metadata = AsyncMock()
+    metadata_store.delete_collection = AsyncMock()
+
+    with (
+        patch(
+            "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+            return_value=metadata_store,
+        ),
+        patch("xagent.web.api.kb._ensure_collection_access", new_callable=AsyncMock),
+        patch(
+            "xagent.web.api.kb.get_collection_sync", side_effect=ValueError("missing")
+        ),
+        patch(
+            "xagent.web.api.kb.run_web_ingestion",
+            return_value=WebIngestionResult(
+                status="success",
+                collection="web_robots_blocked",
+                total_urls_found=0,
+                pages_crawled=0,
+                pages_failed=0,
+                documents_created=0,
+                chunks_created=0,
+                embeddings_created=0,
+                crawled_urls=[],
+                failed_urls={},
+                message="crawl completed",
+                warnings=[],
+                elapsed_time_ms=0,
+            ),
+        ),
+    ):
+        client = TestClient(app_with_kb)
+        response = client.post(
+            "/api/kb/ingest-web",
+            data={
+                "collection": "web_robots_blocked",
+                "start_url": "https://example.com",
+                "chunk_size": "2048",
+            },
+        )
+
+    assert response.status_code == 500
+    assert "No pages were ingested" in response.json()["message"]
+    metadata_store.save_collection_config.assert_not_awaited()
