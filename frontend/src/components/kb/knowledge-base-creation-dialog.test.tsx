@@ -103,7 +103,14 @@ vi.mock("@/components/ui/card", () => ({
 }))
 
 vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  // Esc and the overlay close through onOpenChange, which the real Dialog owns.
+  // The button stands in for both so the guard on that prop stays testable.
+  Dialog: ({ children, onOpenChange }: { children: React.ReactNode; onOpenChange?: (open: boolean) => void }) => (
+    <div>
+      <button data-testid="dismiss-dialog" onClick={() => onOpenChange?.(false)}>dismiss</button>
+      {children}
+    </div>
+  ),
   DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   DialogDescription: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -637,6 +644,36 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     } finally {
       consoleErrorSpy.mockRestore()
     }
+  })
+
+  it("refuses to close while an ingest is still running", async () => {
+    // The consumers keep this dialog mounted and only toggle `open`, so a
+    // request outliving a close still lands in onSuccess — which, in the agent
+    // builder, attaches the knowledge base the user thought they abandoned.
+    const onOpenChange = vi.fn()
+    const onSuccess = vi.fn()
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => new Promise(() => {})
+    )
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={onOpenChange} onSuccess={onSuccess} />
+    )
+
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "pending-docs" },
+    })
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(screen.getByText("kb.dialog.fileUpload.processing")).toBeInTheDocument()
+    })
+
+    expect(screen.getByText("common.cancel")).toBeDisabled()
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
   })
 })
 

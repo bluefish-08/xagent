@@ -930,6 +930,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     }
   }
 
+  // The dialog stays mounted after it closes, so a request outliving it still
+  // fires onSuccess — into a consumer that then edits the agent the user is
+  // building. Hold every exit shut instead: button, Esc and the overlay.
+  const isIngestInFlight = isUploading || isWebIngesting || isCloudConnecting
+
   const cloudProviders = [
     {
       id: "google-drive",
@@ -942,7 +947,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={(next) => { if (!next && isIngestInFlight) return; onOpenChange(next) }}>
         <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col p-0 bg-slate-50">
           <div className="p-6 pb-0">
             <DialogHeader>
@@ -1373,7 +1378,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                   </div>
 
                   {/* Progress/Results overlays would go here if needed, but we usually show them as toast or disable UI. We'll add them if uploading is true */}
-                  {(isUploading || isWebIngesting || isCloudConnecting) && (
+                  {isIngestInFlight && (
                     <div className="mt-4 p-4 bg-white rounded-lg border">
                       <div className="flex justify-between text-sm mb-2">
                         <span className="font-medium">
@@ -1474,7 +1479,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           </div>
 
           <div className="p-6 pt-4 flex justify-between border-t bg-white rounded-b-lg">
-            <Button variant="outline" onClick={() => {
+            <Button variant="outline" disabled={isIngestInFlight} onClick={() => {
               resetState()
               onOpenChange(false)
             }}>
@@ -1485,7 +1490,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                 <Button
                   variant="outline"
                   onClick={() => setCurrentStep(prev => prev - 1)}
-                  disabled={isUploading || isWebIngesting || isCloudConnecting}
+                  disabled={isIngestInFlight}
                 >
                   <ArrowLeft className="w-4 h-4 mr-2" />
                   {t("common.back")}
@@ -1520,15 +1525,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       handleUpload()
                     }
                   }}
-                  disabled={
-                    isUploading ||
-                    isWebIngesting ||
-                    isCloudConnecting ||
-                    (activeImportTab === "file" && selectedFiles.length === 0)
-                  }
+                  disabled={isIngestInFlight || (activeImportTab === "file" && selectedFiles.length === 0)}
                   className="bg-blue-600 hover:bg-blue-700 text-white"
                 >
-                  {isUploading || isWebIngesting || isCloudConnecting ? (
+                  {isIngestInFlight ? (
                     <span className="flex items-center gap-2">
                       <Clock className="w-4 h-4 animate-spin" />
                       {t("kb.dialog.fileUpload.processing")}
