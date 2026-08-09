@@ -155,10 +155,10 @@ vi.mock("./cloud-connect-dialog", () => ({
 
 import { KnowledgeBaseCreationDialog } from "./knowledge-base-creation-dialog"
 
-function createJsonResponse(body: unknown, ok = true, status?: number) {
+function createJsonResponse(body: unknown, status = 200) {
   return {
-    ok,
-    status: status ?? (ok ? 200 : 500),
+    ok: status >= 200 && status < 300,
+    status,
     json: vi.fn().mockResolvedValue(body),
   }
 }
@@ -191,7 +191,7 @@ function installApiMocks() {
       return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
     }
     if (url.endsWith("/reserve-team") || url.endsWith("/release-team-claim")) {
-      return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+      return Promise.resolve(createJsonResponse(null, 204))
     }
     if (url === "http://api.local/api/kb/ingest/jobs") {
       return Promise.resolve(
@@ -803,7 +803,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url === "http://api.local/api/kb/ingest-web/jobs") {
         return Promise.resolve(
@@ -858,7 +858,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({}))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve(createJsonResponse({ detail: "taken" }, false))
+        return Promise.resolve(createJsonResponse({ detail: "taken" }, 500))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -901,13 +901,13 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url.endsWith("/release-team-claim")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
-        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, 500))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -932,10 +932,70 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(toastWarningMock).not.toHaveBeenCalled()
   })
 
+  it.each([
+    {
+      tab: "web" as const,
+      ingestUrl: "http://api.local/api/kb/ingest-web/jobs",
+      message: "web ingest blew up",
+      title: "kb.errors.webIngestFailed",
+    },
+    {
+      tab: "cloud" as const,
+      ingestUrl: "http://api.local/api/kb/ingest-cloud",
+      message: "cloud ingest blew up",
+      title: "kb.errors.cloudIngestFailed",
+    },
+  ])("releases the reserved name when the $tab ingest fails", async ({ tab, ingestUrl, message, title }) => {
+    // Each path decides for itself that it failed before reaching the shared
+    // release helper, so the file path's coverage says nothing about these two.
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    apiRequestMock.mockImplementation((url: string) => {
+      if (url === "http://api.local/api/models/?category=embedding") {
+        return Promise.resolve(createJsonResponse([]))
+      }
+      if (url === "http://api.local/api/models/user-default") {
+        return Promise.resolve(createJsonResponse({}))
+      }
+      if (url === "http://api.local/api/jobs/capabilities") {
+        return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
+      }
+      if (url.endsWith("/reserve-team") || url.endsWith("/release-team-claim")) {
+        return Promise.resolve(createJsonResponse(null, 204))
+      }
+      if (url === ingestUrl) {
+        return Promise.resolve(createJsonResponse({ message }, 500))
+      }
+
+      throw new Error(`Unhandled apiRequest: ${url}`)
+    })
+
+    try {
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+
+      nameAndChooseTeam(container)
+      await goToStep3(container, tab)
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+      await waitFor(() => {
+        expect(callsTo(RELEASE_URL)).toHaveLength(1)
+      })
+      expect(callsTo(RELEASE_URL)[0][1]).toMatchObject({ method: "POST" })
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ description: message })
+      )
+      expect(toastWarningMock).not.toHaveBeenCalled()
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
+  })
+
   // 403 (not the claim's creator), 404 and a thrown request all mean the same
   // thing: the name is still claimed and nobody would otherwise notice.
   it.each([
-    ["a 403 response", () => Promise.resolve(createJsonResponse({ detail: "forbidden" }, false))],
+    ["a 403 response", () => Promise.resolve(createJsonResponse({ detail: "forbidden" }, 403))],
     ["a rejected request", () => Promise.reject(new Error("rollback exploded"))],
   ])("warns, but does not mask the ingest error, on %s from the release", async (_label, release) => {
     const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -950,13 +1010,13 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url.endsWith("/release-team-claim")) {
         return release()
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
-        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, 500))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -995,14 +1055,14 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url.endsWith("/release-team-claim")) {
         // The server saw a real collection behind the claim and refused.
-        return Promise.resolve({ ok: false, status: 409, json: vi.fn().mockResolvedValue({}) })
+        return Promise.resolve(createJsonResponse({}, 409))
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
-        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, false))
+        return Promise.resolve(createJsonResponse({ message: "ingest blew up" }, 500))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -1034,11 +1094,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({}))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({
-          ok: false,
-          status: 409,
-          json: vi.fn().mockResolvedValue({ detail: "Knowledge base already exists" }),
-        })
+        return Promise.resolve(createJsonResponse({ detail: "Knowledge base already exists" }, 409))
       }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
@@ -1076,16 +1132,16 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         return Promise.resolve(createJsonResponse({ kb_ingest_mode: "celery" }))
       }
       if (url.endsWith("/reserve-team")) {
-        return Promise.resolve({ ok: true, status: 204, json: vi.fn().mockResolvedValue(null) })
+        return Promise.resolve(createJsonResponse(null, 204))
       }
       if (url.endsWith("/release-team-claim")) {
         // A collection exists now, so the server is the one that says no.
-        return Promise.resolve({ ok: false, status: 409, json: vi.fn().mockResolvedValue({}) })
+        return Promise.resolve(createJsonResponse({}, 409))
       }
       if (url === "http://api.local/api/kb/ingest/jobs") {
         ingestCalls += 1
         if (ingestCalls > 1) {
-          return Promise.resolve(createJsonResponse({ message: "second file blew up" }, false))
+          return Promise.resolve(createJsonResponse({ message: "second file blew up" }, 500))
         }
         return Promise.resolve(
           createJsonResponse(
