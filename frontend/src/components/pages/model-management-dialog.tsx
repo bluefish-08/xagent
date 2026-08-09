@@ -1348,6 +1348,9 @@ export function ModelManagementDialog({
                 }
               ]}
               currentStep={connectStep}
+              // These step bodies have no padding of their own, so they need the
+              // gap the stepper's dropped `mb-6` used to provide.
+              contentClassName="pt-6"
               className="mt-0 px-4 sm:px-6 py-4 flex-1 min-h-0 overflow-hidden"
             />
           </DialogContent>
