@@ -650,15 +650,20 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     }
   })
 
-  it("refuses to close while an ingest is still running", async () => {
+  it("abandons a submission the user closed out of", async () => {
     // The consumers keep this dialog mounted and only toggle `open`, so a
-    // request outliving a close still lands in onSuccess — which, in the agent
+    // request outliving a close still lands in onSuccess -- which, in the agent
     // builder, attaches the knowledge base the user thought they abandoned.
+    // Closing stays available (a job that never terminates would otherwise trap
+    // the user); what the close does is disown the request still in flight.
     const onOpenChange = vi.fn()
     const onSuccess = vi.fn()
+    let finishIngest: (value: unknown) => void = () => {}
     mockRoute(
       (url) => url === "http://api.local/api/kb/ingest/jobs",
-      () => new Promise(() => {})
+      () => new Promise((resolve) => {
+        finishIngest = resolve
+      })
     )
 
     const { container } = render(
@@ -675,9 +680,53 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
       expect(screen.getByText("kb.dialog.fileUpload.processing")).toBeInTheDocument()
     })
 
-    expect(screen.getByText("common.cancel")).toBeDisabled()
+    // Esc, the overlay and the button all reach the same guard.
     fireEvent.click(screen.getByTestId("dismiss-dialog"))
-    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+
+    finishIngest(
+      createJsonResponse(
+        createSucceededJob({
+          status: "success",
+          collection: "pending-docs",
+          document_count: 1,
+          chunks_count: 1,
+          message: "ok",
+        })
+      )
+    )
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    // The late success must not hand the collection to the consumer.
+    expect(onSuccess).not.toHaveBeenCalled()
+  })
+
+  it("still closes when the ingest never reaches a terminal state", async () => {
+    // A job stuck in "running" used to poll forever with every exit blocked,
+    // leaving a page reload as the only way out.
+    const onOpenChange = vi.fn()
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => new Promise(() => {})
+    )
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={onOpenChange} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "stuck-docs" },
+    })
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(screen.getByText("kb.dialog.fileUpload.processing")).toBeInTheDocument()
+    })
+
+    expect(screen.getByText("common.cancel")).not.toBeDisabled()
+    fireEvent.click(screen.getByText("common.cancel"))
+    expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 })
 

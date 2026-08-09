@@ -79,15 +79,28 @@ export function getBackgroundJobFailureMessage(
   return job.error_message || fallbackMessage
 }
 
+/** Give up on a job that never reaches a terminal state.
+ *
+ *  Without it the poll loop is unbounded: a stalled or dropped job leaves the
+ *  caller waiting forever, one request per second, with nothing to report to
+ *  the user. Generous rather than tight -- a long web crawl legitimately runs
+ *  for minutes, and the deadline is a backstop, not a service-level target. */
+export const BACKGROUND_JOB_DEADLINE_MS = 15 * 60_000
+
 export async function waitForBackgroundJob(
   apiUrl: string,
   initialJob: BackgroundJobResponse,
-  onUpdate?: (job: BackgroundJobResponse) => void
+  onUpdate?: (job: BackgroundJobResponse) => void,
+  deadlineMs: number = BACKGROUND_JOB_DEADLINE_MS
 ): Promise<BackgroundJobResponse> {
   let job = initialJob
   onUpdate?.(job)
+  const giveUpAt = Date.now() + deadlineMs
 
   while (!isBackgroundJobTerminal(job)) {
+    if (Date.now() >= giveUpAt) {
+      throw new Error(`Background job ${job.id} did not finish in time`)
+    }
     await new Promise(resolve => window.setTimeout(resolve, 1000))
     const response = await apiRequest(`${apiUrl}/api/jobs/${job.id}`)
     if (!response.ok) {

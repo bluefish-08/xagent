@@ -314,6 +314,12 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     retry_delay: 1.0
   })
 
+  // Bumped whenever a submission is abandoned (the dialog closed) or a new one
+  // starts. A handler compares the value it captured before every state write
+  // and every onSuccess, so a request outliving the dialog cannot touch the UI
+  // or hand a knowledge base to a consumer the user already walked away from.
+  const submission = useRef(0)
+
   // Names the team already holds, claim or built alike. Read once per open so a
   // collision is visible on step 1 rather than after an ingest has run.
   const [teamClaims, setTeamClaims] = useState<TeamClaim[]>([])
@@ -599,6 +605,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       return
     }
 
+    const mySubmission = ++submission.current
     setIsUploading(true)
     // Classify on the status code, not on the backend's English wording.
     let failedStatus: number | undefined
@@ -722,6 +729,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         setUploadProgress(((i + 1) / selectedFiles.length) * 100)
       }
 
+      if (submission.current !== mySubmission) return
       resetState()
       onOpenChange(false)
       onSuccess?.(successfulCollections)
@@ -741,7 +749,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       // Not awaited: releasing has no timeout, and the button should not read
       // "Processing" over a slow network after the failure is already on screen.
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
-      if (successfulCollections.length > 0) {
+      if (successfulCollections.length > 0 && submission.current === mySubmission) {
         onSuccess?.(successfulCollections)
       }
     } finally {
@@ -758,6 +766,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       return
     }
 
+    const mySubmission = ++submission.current
     setIsWebIngesting(true)
     let failedStatus: number | undefined
     setWebIngestionProgress(0)
@@ -862,6 +871,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         throw new Error(result.message || t("kb.errors.webIngestFailed"))
       }
 
+      if (submission.current !== mySubmission) return
       resetState()
       onOpenChange(false)
       onSuccess?.([collectionName])
@@ -886,6 +896,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   const handleCloudIngest = async () => {
     if (totalCloudFiles === 0) return
 
+    const mySubmission = ++submission.current
     setIsCloudConnecting(true)
     let failedStatus: number | undefined
     setIngestionResults([])
@@ -978,6 +989,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       toast.success(t("kb.dialog.fileUpload.processSuccess"))
 
+      if (submission.current !== mySubmission) return
       // Reset and close
       resetState()
       onOpenChange(false)
@@ -1021,7 +1033,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(next) => { if (!next && isIngestInFlight) return; onOpenChange(next) }}>
+      <Dialog open={open} onOpenChange={(next) => {
+        // Closing mid-ingest is allowed: the request keeps running but its
+        // handler is abandoned, which is what the stale-onSuccess guard needs.
+        // Blocking the exits instead left the dialog unclosable whenever a job
+        // failed to reach a terminal state.
+        if (!next) submission.current += 1
+        onOpenChange(next)
+      }}>
         <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col p-0 bg-slate-50">
           <div className="p-6 pb-0">
             <DialogHeader>
@@ -1562,7 +1581,8 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           </div>
 
           <div className="p-6 pt-4 flex justify-between border-t bg-white rounded-b-lg">
-            <Button variant="outline" disabled={isIngestInFlight} onClick={() => {
+            <Button variant="outline" onClick={() => {
+              submission.current += 1
               resetState()
               onOpenChange(false)
             }}>
