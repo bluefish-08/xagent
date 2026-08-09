@@ -1043,37 +1043,36 @@ async def _cleanup_failed_new_collection_metadata(
     )
 
 
-async def _collection_or_config_exists_now(
-    collection_existed_before: bool,
+def _collection_holds_other_documents(
     *,
     collection_name: str,
     user_id: int,
+    is_admin: bool,
     context: str,
 ) -> bool:
-    """Re-check at failure time: a sibling ingest may have published the config.
+    """Check at failure time for work this ingest must not destroy.
 
-    The flag is stamped at request/job submission time, so it goes stale while
-    concurrent ingests into the same new collection are running.
+    `collection_existed_before` is stamped when the request or job is submitted,
+    so a sibling ingest into the same new collection can land documents after it
+    was read. A config-only ghost holds no documents and stays cleanable.
     """
-    if collection_existed_before:
-        return True
     try:
-        config = await _get_api_compatibility_facade().get_collection_config(
-            collection=collection_name,
+        records = get_vector_index_store().list_document_records(
+            collection_name=collection_name,
             user_id=user_id,
-            is_admin=False,
+            is_admin=is_admin,
         )
     except Exception as exc:  # noqa: BLE001
-        # Unreadable state must not authorize a destructive rollback.
+        # Unreadable state must not authorize destructive cleanup.
         logger.warning(
-            "Failed to re-check collection config during %s for %s/user_%s: %s",
-            context,
+            "Failed to list documents of %s/user_%s during %s: %s",
             collection_name,
             user_id,
+            context,
             exc,
         )
         return True
-    return config is not None
+    return bool(records)
 
 
 async def _cleanup_collection_metadata_after_failed_ingest(
@@ -1098,6 +1097,21 @@ async def _cleanup_collection_metadata_after_failed_ingest(
                 int(user.id),
                 context,
             )
+        return
+
+    if _collection_holds_other_documents(
+        collection_name=collection_name,
+        user_id=int(user.id),
+        is_admin=bool(user.is_admin),
+        context=context,
+    ):
+        logger.info(
+            "Skipping failed-ingest collection metadata cleanup for %s/user_%s "
+            "during %s because a concurrent ingest published documents",
+            collection_name,
+            int(user.id),
+            context,
+        )
         return
 
     await _cleanup_failed_new_collection_metadata(
@@ -1185,26 +1199,29 @@ async def _rollback_failed_ingestion(
     doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
 
     try:
-        if not await _collection_or_config_exists_now(
-            collection_existed_before,
-            collection_name=collection_name,
-            user_id=user_id,
-            context="failed-ingest rollback",
-        ):
-            collection_records = vector_store.list_document_records(
+        collection_records = (
+            vector_store.list_document_records(
                 collection_name=collection_name,
                 user_id=user_id,
                 is_admin=bool(user.is_admin),
             )
-            collection_file_ids = {
-                file_id
-                for file_id in (
-                    _get_document_record_file_id(record)
-                    for record in collection_records
-                )
-                if file_id
-            }
+            if not collection_existed_before
+            else []
+        )
+        collection_file_ids = {
+            file_id
+            for file_id in (
+                _get_document_record_file_id(record) for record in collection_records
+            )
+            if file_id
+        }
+        # The flag is stamped at submission time: a sibling ingest into the same
+        # new collection may have landed documents that must survive.
+        holds_other_documents = any(
+            file_id != file_record_id for file_id in collection_file_ids
+        )
 
+        if not collection_existed_before and not holds_other_documents:
             collection_delete_result = delete_collection(
                 collection_name,
                 user_id,
@@ -3256,6 +3273,36 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _demote_empty_ingest_to_error(
+    api_result: KBApiOperationResult[Any],
+    *,
+    collection_existed_before: bool,
+) -> KBApiOperationResult[Any]:
+    """An ingest that produced no documents publishes nothing, so it is not a success.
+
+    A crawl can finish without recording a single failure (robots.txt, an empty
+    site) and still create zero documents.
+    """
+    result = api_result.result
+    if result.status == "error" or int(result.documents_created or 0) > 0:
+        return api_result
+
+    outcome = (
+        "nothing was added"
+        if collection_existed_before
+        else "the knowledge base was not created"
+    )
+    return _get_api_compatibility_facade().with_result(
+        api_result,
+        result.model_copy(
+            update={
+                "status": "error",
+                "message": f"{result.message}. No pages were ingested, so {outcome}.",
+            }
+        ),
+    )
+
+
 async def _save_collection_config_after_ingest(
     *,
     collection: str,
@@ -4621,6 +4668,10 @@ async def ingest_cloud(
                 )
                 return rollback_execution.operation_result
 
+    # An empty batch publishes nothing, so it must not report success either.
+    if not request.files:
+        raise HTTPException(status_code=400, detail="No files were provided to ingest.")
+
     # Run all file processings concurrently
     api_results = await asyncio.gather(*[process_file(f) for f in request.files])
     results = [api_result.result for api_result in api_results]
@@ -5555,19 +5606,11 @@ async def ingest_web(
                 result,
             )
 
-        # A crawl that recorded no failures but ingested nothing (robots.txt, empty
-        # site) still publishes no collection, so it must not report success.
-        if result.status != "error" and int(result.documents_created or 0) <= 0:
-            result = result.model_copy(
-                update={
-                    "status": "error",
-                    "message": (
-                        f"{result.message}. No pages were ingested, so the "
-                        "knowledge base was not created."
-                    ),
-                }
-            )
-            api_result = _get_api_compatibility_facade().with_result(api_result, result)
+        api_result = _demote_empty_ingest_to_error(
+            api_result,
+            collection_existed_before=collection_existed_before,
+        )
+        result = api_result.result
 
         # Partial crawls still leave real documents behind, so publish on any of them.
         await _save_collection_config_after_ingest(

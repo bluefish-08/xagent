@@ -395,21 +395,14 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
         _cleanup_failed_web_collection_metadata_if_new(db, payload)
         raise
 
-    documents_created = int(result.documents_created or 0)
-    # A crawl that recorded no failures but ingested nothing publishes no
-    # collection, so it must not report success.
-    if result.status != "error" and documents_created <= 0:
-        result = result.model_copy(
-            update={
-                "status": "error",
-                "message": (
-                    f"{result.message}. No pages were ingested, so the "
-                    "knowledge base was not created."
-                ),
-            }
-        )
-        api_result = _get_api_compatibility_facade().with_result(api_result, result)
+    from ..api.kb import _demote_empty_ingest_to_error
 
+    api_result = _demote_empty_ingest_to_error(
+        api_result,
+        collection_existed_before=bool(payload.get("collection_existed_before", True)),
+    )
+    result = api_result.result
+    documents_created = int(result.documents_created or 0)
     result_payload = result.model_dump(mode="json")
     # Partial crawls still leave real documents behind, so publish on any of them.
     _save_job_collection_config_after_ingest(

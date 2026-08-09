@@ -5,7 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from xagent.core.tools.core.RAG_tools.core.schemas import IngestionResult
+from xagent.core.tools.core.RAG_tools.core.schemas import (
+    IngestionResult,
+    WebIngestionResult,
+)
 from xagent.core.tools.core.RAG_tools.kb import KBApiOperationResult
 from xagent.web.api import kb as kb_module
 from xagent.web.models.user import User
@@ -240,67 +243,58 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
     api_helper.assert_not_called()
 
 
-class _ConfigLookupFacade:
-    """Facade stub whose collection config lookup drives rollback scoping."""
-
-    def __init__(self, config: Any) -> None:
-        self._config = config
-        self.lookups: list[tuple[str, int]] = []
-
-    async def get_collection_config(
-        self,
-        *,
-        collection: str,
-        user_id: int,
-        is_admin: bool = False,
-    ) -> Any:
-        self.lookups.append((collection, user_id))
-        if isinstance(self._config, Exception):
-            raise self._config
-        return self._config
+def _vector_store_returning(records: Any) -> MagicMock:
+    """Vector store stub whose document listing drives failure-time scoping."""
+    store = MagicMock()
+    if isinstance(records, Exception):
+        store.list_document_records.side_effect = records
+    else:
+        store.list_document_records.return_value = records
+    return store
 
 
 @pytest.mark.parametrize(
-    ("stored_config", "expected"),
+    ("records", "expected"),
     [
-        ('{"chunk_size": 512}', True),
-        (None, False),
-        (RuntimeError("config store down"), True),
+        ([{"file_id": "sibling"}], True),
+        ([], False),
+        (RuntimeError("vector store down"), True),
     ],
 )
-@pytest.mark.asyncio
-async def test_collection_or_config_exists_now_rechecks_at_failure_time(
+def test_collection_holds_other_documents_rechecks_at_failure_time(
     monkeypatch: pytest.MonkeyPatch,
-    stored_config: Any,
+    records: Any,
     expected: bool,
 ) -> None:
-    facade = _ConfigLookupFacade(stored_config)
-    monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
+    monkeypatch.setattr(
+        kb_module, "get_vector_index_store", lambda: _vector_store_returning(records)
+    )
 
     assert (
-        await kb_module._collection_or_config_exists_now(
-            False,
+        kb_module._collection_holds_other_documents(
             collection_name="shared-kb",
             user_id=3,
+            is_admin=False,
             context="test",
         )
         is expected
     )
-    assert facade.lookups == [("shared-kb", 3)]
 
 
 @pytest.mark.asyncio
-async def test_rollback_keeps_collection_published_by_a_sibling_ingest(
+async def test_rollback_keeps_collection_holding_a_sibling_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale collection_existed_before must not delete a sibling job's work."""
     from pathlib import Path
 
-    facade = _ConfigLookupFacade('{"chunk_size": 512}')
     delete_collection = MagicMock()
-    monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
+    monkeypatch.setattr(
+        kb_module,
+        "get_vector_index_store",
+        lambda: _vector_store_returning([{"file_id": "sibling"}]),
+    )
     monkeypatch.setattr(kb_module, "delete_collection", delete_collection)
-    monkeypatch.setattr(kb_module, "get_vector_index_store", MagicMock())
     monkeypatch.setattr(kb_module, "_restore_ingest_file_backup", MagicMock())
     monkeypatch.setattr(kb_module, "clear_ingestion_status", MagicMock())
 
@@ -324,6 +318,92 @@ async def test_rollback_keeps_collection_published_by_a_sibling_ingest(
     )
 
     delete_collection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_metadata_when_a_sibling_ingest_published_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamped flag is stale; a config-only ghost holds no documents."""
+    cleanup = MagicMock()
+    monkeypatch.setattr(
+        kb_module,
+        "get_vector_index_store",
+        lambda: _vector_store_returning([{"file_id": "sibling"}]),
+    )
+    monkeypatch.setattr(kb_module, "_cleanup_failed_new_collection_metadata", cleanup)
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._cleanup_collection_metadata_after_failed_ingest(
+        collection_existed_before=False,
+        collection_name="shared-kb",
+        user=user,
+        context="ingest",
+    )
+
+    cleanup.assert_not_called()
+
+
+def _web_result(documents_created: int) -> WebIngestionResult:
+    return WebIngestionResult(
+        status="success",
+        collection="web-kb",
+        total_urls_found=documents_created,
+        pages_crawled=documents_created,
+        pages_failed=0,
+        documents_created=documents_created,
+        chunks_created=documents_created,
+        embeddings_created=documents_created,
+        message="crawl completed",
+        elapsed_time_ms=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("collection_existed_before", "expected_outcome"),
+    [(False, "the knowledge base was not created"), (True, "nothing was added")],
+)
+def test_empty_ingest_is_demoted_to_error(
+    monkeypatch: pytest.MonkeyPatch,
+    collection_existed_before: bool,
+    expected_outcome: str,
+) -> None:
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F",
+            (),
+            {
+                "with_result": staticmethod(
+                    lambda api_result, result: KBApiOperationResult(result=result)
+                )
+            },
+        )(),
+    )
+    api_result = KBApiOperationResult(result=_web_result(0))
+
+    demoted = kb_module._demote_empty_ingest_to_error(
+        api_result,
+        collection_existed_before=collection_existed_before,
+    ).result
+
+    assert demoted.status == "error"
+    assert expected_outcome in demoted.message
+
+
+def test_successful_ingest_is_not_demoted() -> None:
+    api_result = KBApiOperationResult(result=_web_result(2))
+
+    assert (
+        kb_module._demote_empty_ingest_to_error(
+            api_result, collection_existed_before=False
+        )
+        is api_result
+    )
 
 
 def test_job_config_save_failure_is_not_retryable(

@@ -4951,3 +4951,25 @@ def test_list_collections_skips_document_scan_when_duplicate_names_have_metadata
     payload = response.json()
     assert payload["collections"][0]["name"] == "duplicate"
     assert len(payload["collections"][0]["document_metadata"]) == 2
+
+
+def test_kb_ingest_cloud_empty_batch_is_rejected(test_env) -> None:
+    """An empty batch publishes nothing, so it must not report success."""
+    app, headers, _user, _ = test_env
+    client = TestClient(app)
+    metadata_store = MagicMock()
+    metadata_store.get_collection_config = AsyncMock(return_value=None)
+    metadata_store.save_collection_config = AsyncMock()
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+        return_value=metadata_store,
+    ):
+        response = client.post(
+            "/api/kb/ingest-cloud",
+            json={"collection": "cloud_empty_batch", "files": []},
+            headers=headers,
+        )
+
+    assert response.status_code == 400
+    metadata_store.save_collection_config.assert_not_awaited()

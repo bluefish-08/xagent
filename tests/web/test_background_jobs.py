@@ -1311,6 +1311,75 @@ def test_kb_web_job_partial_publishes_new_config(tmp_path, monkeypatch):
         db.close()
 
 
+def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
+    """A crawl that ingested nothing publishes no KB, so the job must not succeed."""
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+    monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
+
+    from xagent.web.jobs.exceptions import BackgroundJobHandlerError
+    from xagent.web.jobs.kb_tasks import handle_kb_ingest_web
+
+    SessionLocal = _init_test_db(tmp_path / "web-ingest-zero-pages.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="web-ingest-zero-pages-test")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={
+                "collection": "robots-blocked-kb",
+                "crawl_config": WebCrawlConfig(
+                    start_url="https://example.com"
+                ).model_dump(mode="json"),
+                "ingestion_config": IngestionConfig(chunk_size=2048).model_dump(
+                    mode="json"
+                ),
+                "user_id": int(user.id),
+                "is_admin": False,
+                "collection_existed_before": False,
+            },
+        )
+
+        metadata_store = MagicMock()
+        metadata_store.get_collection_config = AsyncMock(return_value=None)
+        metadata_store.save_collection_config = AsyncMock()
+        metadata_store.delete_collection_metadata = AsyncMock()
+
+        async def fake_run_web_ingestion(**kwargs):
+            return WebIngestionResult(
+                status="success",
+                collection="robots-blocked-kb",
+                total_urls_found=0,
+                pages_crawled=0,
+                pages_failed=0,
+                documents_created=0,
+                chunks_created=0,
+                embeddings_created=0,
+                crawled_urls=[],
+                failed_urls={},
+                message="crawl completed",
+                warnings=[],
+                elapsed_time_ms=1,
+            )
+
+        monkeypatch.setattr(
+            "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+            lambda: metadata_store,
+        )
+        monkeypatch.setattr(
+            "xagent.web.jobs.kb_tasks.run_web_ingestion",
+            fake_run_web_ingestion,
+        )
+
+        with pytest.raises(BackgroundJobHandlerError, match="No pages were ingested"):
+            handle_kb_ingest_web(db, job)
+
+        metadata_store.save_collection_config.assert_not_awaited()
+    finally:
+        db.close()
+
+
 def test_background_web_file_new_branch_returns_rollback_callback(
     tmp_path, monkeypatch
 ):
