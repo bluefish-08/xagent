@@ -7,9 +7,10 @@ const toastErrorMock = vi.hoisted(() => vi.fn())
 const toastSuccessMock = vi.hoisted(() => vi.fn())
 const toastWarningMock = vi.hoisted(() => vi.fn())
 const inTeamMock = vi.hoisted(() => ({ value: false }))
+const authUserMock = vi.hoisted(() => ({ value: { id: "7" } as { id: string } | null }))
 
 vi.mock("@/contexts/auth-context", () => ({
-  useAuth: () => ({ inTeam: inTeamMock.value }),
+  useAuth: () => ({ inTeam: inTeamMock.value, user: authUserMock.value }),
 }))
 
 vi.mock("@/lib/api-wrapper", () => ({
@@ -208,6 +209,9 @@ function installApiMocks() {
     }
     if (url.endsWith("/reserve-team") || url.endsWith("/release-team-claim")) {
       return Promise.resolve(createJsonResponse(null, 204))
+    }
+    if (url === "http://api.local/api/knowledge-bases/team-status") {
+      return Promise.resolve(createJsonResponse([]))
     }
     if (url === "http://api.local/api/kb/ingest/jobs") {
       return Promise.resolve(
@@ -895,6 +899,47 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     // The choice the user actually made still reaches the server, which is the
     // only party that can say whether they are still in a team.
     expect(callsTo(RESERVE_URL)).toHaveLength(1)
+  })
+
+  it.each([
+    ["own bare claim", 7, true, "kb.ownership.nameHeldByYou"],
+    ["a teammate's bare claim", 99, true, "kb.ownership.nameHeldByTeammate"],
+    ["a built team knowledge base", 99, false, "kb.ownership.nameIsTeamKnowledgeBase"],
+  ])(
+    "warns on step 1 that the name is %s",
+    async (_label, createdBy, isEmpty, expected) => {
+      // A claim and a built KB are the same row server-side, so the warning has
+      // to name which one it is -- one says wait, the other says demote.
+      mockRoute(
+        (url) => url === "http://api.local/api/knowledge-bases/team-status",
+        () =>
+          createJsonResponse([
+            { name: "team-docs", created_by_user_id: createdBy, is_empty: isEmpty },
+          ])
+      )
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+
+      fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+        target: { value: "team-docs" },
+      })
+      expect(await screen.findByText(expected)).toBeInTheDocument()
+    }
+  )
+
+  it("says nothing about a name the team does not hold", async () => {
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "brand-new" },
+    })
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
+    })
+    expect(screen.queryByText("kb.ownership.nameHeldByTeammate")).toBeNull()
+    expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
   })
 
   it("keeps a way back to personal after team membership is lost for good", async () => {

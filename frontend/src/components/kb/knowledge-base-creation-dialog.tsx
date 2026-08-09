@@ -120,6 +120,27 @@ class RequestFailure extends Error {
 const failureStatus = (error: unknown, fromIngest?: number) =>
   fromIngest ?? (error instanceof RequestFailure ? error.status : undefined)
 
+interface TeamClaim {
+  name: string
+  created_by_user_id: number | null
+  is_empty: boolean
+}
+
+/** Which warning, if any, a name has already earned inside the caller's team.
+ *  Advisory only -- the server still arbitrates, this just moves the answer
+ *  ahead of the ingest instead of after it. */
+function teamNameNotice(
+  claims: TeamClaim[],
+  name: string,
+  userId: string | undefined
+): TranslationKey | null {
+  const claim = claims.find((held) => held.name === name)
+  if (!claim) return null
+  if (!claim.is_empty) return "kb.ownership.nameIsTeamKnowledgeBase"
+  const mine = claim.created_by_user_id !== null && String(claim.created_by_user_id) === userId
+  return mine ? "kb.ownership.nameHeldByYou" : "kb.ownership.nameHeldByTeammate"
+}
+
 const LEAKED_CLAIM_TOAST_DURATION = 12000
 
 const SELECTABLE_CARD_SIZES = {
@@ -223,7 +244,7 @@ interface KnowledgeBaseCreationDialogProps {
 
 export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: KnowledgeBaseCreationDialogProps) {
   const { t } = useI18n()
-  const { inTeam } = useAuth()
+  const { inTeam, user } = useAuth()
 
   // State from KnowledgeBasePage
   const [newCollectionName, setNewCollectionName] = useState("")
@@ -285,6 +306,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     retry_delay: 1.0
   })
 
+  // Names the team already holds, claim or built alike. Read once per open so a
+  // collision is visible on step 1 rather than after an ingest has run.
+  const [teamClaims, setTeamClaims] = useState<TeamClaim[]>([])
   // Embedding models state
   const [embeddingModels, setEmbeddingModels] = useState<Model[]>([])
   // The i18n key, not the message: rendering it through `t` follows a language switch.
@@ -298,6 +322,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       setNameError(null)
       setOwnership("personal")
       fetchEmbeddingModels()
+      fetchTeamClaims()
     }
   }, [open])
 
@@ -334,6 +359,20 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       window.clearInterval(interval)
     }
   }, [isUploading, currentUploadFileName, currentUploadCollection, completedUploadCount, selectedFiles.length])
+
+  /** Advisory only, and only inside a team: standalone builds have no such
+   *  route, so a failure here must leave creation entirely unaffected. */
+  const fetchTeamClaims = async () => {
+    if (!inTeam) return
+    try {
+      const response = await apiRequest(`${getApiUrl()}/api/knowledge-bases/team-status`)
+      if (!response.ok) return
+      const held = await response.json()
+      setTeamClaims(Array.isArray(held) ? held : [])
+    } catch {
+      // A missing or unhappy endpoint costs the warning, nothing else.
+    }
+  }
 
   const fetchEmbeddingModels = async () => {
     try {
@@ -1006,6 +1045,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     aria-invalid={nameError !== null}
                     aria-describedby={nameError ? "collection_name_error" : undefined}
                   />
+                  {!nameError && teamNameNotice(teamClaims, trimmedCollectionName, user?.id) && (
+                    <p className="mt-2 text-sm text-amber-600">
+                      {t(teamNameNotice(teamClaims, trimmedCollectionName, user?.id)!)}
+                    </p>
+                  )}
                   {nameError && (
                     <p id="collection_name_error" className="mt-2 text-sm text-destructive">
                       {t(nameError)}
