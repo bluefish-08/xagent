@@ -1886,7 +1886,6 @@ const zh = {
       personalSuccess: "知识库已转回个人。",
       failed: "更新知识库归属失败",
       reserveFailed: "无法为团队登记该名称",
-      reserveUnavailable: "当前服务端不支持团队知识库，将改为创建个人知识库。",
       releaseFailed: "该名称的团队登记未能释放；再次创建同名知识库会沿用这条登记。",
       personalDesc: "仅你自己可见",
       teamDesc: "团队成员都可见",

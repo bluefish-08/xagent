@@ -970,10 +970,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(onSuccess).not.toHaveBeenCalled()
   })
 
-  it("creates a personal knowledge base when the backend has no reserve endpoint", async () => {
-    // Deployment ordering: an overlay with the promote endpoints but not these
-    // answers 404. Failing here would leave the user with no knowledge base at
-    // all — worse than the personal one they used to get.
+  it("reports a missing reserve endpoint instead of quietly creating a personal KB", async () => {
+    // `inTeam` and these endpoints come from the same overlay, so a 404 means a
+    // deployment is mid-upgrade rather than a build without teams. The two
+    // existing callers of promote-team surface that; a silent downgrade would
+    // hand the user the ownership they did not pick and say nothing.
     const base = apiRequestMock.getMockImplementation()!
     apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
       url.endsWith("/reserve-team")
@@ -991,16 +992,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     fireEvent.click(screen.getByText("kb.dialog.createButton"))
 
     await waitFor(() => {
-      expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
+      expect(toastErrorMock).toHaveBeenCalled()
     })
-    // Warned only once the result is on screen, and long enough to outlive the
-    // success toast — an ingest runs far longer than a default toast.
-    expect(toastWarningMock).toHaveBeenCalledWith(
-      "kb.ownership.reserveUnavailable",
-      expect.objectContaining({ duration: 12000 }),
-    )
-    expect(toastErrorMock).not.toHaveBeenCalled()
-    // Nothing was claimed, so nothing may be released.
+    expect(onSuccess).not.toHaveBeenCalled()
+    // Nothing was ingested under an ownership the user did not ask for.
+    expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(0)
     expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 
