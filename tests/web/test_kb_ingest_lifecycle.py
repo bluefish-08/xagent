@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -243,14 +243,15 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
     api_helper.assert_not_called()
 
 
-def _vector_store_returning(records: Any) -> MagicMock:
-    """Vector store stub whose document listing drives failure-time scoping."""
-    store = MagicMock()
-    if isinstance(records, Exception):
-        store.list_document_records.side_effect = records
-    else:
-        store.list_document_records.return_value = records
-    return store
+def _records_lookup(records: Any):
+    """Stub for kb.list_document_records driving failure-time decisions."""
+
+    def _lookup(**kwargs: Any) -> Any:
+        if isinstance(records, Exception):
+            raise records
+        return records
+
+    return _lookup
 
 
 @pytest.mark.parametrize(
@@ -261,20 +262,55 @@ def _vector_store_returning(records: Any) -> MagicMock:
         (RuntimeError("vector store down"), True),
     ],
 )
-def test_collection_holds_other_documents_rechecks_at_failure_time(
+def test_collection_holds_documents_reads_at_decision_time(
     monkeypatch: pytest.MonkeyPatch,
     records: Any,
     expected: bool,
 ) -> None:
-    monkeypatch.setattr(
-        kb_module, "get_vector_index_store", lambda: _vector_store_returning(records)
-    )
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup(records))
 
     assert (
-        kb_module._collection_holds_other_documents(
+        kb_module._collection_holds_documents(
             collection_name="shared-kb",
             user_id=3,
             is_admin=False,
+            context="test",
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored_config", "expected"),
+    [
+        ('{"chunk_size": 512}', True),
+        (None, False),
+        (RuntimeError("config store down"), True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_collection_config_exists_reads_at_decision_time(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_config: Any,
+    expected: bool,
+) -> None:
+    async def _get_collection_config(**kwargs: Any) -> Any:
+        if isinstance(stored_config, Exception):
+            raise stored_config
+        return stored_config
+
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F", (), {"get_collection_config": staticmethod(_get_collection_config)}
+        )(),
+    )
+
+    assert (
+        await kb_module._collection_config_exists(
+            collection_name="shared-kb",
+            user_id=3,
             context="test",
         )
         is expected
@@ -289,11 +325,13 @@ async def test_rollback_keeps_collection_holding_a_sibling_document(
     from pathlib import Path
 
     delete_collection = MagicMock()
-    monkeypatch.setattr(
-        kb_module,
-        "get_vector_index_store",
-        lambda: _vector_store_returning([{"file_id": "sibling"}]),
-    )
+    store = MagicMock()
+    # A sibling document: same file_id (both ingests upserted the same path),
+    # different doc_id.
+    store.list_document_records.return_value = [
+        {"file_id": "file-1", "doc_id": "sibling-doc"}
+    ]
+    monkeypatch.setattr(kb_module, "get_vector_index_store", lambda: store)
     monkeypatch.setattr(kb_module, "delete_collection", delete_collection)
     monkeypatch.setattr(kb_module, "_restore_ingest_file_backup", MagicMock())
     monkeypatch.setattr(kb_module, "clear_ingestion_status", MagicMock())
@@ -308,7 +346,7 @@ async def test_rollback_keeps_collection_holding_a_sibling_document(
         db=MagicMock(),
         user=user,
         collection_name="shared-kb",
-        result=IngestionResult(status="error", message="failed", doc_id="doc-1"),
+        result=IngestionResult(status="error", message="failed", doc_id="my-doc"),
         file_path=Path("/tmp/does-not-matter.pdf"),
         file_record=file_record,
         collection_existed_before=False,
@@ -321,30 +359,107 @@ async def test_rollback_keeps_collection_holding_a_sibling_document(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_keeps_metadata_when_a_sibling_ingest_published_documents(
+async def test_rollback_keeps_collection_whose_config_a_sibling_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two ingests of the same path share a doc_id, so config is the second guard."""
+    from pathlib import Path
+
+    delete_collection = MagicMock()
+    store = MagicMock()
+    store.list_document_records.return_value = [
+        {"file_id": "file-1", "doc_id": "my-doc"}
+    ]
+    monkeypatch.setattr(kb_module, "get_vector_index_store", lambda: store)
+    monkeypatch.setattr(kb_module, "delete_collection", delete_collection)
+    monkeypatch.setattr(kb_module, "_restore_ingest_file_backup", MagicMock())
+    monkeypatch.setattr(kb_module, "clear_ingestion_status", MagicMock())
+
+    async def _published(**kwargs: Any) -> str:
+        return '{"chunk_size": 512}'
+
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type("F", (), {"get_collection_config": staticmethod(_published)})(),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+    file_record = MagicMock()
+    file_record.file_id = "file-1"
+
+    await kb_module._rollback_failed_ingestion(
+        db=MagicMock(),
+        user=user,
+        collection_name="shared-kb",
+        result=IngestionResult(status="error", message="failed", doc_id="my-doc"),
+        file_path=Path("/tmp/does-not-matter.pdf"),
+        file_record=file_record,
+        collection_existed_before=False,
+        uploaded_file_existed_before=True,
+        file_backup_path=None,
+        had_existing_file=False,
+    )
+
+    delete_collection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_metadata_when_the_collection_holds_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The stamped flag is stale; a config-only ghost holds no documents."""
-    cleanup = MagicMock()
+    delete_metadata = AsyncMock()
+    monkeypatch.setattr(
+        kb_module, "list_document_records", _records_lookup([{"file_id": "sibling"}])
+    )
     monkeypatch.setattr(
         kb_module,
-        "get_vector_index_store",
-        lambda: _vector_store_returning([{"file_id": "sibling"}]),
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F", (), {"delete_collection_metadata": staticmethod(delete_metadata)}
+        )(),
     )
-    monkeypatch.setattr(kb_module, "_cleanup_failed_new_collection_metadata", cleanup)
 
     user = User()
     user.id = 5
     user.is_admin = False
 
-    await kb_module._cleanup_collection_metadata_after_failed_ingest(
-        collection_existed_before=False,
+    await kb_module._cleanup_failed_new_collection_metadata(
         collection_name="shared-kb",
         user=user,
-        context="ingest",
     )
 
-    cleanup.assert_not_called()
+    delete_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_a_config_only_ghost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection with no documents is the ghost this cleanup exists for."""
+    delete_metadata = AsyncMock(return_value={"config_rows": 1})
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([]))
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F", (), {"delete_collection_metadata": staticmethod(delete_metadata)}
+        )(),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._cleanup_failed_new_collection_metadata(
+        collection_name="ghost-kb",
+        user=user,
+    )
+
+    delete_metadata.assert_awaited_once()
 
 
 def _web_result(documents_created: int) -> WebIngestionResult:

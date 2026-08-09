@@ -1029,7 +1029,28 @@ async def _cleanup_failed_new_collection_metadata(
     collection_name: str,
     user: User,
 ) -> None:
-    """Remove config rows left behind when a brand-new collection ingest fails."""
+    """Remove config rows left behind when a brand-new collection ingest fails.
+
+    Every caller reaches here from a stale `collection_existed_before`, so the
+    documents check is the last guard before a row a sibling ingest owns is
+    deleted by name.
+    """
+    # Read as the owner: the row is deleted by name, so an admin-wide read would
+    # let another tenant's documents block a cleanup that is legitimately ours.
+    if _collection_holds_documents(
+        collection_name=collection_name,
+        user_id=int(user.id),
+        is_admin=False,
+        context="failed-ingest metadata cleanup",
+    ):
+        logger.info(
+            "Skipping failed-ingest collection metadata cleanup for %s/user_%s "
+            "because the collection holds documents",
+            collection_name,
+            int(user.id),
+        )
+        return
+
     cleanup_result = await _get_api_compatibility_facade().delete_collection_metadata(
         collection_name=collection_name,
         user_id=int(user.id),
@@ -1043,24 +1064,65 @@ async def _cleanup_failed_new_collection_metadata(
     )
 
 
-def _collection_holds_other_documents(
+def _get_document_record_doc_id(record: Any) -> Optional[str]:
+    """Read a document record's ``doc_id``, dict-shaped or dataclass-shaped."""
+    value = (
+        record.get("doc_id")
+        if isinstance(record, dict)
+        else getattr(record, "doc_id", None)
+    )
+    return str(value) if value else None
+
+
+async def _collection_config_exists(
+    *,
+    collection_name: str,
+    user_id: int,
+    context: str,
+) -> bool:
+    """Whether a config row is already published for this collection."""
+    try:
+        config = await _get_api_compatibility_facade().get_collection_config(
+            collection=collection_name,
+            user_id=user_id,
+            is_admin=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Unreadable state must not authorize a destructive rollback.
+        logger.warning(
+            "Failed to read the collection config of %s/user_%s during %s: %s",
+            collection_name,
+            user_id,
+            context,
+            exc,
+        )
+        return True
+    return config is not None
+
+
+def _collection_holds_documents(
     *,
     collection_name: str,
     user_id: int,
     is_admin: bool,
     context: str,
 ) -> bool:
-    """Check at failure time for work this ingest must not destroy.
+    """Whether the collection currently holds any document.
 
-    `collection_existed_before` is stamped when the request or job is submitted,
-    so a sibling ingest into the same new collection can land documents after it
-    was read. A config-only ghost holds no documents and stays cleanable.
+    This is the single question behind both halves of the ingest lifecycle:
+    a collection with documents must be published and must never be cleaned up,
+    an empty one must be neither. Asking the store at decision time avoids
+    trusting `collection_existed_before`, which is stamped when the request or
+    job is submitted and goes stale while a sibling ingest runs.
+
+    Callers that roll back their own document must do so before asking.
     """
     try:
-        records = get_vector_index_store().list_document_records(
+        records = list_document_records(
             collection_name=collection_name,
             user_id=user_id,
             is_admin=is_admin,
+            max_results=1,
         )
     except Exception as exc:  # noqa: BLE001
         # Unreadable state must not authorize destructive cleanup.
@@ -1097,21 +1159,6 @@ async def _cleanup_collection_metadata_after_failed_ingest(
                 int(user.id),
                 context,
             )
-        return
-
-    if _collection_holds_other_documents(
-        collection_name=collection_name,
-        user_id=int(user.id),
-        is_admin=bool(user.is_admin),
-        context=context,
-    ):
-        logger.info(
-            "Skipping failed-ingest collection metadata cleanup for %s/user_%s "
-            "during %s because a concurrent ingest published documents",
-            collection_name,
-            int(user.id),
-            context,
-        )
         return
 
     await _cleanup_failed_new_collection_metadata(
@@ -1215,13 +1262,29 @@ async def _rollback_failed_ingestion(
             )
             if file_id
         }
-        # The flag is stamped at submission time: a sibling ingest into the same
-        # new collection may have landed documents that must survive.
+        # `collection_existed_before` is stamped when the request is submitted,
+        # so a sibling ingest into the same new collection may have landed a
+        # document or published the config since. Either one makes deleting the
+        # whole collection destructive; comparing doc_ids (not file_ids, which
+        # two ingests of the same path share) identifies what is ours.
         holds_other_documents = any(
-            file_id != file_record_id for file_id in collection_file_ids
+            _get_document_record_doc_id(record) != doc_id
+            for record in collection_records
+        )
+        config_published = (
+            not collection_existed_before
+            and await _collection_config_exists(
+                collection_name=collection_name,
+                user_id=user_id,
+                context="failed-ingest rollback",
+            )
         )
 
-        if not collection_existed_before and not holds_other_documents:
+        if (
+            not collection_existed_before
+            and not holds_other_documents
+            and not config_published
+        ):
             collection_delete_result = delete_collection(
                 collection_name,
                 user_id,
@@ -1287,15 +1350,14 @@ async def _rollback_failed_ingestion(
             return
 
         if register_created and doc_id:
-            document_delete_result = delete_document(
-                collection_name,
-                doc_id,
-                user_id,
-                bool(user.is_admin),
-            )
             _ensure_cleanup_succeeded(
                 f"delete document '{doc_id}' during rollback",
-                document_delete_result,
+                delete_document(
+                    collection_name,
+                    doc_id,
+                    user_id,
+                    bool(user.is_admin),
+                ),
             )
             remaining_records = vector_store.list_document_records(
                 collection_name=None,
@@ -3310,12 +3372,26 @@ async def _save_collection_config_after_ingest(
     user: User,
     context: str,
     documents_created: int,
+    collection_existed_before: bool = True,
 ) -> None:
     """Publish the collection config only once ingest actually produced documents.
 
     Saving it up front made a failed ingest leave a visible, empty collection.
+    A brand-new collection that produced nothing but could not roll back cleanly
+    still publishes: documents without a config row are invisible to their owner
+    and permanently block the name, which is worse than a visible collection.
+    A pre-existing collection is never republished by a failed run — that would
+    overwrite the settings its previous import saved.
     """
-    if documents_created <= 0:
+    if documents_created <= 0 and (
+        collection_existed_before
+        or not _collection_holds_documents(
+            collection_name=collection,
+            user_id=int(user.id),
+            is_admin=False,
+            context=context,
+        )
+    ):
         return
 
     try:
@@ -4034,6 +4110,7 @@ async def ingest(
             user=_user,
             context="ingest",
             documents_created=1,
+            collection_existed_before=collection_existed_before,
         )
 
         return JSONResponse(
@@ -4696,6 +4773,7 @@ async def ingest_cloud(
             user=_user,
             context="ingest_cloud",
             documents_created=successful_documents,
+            collection_existed_before=collection_existed_before,
         )
     except CollectionConfigSaveError as e:
         logger.error("Cloud ingestion could not publish collection config: %s", e)
@@ -5619,6 +5697,7 @@ async def ingest_web(
             user=_user,
             context="ingest_web",
             documents_created=int(result.documents_created or 0),
+            collection_existed_before=collection_existed_before,
         )
 
         if result.status == "error":

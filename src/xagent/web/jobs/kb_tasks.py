@@ -87,6 +87,9 @@ def _save_job_collection_config_after_ingest(
                 user=user,
                 context=context,
                 documents_created=documents_created,
+                collection_existed_before=bool(
+                    payload.get("collection_existed_before", True)
+                ),
             )
         )
     except CollectionConfigSaveError as exc:
@@ -397,11 +400,13 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
 
     from ..api.kb import _demote_empty_ingest_to_error
 
+    crawl_status = result.status
     api_result = _demote_empty_ingest_to_error(
         api_result,
         collection_existed_before=bool(payload.get("collection_existed_before", True)),
     )
     result = api_result.result
+    crawled_nothing = result.status != crawl_status
     documents_created = int(result.documents_created or 0)
     result_payload = result.model_dump(mode="json")
     # Partial crawls still leave real documents behind, so publish on any of them.
@@ -420,7 +425,13 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
             successful_documents=documents_created,
         )
     if result.status == "error":
-        raise BackgroundJobHandlerError(result.message, result=result_payload)
+        # A crawl that recorded no failures has nothing to retry: re-running it
+        # re-crawls the whole site to reach the same empty result.
+        raise BackgroundJobHandlerError(
+            result.message,
+            result=result_payload,
+            retryable=not crawled_nothing,
+        )
     return result_payload
 
 
