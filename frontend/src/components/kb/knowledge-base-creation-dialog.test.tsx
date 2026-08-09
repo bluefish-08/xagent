@@ -767,6 +767,49 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(callsTo(RESERVE_URL)).toHaveLength(0)
   })
 
+  it("stops reserving when the team context disappears while the dialog is open", async () => {
+    // A token refresh re-runs the team lookup, which drops `inTeam` until the
+    // request comes back — the ownership cards disappear with it.
+    const { container, rerender } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    expect(container.querySelector("#kb-ownership-team")?.getAttribute("aria-checked")).toBe("true")
+
+    inTeamMock.value = false
+    rerender(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
+    expect(container.querySelector("#kb-ownership-team")).toBeNull()
+
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    // A choice the user can no longer make or see must not be acted on.
+    expect(callsTo(RESERVE_URL)).toHaveLength(0)
+  })
+
+  it("forgets the ownership choice when the dialog is closed and reopened", async () => {
+    const { container, rerender } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    fireEvent.click(container.querySelector("#kb-ownership-team") as HTMLElement)
+    expect(container.querySelector("#kb-ownership-team")?.getAttribute("aria-checked")).toBe("true")
+
+    // Escape, the overlay and the close button all bypass `resetState`, so a
+    // stale Team would come back preselected in a dialog that looks fresh.
+    rerender(<KnowledgeBaseCreationDialog open={false} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
+    rerender(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
+
+    await waitFor(() => {
+      expect(container.querySelector("#kb-ownership-personal")?.getAttribute("aria-checked")).toBe("true")
+    })
+    expect(container.querySelector("#kb-ownership-team")?.getAttribute("aria-checked")).toBe("false")
+  })
+
   it("reserves the team name once, before the first of several file ingests", async () => {
     const onSuccess = vi.fn()
     const { container } = render(
@@ -876,7 +919,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith(
         "kb.errors.uploadFailed",
-        expect.objectContaining({ description: "kb.ownership.failed" })
+        expect.objectContaining({ description: "kb.ownership.reserveFailed" })
       )
     })
     // Ingesting anyway would write the files into personal storage under a name
@@ -1116,6 +1159,12 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         expect.objectContaining({ description: "kb.errors.nameTaken" })
       )
     })
+    // Same recovery as an empty name: step 1 is where the name can be changed,
+    // not step 3 with a toast and two "Previous" clicks.
+    const nameInput = container.querySelector("#collection_name")
+    expect(nameInput).not.toBeNull()
+    expect(nameInput?.getAttribute("aria-invalid")).toBe("true")
+    expect(screen.getByText("kb.errors.nameTaken")).toBeInTheDocument()
     expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 

@@ -29,6 +29,7 @@ import {
   normalizeKnowledgeBaseIngestionResult,
 } from "@/lib/kb-ingest-feedback"
 import { useI18n } from "@/contexts/i18n-context"
+import type { TranslationKey } from "@/i18n/translations"
 import { useAuth } from "@/contexts/auth-context"
 import { apiRequest, getUploadErrorMessage, isJsonRecord, parseApiResponse, UPLOAD_ERROR_MESSAGES } from "@/lib/api-wrapper"
 import { Model } from "@/lib/models"
@@ -269,15 +270,16 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
   // Embedding models state
   const [embeddingModels, setEmbeddingModels] = useState<Model[]>([])
-  // Flag only: the message itself stays in i18n so it follows a language switch.
-  const [nameError, setNameError] = useState(false)
+  // The i18n key, not the message: rendering it through `t` follows a language switch.
+  const [nameError, setNameError] = useState<TranslationKey | null>(null)
   const trimmedCollectionName = newCollectionName.trim()
 
   useEffect(() => {
     if (open) {
       // Clearing on open covers every close path (cancel, escape, overlay, the
       // close button), which `resetState` alone does not.
-      setNameError(false)
+      setNameError(null)
+      setOwnership("personal")
       fetchEmbeddingModels()
     }
   }, [open])
@@ -415,27 +417,38 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
   }
 
+  /** Step 1 is the only step showing the name field, so a rejected name has to
+   *  send the user back there rather than leave them on a later step. */
+  const rejectName = (messageKey: TranslationKey) => {
+    setNameError(messageKey)
+    setCurrentStep(1)
+  }
+
   /** Every way forward out of step 1 goes through here, so no later step ever
    *  has to invent a collection name. Returns false when the name is missing. */
   const requireCollectionName = () => {
     if (trimmedCollectionName) return true
     toast.error(t("kb.errors.nameRequired"))
-    setNameError(true)
-    setCurrentStep(1)
+    rejectName("kb.errors.nameRequired")
     return false
   }
 
   /** Ownership is resolved before the first byte is written, so a team knowledge
-   *  base has to claim its name up front or the files land in personal storage. */
+   *  base has to claim its name up front or the files land in personal storage.
+   *  `inTeam` is re-read here because a token refresh can drop the team context
+   *  while the dialog is open, taking the ownership cards with it. */
   const reserveTeamName = async (collection: string) => {
-    if (ownership !== "team") return false
+    if (!inTeam || ownership !== "team") return false
     const response = await apiRequest(
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
       { method: "POST" },
     )
     // Collection names are global, so 409 means someone already owns this one.
-    if (response.status === 409) throw new Error(t("kb.errors.nameTaken"))
-    if (!response.ok) throw new Error(t("kb.ownership.failed"))
+    if (response.status === 409) {
+      rejectName("kb.errors.nameTaken")
+      throw new Error(t("kb.errors.nameTaken"))
+    }
+    if (!response.ok) throw new Error(t("kb.ownership.reserveFailed"))
     return true
   }
 
@@ -942,17 +955,17 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     value={newCollectionName}
                     onChange={(e) => {
                       setNewCollectionName(e.target.value)
-                      setNameError(false)
+                      setNameError(null)
                     }}
                     placeholder={t("kb.dialog.basicInfo.namePlaceholder")}
                     className="mt-1.5"
                     aria-required="true"
-                    aria-invalid={nameError}
+                    aria-invalid={nameError !== null}
                     aria-describedby={nameError ? "collection_name_error" : undefined}
                   />
                   {nameError && (
                     <p id="collection_name_error" className="mt-2 text-sm text-destructive">
-                      {t("kb.errors.nameRequired")}
+                      {t(nameError)}
                     </p>
                   )}
                 </div>
