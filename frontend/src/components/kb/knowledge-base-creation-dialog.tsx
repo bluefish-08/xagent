@@ -108,6 +108,8 @@ function buildWebIngestionErrorResult(
   }
 }
 
+const LEAKED_CLAIM_TOAST_DURATION = 12000
+
 const SELECTABLE_CARD_SIZES = {
   sm: { card: "p-4 gap-1", icon: "w-5 h-5 mb-1", label: "text-sm" },
   md: { card: "p-6 gap-2", icon: "w-6 h-6 mb-2", label: "text-base" },
@@ -479,7 +481,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     } catch (error) {
       console.warn("Failed to release team claim:", error)
     }
-    toast.warning(t("kb.ownership.releaseFailed"))
+    // Outlives the ingest error toast (8s) stacked with it: this is the only
+    // signal that a team claim leaked, and no other UI can surface it later.
+    toast.warning(t("kb.ownership.releaseFailed"), { duration: LEAKED_CLAIM_TOAST_DURATION })
   }
 
   const resetState = () => {
@@ -644,7 +648,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.(successfulCollections)
 
     } catch (err) {
-      if (teamReserved) await releaseTeamName(trimmedCollectionName)
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.uploadFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -656,6 +659,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
+      // After the toast: releasing has no timeout, and the user should not wait
+      // on a slow network to be told why the ingest failed.
+      if (teamReserved) await releaseTeamName(trimmedCollectionName)
       if (successfulCollections.length > 0) {
         onSuccess?.(successfulCollections)
       }
@@ -782,7 +788,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onSuccess?.([collectionName])
 
     } catch (err) {
-      if (teamReserved) await releaseTeamName(collectionName)
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.webIngestFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -792,6 +797,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
+      if (teamReserved) await releaseTeamName(collectionName)
     } finally {
       setIsWebIngesting(false)
       setWebIngestionProgress(0)
@@ -898,7 +904,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
-      if (teamReserved) await releaseTeamName(collectionName)
       console.error("Cloud ingest error:", error)
       const rawMessage = error instanceof Error
         ? error.message
@@ -914,6 +919,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
+      if (teamReserved) await releaseTeamName(collectionName)
     } finally {
       setIsCloudConnecting(false)
     }

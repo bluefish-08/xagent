@@ -1042,6 +1042,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       expect.objectContaining({ description: "ingest blew up" })
     )
     expect(toastWarningMock).not.toHaveBeenCalled()
+    // Releasing has no timeout, so it must not sit between the failure and the
+    // toast explaining it.
+    expect(toastErrorMock.mock.invocationCallOrder[0]).toBeLessThan(
+      apiRequestMock.mock.invocationCallOrder[firstCallIndex((url) => url === RELEASE_URL)]
+    )
   })
 
   it.each([
@@ -1098,6 +1103,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         title,
         expect.objectContaining({ description: message })
       )
+      // Releasing has no timeout, so it must not sit between the failure and
+      // the toast explaining it.
+      expect(toastErrorMock.mock.invocationCallOrder[0]).toBeLessThan(
+        apiRequestMock.mock.invocationCallOrder[firstCallIndex((url) => url === RELEASE_URL)]
+      )
       expect(toastWarningMock).not.toHaveBeenCalled()
     } finally {
       consoleErrorSpy.mockRestore()
@@ -1108,6 +1118,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
   // thing: the name is still claimed and nobody would otherwise notice.
   it.each([
     ["a 403 response", () => Promise.resolve(createJsonResponse({ detail: "forbidden" }, 403))],
+    ["a 404 response", () => Promise.resolve(createJsonResponse({ detail: "no claim" }, 404))],
     ["a rejected request", () => Promise.reject(new Error("rollback exploded"))],
   ])("warns, but does not mask the ingest error, on %s from the release", async (_label, release) => {
     const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -1144,8 +1155,14 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       fireEvent.click(screen.getByText("kb.dialog.createButton"))
 
       await waitFor(() => {
-        expect(toastWarningMock).toHaveBeenCalledWith("kb.ownership.releaseFailed")
+        expect(toastWarningMock).toHaveBeenCalledWith(
+          "kb.ownership.releaseFailed",
+          // Longer than the 8s the wrapper forces on every error toast, or the
+          // error stacked over this one outlives the only leak signal there is.
+          expect.objectContaining({ duration: expect.any(Number) })
+        )
       })
+      expect(toastWarningMock.mock.calls[0][1].duration).toBeGreaterThan(8000)
       expect(toastErrorMock).toHaveBeenCalledWith(
         "kb.errors.uploadFailed",
         expect.objectContaining({ description: "ingest blew up" })
