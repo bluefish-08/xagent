@@ -357,7 +357,7 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     expect(screen.queryByText("kb.errors.nameRequired")).toBeNull()
   })
 
-  it("keeps the step body clear of the step indicator", async () => {
+  it("still passes the step-body padding through to the stepper", async () => {
     // The stepper carries no bottom margin any more and every step body passed
     // to it is empty, so this padding is the whole gap.
     render(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
@@ -1299,6 +1299,33 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 
+  it.each(["web", "cloud"] as const)(
+    "sends no %s ingest at all when the reservation is refused",
+    async (tab) => {
+      // Only the file path covered this. A refactor moving reserveTeamName after
+      // the ingest call on these two paths would otherwise stay green.
+      mockRoute(
+        (url) => url === RESERVE_URL,
+        () => createJsonResponse({ detail: "taken" }, 409)
+      )
+      const onSuccess = vi.fn()
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+      )
+      nameAndChooseTeam(container)
+      await goToStep3(container, tab)
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+      await waitFor(() => {
+        expect(callsTo(RESERVE_URL)).toHaveLength(1)
+      })
+      expect(
+        apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/kb/ingest"))
+      ).toHaveLength(0)
+      expect(onSuccess).not.toHaveBeenCalled()
+    }
+  )
+
   it("does not ingest at all when the reservation is refused", async () => {
     apiRequestMock.mockImplementation((url: string) => {
       if (url === "http://api.local/api/models/?category=embedding") {
@@ -1667,8 +1694,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
 
     await waitFor(() => {
       // "Failed to update ownership" would hide the one thing the user can act
-      // on: the name is taken, pick another. A reserve-time 409 now carries its
-      // status to the same classifier an ingest-time 409 reaches.
+      // on: the name is taken, pick another. A reserve-time 409 carries its
+      // status to the same classifier an ingest-time 409 reaches, and the field
+      // error under the input says the same thing as the toast.
       expect(toastErrorMock).toHaveBeenCalledWith(
         "kb.errors.nameUnavailable",
         expect.objectContaining({ description: "kb.errors.nameUnavailableHint" })
@@ -1679,7 +1707,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     const nameInput = container.querySelector("#collection_name")
     expect(nameInput).not.toBeNull()
     expect(nameInput?.getAttribute("aria-invalid")).toBe("true")
-    expect(screen.getByText("kb.errors.nameTaken")).toBeInTheDocument()
+    // One sentence, two channels: the field error mirrors the toast rather than
+    // wording the same 409 differently.
+    expect(screen.getByText("kb.errors.nameUnavailableHint")).toBeInTheDocument()
     expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 

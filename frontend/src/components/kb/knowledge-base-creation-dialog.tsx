@@ -540,12 +540,15 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // Only a 4xx is the server saying it did not take the claim. A 5xx is as
     // ambiguous as the throw above -- the write may well have committed.
     claimed.current = response.ok ? "held" : response.status >= 500 ? "unconfirmed" : "none"
-    // 409 means the name is held by someone else -- another tenant's collection,
-    // or a teammate's reservation. The caller's own reservation answers 204, so a
-    // retry after a failed release reuses it rather than landing here.
+    // 409 means the name is taken -- another tenant's collection, a teammate's
+    // reservation, or possibly one of our own left behind by a release that
+    // failed. This client cannot tell them apart, so it says only what it knows:
+    // pick another name.
     if (response.status === 409) {
-      rejectName("kb.errors.nameTaken")
-      throw new RequestFailure(t("kb.errors.nameTaken"), response.status)
+      // Both channels carry the same sentence: the field error is for a user
+      // already back on step 1, the toast for one still on step 3.
+      rejectName("kb.errors.nameUnavailableHint")
+      throw new RequestFailure(t("kb.errors.nameUnavailable"), response.status)
     }
     if (!response.ok) {
       const parsed = await parseApiResponse(response)

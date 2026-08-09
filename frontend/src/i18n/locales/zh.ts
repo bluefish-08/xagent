@@ -1889,7 +1889,7 @@ const zh = {
       nameHeldByYou: "你已登记过该名称，现在创建会沿用这条登记。",
       nameHeldByTeammate: "队友已登记该名称。请他们释放，或另取一个。",
       nameIsTeamKnowledgeBase: "团队里已经有同名的知识库。",
-      releaseFailed: "该名称的团队登记未能释放；再次创建同名知识库会沿用这条登记。",
+      releaseFailed: "该名称的团队登记未能释放，可能需要团队管理员清理。",
       personalDesc: "仅你自己可见",
       teamDesc: "团队成员都可见",
     },
