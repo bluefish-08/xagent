@@ -108,6 +108,18 @@ function buildWebIngestionErrorResult(
   }
 }
 
+/** Carries the response status out of a helper, so a failure detected before
+ *  the ingest request reaches the same toast classifier one detected during it
+ *  does -- otherwise a reserve-time 409 loses the "pick another name" advice. */
+class RequestFailure extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message)
+  }
+}
+
+const failureStatus = (error: unknown, fromIngest?: number) =>
+  fromIngest ?? (error instanceof RequestFailure ? error.status : undefined)
+
 const LEAKED_CLAIM_TOAST_DURATION = 12000
 
 const SELECTABLE_CARD_SIZES = {
@@ -460,11 +472,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // retry after a failed release reuses it rather than landing here.
     if (response.status === 409) {
       rejectName("kb.errors.nameTaken")
-      throw new Error(t("kb.errors.nameTaken"))
+      throw new RequestFailure(t("kb.errors.nameTaken"), response.status)
     }
     if (!response.ok) {
       const parsed = await parseApiResponse(response)
-      throw new Error(getApiErrorMessage(response, parsed, t("kb.ownership.reserveFailed")))
+      throw new RequestFailure(
+        getApiErrorMessage(response, parsed, t("kb.ownership.reserveFailed")),
+        response.status,
+      )
     }
     return true
   }
@@ -659,7 +674,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         getKnowledgeBaseToastCopy(t, t("kb.errors.uploadFailed")),
         // Creating a knowledge base: the ingest endpoints answer 409 only when the
         // chosen name is already taken.
-        { status: failedStatus, adviseRename: true }
+        { status: failureStatus(err, failedStatus), adviseRename: true }
       )
       toast.error(toastContent.title, {
         description: toastContent.description,
@@ -797,7 +812,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
         getKnowledgeBaseToastCopy(t, t("kb.errors.webIngestFailed")),
-        { status: failedStatus, adviseRename: true }
+        { status: failureStatus(err, failedStatus), adviseRename: true }
       )
       toast.error(toastContent.title, {
         description: toastContent.description,
@@ -919,7 +934,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           t,
           t("kb.errors.cloudIngestFailed")
         ),
-        { status: failedStatus, adviseRename: true }
+        { status: failureStatus(error, failedStatus), adviseRename: true }
       )
       toast.error(toastContent.title, {
         description: toastContent.description,
@@ -1007,7 +1022,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     className="mt-1.5 h-32"
                   />
                 </div>
-                {inTeam && (
+                {/* Also rendered once Team is chosen, whatever `inTeam` says
+                    afterwards. Losing membership for good would otherwise take
+                    the control away while every submit still tried to reserve,
+                    leaving no way back to Personal short of reopening. */}
+                {(inTeam || ownership === "team") && (
                   <div className="space-y-1.5">
                     <Label id="kb-ownership-label">{t("kb.ownership.label")}</Label>
                     <SelectableCardGroup

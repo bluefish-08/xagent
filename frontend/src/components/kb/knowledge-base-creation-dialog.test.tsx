@@ -882,7 +882,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
 
     inTeamMock.value = false
     rerender(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
-    expect(container.querySelector("#kb-ownership-team")).toBeNull()
+    // The cards stay put while Team is the choice, so the refresh cannot strand
+    // the user on a selection they can no longer see or change.
+    expect(container.querySelector("#kb-ownership-team")?.getAttribute("aria-checked")).toBe("true")
 
     await goToStep3(container, "file")
     fireEvent.click(screen.getByText("kb.dialog.createButton"))
@@ -893,6 +895,32 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     // The choice the user actually made still reaches the server, which is the
     // only party that can say whether they are still in a team.
     expect(callsTo(RESERVE_URL)).toHaveLength(1)
+  })
+
+  it("keeps a way back to personal after team membership is lost for good", async () => {
+    // The control is normally gated on inTeam. Losing membership permanently
+    // would take it away while every submit still reserved, with no way out of
+    // the choice short of closing the dialog.
+    const { container, rerender } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+
+    inTeamMock.value = false
+    rerender(<KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />)
+
+    const personal = container.querySelector("#kb-ownership-personal") as HTMLElement
+    expect(personal).not.toBeNull()
+    fireEvent.click(personal)
+
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    expect(callsTo(RESERVE_URL)).toHaveLength(0)
+    // Once back on personal the control is gated on inTeam again.
+    expect(container.querySelector("#kb-ownership-personal")).toBeNull()
   })
 
   it("forgets the ownership choice when the dialog is closed and reopened", async () => {
@@ -1358,10 +1386,11 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
 
     await waitFor(() => {
       // "Failed to update ownership" would hide the one thing the user can act
-      // on: the name is taken, pick another.
+      // on: the name is taken, pick another. A reserve-time 409 now carries its
+      // status to the same classifier an ingest-time 409 reaches.
       expect(toastErrorMock).toHaveBeenCalledWith(
-        "kb.errors.uploadFailed",
-        expect.objectContaining({ description: "kb.errors.nameTaken" })
+        "kb.errors.nameUnavailable",
+        expect.objectContaining({ description: "kb.errors.nameUnavailableHint" })
       )
     })
     // Same recovery as an empty name: step 1 is where the name can be changed,
