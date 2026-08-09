@@ -1372,9 +1372,13 @@ def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
             fake_run_web_ingestion,
         )
 
-        with pytest.raises(BackgroundJobHandlerError, match="No pages were ingested"):
+        with pytest.raises(
+            BackgroundJobHandlerError, match="No pages were ingested"
+        ) as excinfo:
             handle_kb_ingest_web(db, job)
 
+        # Retrying re-crawls the whole site to reach the same empty result.
+        assert excinfo.value.retryable is False
         metadata_store.save_collection_config.assert_not_awaited()
     finally:
         db.close()

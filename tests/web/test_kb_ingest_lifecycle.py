@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -91,7 +92,7 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
     user = User()
     user.id = 7
 
-    updated = await kb_module._cleanup_collection_metadata_after_failed_api_ingest(
+    await kb_module._cleanup_collection_metadata_after_failed_api_ingest(
         api_result=api_result,
         collection_existed_before=True,
         collection_name="demo",
@@ -101,9 +102,12 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
         rollback_complete=False,
     )
 
-    assert updated.rollback_complete is False
     assert facade.rollback_complete_inputs == [(api_result, False)]
-    assert facade.single_cleanup_inputs == [(updated, 1)]
+    # The decision reads the result carrying the rollback outcome, not the input.
+    assert len(facade.single_cleanup_inputs) == 1
+    decided_on, decided_documents = facade.single_cleanup_inputs[0]
+    assert decided_on.rollback_complete is False
+    assert decided_documents == 1
     assert restore_calls == [
         {
             "collection_existed_before": True,
@@ -494,27 +498,35 @@ def test_empty_ingest_is_demoted_to_error(
             (),
             {
                 "with_result": staticmethod(
-                    lambda api_result, result: KBApiOperationResult(result=result)
+                    lambda api_result, result: KBApiOperationResult(
+                        result=result,
+                        operation_outcome=api_result.operation_outcome,
+                        rollback_complete=api_result.rollback_complete,
+                    )
                 )
             },
         )(),
     )
     api_result = KBApiOperationResult(result=_web_result(0))
 
-    demoted = kb_module._demote_empty_ingest_to_error(
+    api_result = KBApiOperationResult(result=api_result.result, rollback_complete=False)
+    demoted_result = kb_module._demote_empty_crawl_to_error(
         api_result,
         collection_existed_before=collection_existed_before,
-    ).result
+    )
+    demoted = demoted_result.result
 
     assert demoted.status == "error"
     assert expected_outcome in demoted.message
+    # The cleanup decision reads rollback_complete, so demotion must not drop it.
+    assert demoted_result.rollback_complete is False
 
 
 def test_successful_ingest_is_not_demoted() -> None:
     api_result = KBApiOperationResult(result=_web_result(2))
 
     assert (
-        kb_module._demote_empty_ingest_to_error(
+        kb_module._demote_empty_crawl_to_error(
             api_result, collection_existed_before=False
         )
         is api_result
@@ -548,3 +560,158 @@ def test_job_config_save_failure_is_not_retryable(
         )
 
     assert excinfo.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected_extras"),
+    [
+        (
+            '{"chunk_size": 111, "rerank_model_id": "bge-reranker"}',
+            {"rerank_model_id": "bge-reranker"},
+        ),
+        ('{"chunk_size": 111}', {}),
+        (None, {}),
+        ("not json", {}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_config_merge_keeps_settings_this_ingest_does_not_own(
+    monkeypatch: pytest.MonkeyPatch,
+    existing: Any,
+    expected_extras: dict[str, Any],
+) -> None:
+    """A rerank binding saved while the ingest ran must survive the config write."""
+
+    async def _get_collection_config(**kwargs: Any) -> Any:
+        return existing
+
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F", (), {"get_collection_config": staticmethod(_get_collection_config)}
+        )(),
+    )
+
+    merged = json.loads(
+        await kb_module._config_json_preserving_extras(
+            collection="kb",
+            config_json='{"chunk_size": 2048}',
+            user_id=1,
+            context="test",
+        )
+    )
+
+    assert merged["chunk_size"] == 2048
+    for key, value in expected_extras.items():
+        assert merged[key] == value
+    if not expected_extras:
+        assert set(merged) == {"chunk_size"}
+
+
+@pytest.mark.asyncio
+async def test_config_save_failure_does_not_claim_the_import_must_be_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documents are listed, so re-importing would only duplicate them."""
+
+    async def _failing_save(**kwargs: Any) -> None:
+        raise RuntimeError("config store down")
+
+    async def _no_existing_config(**kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F",
+            (),
+            {
+                "save_collection_config": staticmethod(_failing_save),
+                "get_collection_config": staticmethod(_no_existing_config),
+            },
+        )(),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    with pytest.raises(kb_module.CollectionConfigSaveError) as excinfo:
+        await kb_module._save_collection_config_after_ingest(
+            collection="q3",
+            config_json='{"chunk_size": 2048}',
+            user=user,
+            context="ingest",
+            documents_created=1,
+        )
+
+    message = str(excinfo.value)
+    assert "Do not re-import" in message
+    assert "stays hidden" not in message
+
+
+@pytest.mark.parametrize(
+    ("collection_existed_before", "should_publish"),
+    [(False, True), (True, False)],
+)
+@pytest.mark.asyncio
+async def test_documents_left_by_an_incomplete_rollback_are_published(
+    monkeypatch: pytest.MonkeyPatch,
+    collection_existed_before: bool,
+    should_publish: bool,
+) -> None:
+    """Documents with no config row are invisible and block the name.
+
+    A pre-existing collection is exempt: republishing would overwrite settings
+    its previous import saved.
+    """
+    save = AsyncMock()
+    monkeypatch.setattr(
+        kb_module, "list_document_records", _records_lookup([{"file_id": "leftover"}])
+    )
+
+    async def _no_existing_config(**kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: type(
+            "F",
+            (),
+            {
+                "save_collection_config": staticmethod(save),
+                "get_collection_config": staticmethod(_no_existing_config),
+            },
+        )(),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._save_collection_config_after_ingest(
+        collection="kb",
+        config_json='{"chunk_size": 2048}',
+        user=user,
+        context="ingest_web",
+        documents_created=0,
+        collection_existed_before=collection_existed_before,
+    )
+
+    assert save.await_count == (1 if should_publish else 0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [({}, True), ({"collection_existed_before": False}, False)],
+)
+def test_missing_flag_defaults_to_pre_existing(
+    payload: dict[str, Any], expected: bool
+) -> None:
+    """An absent flag must not authorize cleanup of someone else's collection."""
+    from xagent.web.jobs import kb_tasks
+
+    assert kb_tasks._collection_existed_before(payload) is expected

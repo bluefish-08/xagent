@@ -2526,10 +2526,15 @@ def test_kb_ingest_success_publishes_collection_config(test_env, temp_uploads) -
     metadata_store.delete_collection_metadata.assert_not_awaited()
 
 
-def test_kb_ingest_config_only_collection_failure_keeps_previous_config(
+def test_kb_ingest_config_only_collection_failure_drops_ghost_config(
     test_env, temp_uploads
 ) -> None:
-    """A ghost config row from an earlier failure must survive a new failed ingest."""
+    """A failed ingest must not republish the config of a config-only ghost.
+
+    Removing the ghost itself is the rollback's job, covered by
+    ``test_cleanup_removes_a_config_only_ghost`` in test_kb_ingest_lifecycle.py;
+    the rollback is stubbed here so this test pins only the publish decision.
+    """
     from xagent.core.tools.core.RAG_tools.core.schemas import IngestionResult
 
     app, headers, _user, _ = test_env
@@ -2572,7 +2577,6 @@ def test_kb_ingest_config_only_collection_failure_keeps_previous_config(
 
     assert response.status_code == 500
     metadata_store.save_collection_config.assert_not_awaited()
-    metadata_store.delete_collection_metadata.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4971,5 +4975,5 @@ def test_kb_ingest_cloud_empty_batch_is_rejected(test_env) -> None:
             headers=headers,
         )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     metadata_store.save_collection_config.assert_not_awaited()

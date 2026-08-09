@@ -39,6 +39,19 @@ class AgentKnowledgeBaseService:
             is_admin=self.is_admin,
         )
 
+    async def publish_collection(
+        self,
+        collection_name: str,
+        ingestion_config: IngestionConfig,
+    ) -> None:
+        """Make the knowledge base visible; call only once it holds documents."""
+        await _get_tool_compatibility_facade().publish_agent_collection(
+            collection_name=collection_name,
+            ingestion_config=ingestion_config,
+            user_id=self.user_id,
+            is_admin=self.is_admin,
+        )
+
     async def refresh_collection_metadata(self, collection_name: str) -> None:
         await _get_tool_compatibility_facade().refresh_agent_collection_metadata(
             collection_name,
@@ -53,29 +66,41 @@ async def _prepare_collection_impl(
     ingestion_config: IngestionConfig,
     user_id: int,
 ) -> str:
+    """Resolve the target collection name without publishing it.
+
+    The config row is what makes a knowledge base appear in the list, so it is
+    written by :func:`_publish_collection_impl` once the ingest produced
+    documents. Writing it here left a failed ingest permanently visible and empty.
+    """
     from .....web.config import sanitize_path_component
+
+    return sanitize_path_component(collection_name, "collection")
+
+
+async def _publish_collection_impl(
+    *,
+    collection_name: str,
+    ingestion_config: IngestionConfig,
+    user_id: int,
+) -> None:
     from ...core.RAG_tools.storage.factory import get_metadata_store
 
-    safe_collection = sanitize_path_component(collection_name, "collection")
     metadata_store = get_metadata_store()
-
     try:
         await metadata_store.save_collection_config(
-            collection=safe_collection,
+            collection=collection_name,
             config_json=ingestion_config.model_dump_json(exclude_unset=True),
             user_id=user_id,
         )
     except Exception as exc:
         logger.error(
             "Failed to save collection config for agent knowledge base %s: %s",
-            safe_collection,
+            collection_name,
             exc,
         )
         raise AgentKnowledgeBaseError(
-            f"Failed to save collection config for knowledge base '{safe_collection}'"
+            f"Failed to save collection config for knowledge base '{collection_name}'"
         ) from exc
-
-    return safe_collection
 
 
 async def _refresh_collection_metadata_impl(

@@ -50,6 +50,16 @@ def _get_api_compatibility_facade() -> KBApiCompatibilityFacade:
     return get_kb_coordinator().api_compatibility
 
 
+def _collection_existed_before(payload: dict[str, Any]) -> bool:
+    """Read the flag stamped when the job was submitted.
+
+    It only ever narrows what a failure may clean up; the destructive paths in
+    api/kb.py re-check the collection itself, because this value goes stale
+    while a sibling ingest runs.
+    """
+    return bool(payload.get("collection_existed_before", True))
+
+
 def _get_job_user(
     db: Session,
     payload: dict[str, Any],
@@ -87,9 +97,7 @@ def _save_job_collection_config_after_ingest(
                 user=user,
                 context=context,
                 documents_created=documents_created,
-                collection_existed_before=bool(
-                    payload.get("collection_existed_before", True)
-                ),
+                collection_existed_before=_collection_existed_before(payload),
             )
         )
     except CollectionConfigSaveError as exc:
@@ -118,9 +126,7 @@ def _cleanup_failed_job_collection_metadata(
 
     asyncio.run(
         _cleanup_collection_metadata_after_failed_ingest(
-            collection_existed_before=bool(
-                payload.get("collection_existed_before", True)
-            ),
+            collection_existed_before=_collection_existed_before(payload),
             collection_name=str(payload["collection"]),
             user=user,
             context=context,
@@ -152,9 +158,7 @@ def _cleanup_failed_job_collection_metadata_after_api_ingest(
     asyncio.run(
         _cleanup_collection_metadata_after_failed_api_ingest(
             api_result=api_result,
-            collection_existed_before=bool(
-                payload.get("collection_existed_before", True)
-            ),
+            collection_existed_before=_collection_existed_before(payload),
             collection_name=str(payload["collection"]),
             user=user,
             context=context,
@@ -398,12 +402,12 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
         _cleanup_failed_web_collection_metadata_if_new(db, payload)
         raise
 
-    from ..api.kb import _demote_empty_ingest_to_error
+    from ..api.kb import _demote_empty_crawl_to_error
 
     crawl_status = result.status
-    api_result = _demote_empty_ingest_to_error(
+    api_result = _demote_empty_crawl_to_error(
         api_result,
-        collection_existed_before=bool(payload.get("collection_existed_before", True)),
+        collection_existed_before=_collection_existed_before(payload),
     )
     result = api_result.result
     crawled_nothing = result.status != crawl_status
@@ -806,9 +810,7 @@ def _rollback_failed_document_ingestion(
                 result=result,
                 file_path=Path(str(payload["source_path"])),
                 file_record=file_record,
-                collection_existed_before=bool(
-                    payload.get("collection_existed_before", True)
-                ),
+                collection_existed_before=_collection_existed_before(payload),
                 uploaded_file_existed_before=bool(
                     payload.get("uploaded_file_existed_before", True)
                 ),

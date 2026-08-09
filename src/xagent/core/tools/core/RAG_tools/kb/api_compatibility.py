@@ -523,17 +523,6 @@ class KBApiCompatibilityFacade:
                 ),
             )
 
-    async def delete_collection_metadata_entry(self, collection_name: str) -> bool:
-        """Delete the collection metadata row when the store supports it."""
-        with self._storage_context():
-            from ..storage.factory import get_metadata_store
-
-            delete_metadata = getattr(get_metadata_store(), "delete_collection", None)
-            if not callable(delete_metadata):
-                return False
-            await _maybe_await(delete_metadata(collection_name))
-            return True
-
     def list_collection_config_owner_ids(self, collection_name: str) -> set[int]:
         """List tenant config owners through the facade-bound metadata store."""
         with self._storage_context():

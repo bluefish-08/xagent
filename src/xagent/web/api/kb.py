@@ -1176,7 +1176,7 @@ async def _cleanup_collection_metadata_after_failed_api_ingest(
     context: str,
     successful_documents: int | None = None,
     rollback_complete: bool | None = None,
-) -> KBApiOperationResult[Any]:
+) -> None:
     """Apply failed-ingest config cleanup using API rollback outcome semantics."""
     if rollback_complete is not None:
         api_result = _get_api_compatibility_facade().with_rollback_complete(
@@ -1195,7 +1195,6 @@ async def _cleanup_collection_metadata_after_failed_api_ingest(
         successful_documents=cleanup_decision.successful_documents,
         side_effects_may_remain=cleanup_decision.side_effects_may_remain,
     )
-    return api_result
 
 
 async def _cleanup_collection_metadata_after_failed_batch_api_ingest(
@@ -3217,6 +3216,9 @@ def handle_kb_exceptions(func: T) -> T:
         except RollbackFailureError as e:
             logger.error("KB rollback failure in %s: %s", func.__name__, e)
             raise HTTPException(status_code=500, detail=str(e))
+        except CollectionConfigSaveError as e:
+            logger.error("KB config publish failure in %s: %s", func.__name__, e)
+            raise HTTPException(status_code=500, detail=str(e))
         except (ValueError, KeyError, TypeError) as e:
             logger.error("Data format error in %s: %s", func.__name__, e)
             raise HTTPException(status_code=400, detail=f"Data format error: {str(e)}")
@@ -3308,7 +3310,8 @@ class CloudFile(BaseModel):
 
 
 class CloudIngestRequest(BaseModel):
-    files: List[CloudFile]
+    # An empty batch ingests nothing, so it must not reach the handler at all.
+    files: List[CloudFile] = Field(..., min_length=1)
     collection: str
     parse_method: Optional[ParseMethod] = None
     chunk_strategy: Optional[ChunkStrategy] = None
@@ -3335,15 +3338,17 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _demote_empty_ingest_to_error(
-    api_result: KBApiOperationResult[Any],
+def _demote_empty_crawl_to_error(
+    api_result: KBApiOperationResult[WebIngestionResult],
     *,
     collection_existed_before: bool,
-) -> KBApiOperationResult[Any]:
-    """An ingest that produced no documents publishes nothing, so it is not a success.
+) -> KBApiOperationResult[WebIngestionResult]:
+    """A crawl that produced no documents publishes nothing, so it is not a success.
 
     A crawl can finish without recording a single failure (robots.txt, an empty
-    site) and still create zero documents.
+    site) and still create zero documents. Typed to the crawl result on purpose:
+    ``documents_created`` is a WebIngestionResult field, and the document paths
+    report their own count instead.
     """
     result = api_result.result
     if result.status == "error" or int(result.documents_created or 0) > 0:
@@ -3365,6 +3370,50 @@ def _demote_empty_ingest_to_error(
     )
 
 
+async def _config_json_preserving_extras(
+    *,
+    collection: str,
+    config_json: str,
+    user_id: int,
+    context: str,
+) -> str:
+    """Carry over settings this ingest did not set, e.g. the rerank binding.
+
+    The config row is replaced wholesale, and this write now lands after the
+    ingest instead of before it, so anything the user saved while the ingest was
+    running would otherwise be silently dropped. `config_json` is serialised with
+    `exclude_unset`, so its keys are exactly what this run chose; every other key
+    belongs to whoever wrote it last.
+    """
+    try:
+        existing = await _get_api_compatibility_facade().get_collection_config(
+            collection=collection,
+            user_id=user_id,
+            is_admin=False,
+        )
+        if not isinstance(existing, str) or not existing:
+            return config_json
+        existing_settings = json.loads(existing)
+        new_settings = json.loads(config_json)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not merge the existing collection config of %s/user_%s "
+            "during %s, saving this ingest's settings alone: %s",
+            collection,
+            user_id,
+            context,
+            exc,
+        )
+        return config_json
+
+    if not isinstance(existing_settings, dict) or not isinstance(new_settings, dict):
+        return config_json
+
+    if not set(existing_settings) - set(new_settings):
+        return config_json
+    return json.dumps({**existing_settings, **new_settings})
+
+
 async def _save_collection_config_after_ingest(
     *,
     collection: str,
@@ -3382,6 +3431,9 @@ async def _save_collection_config_after_ingest(
     and permanently block the name, which is worse than a visible collection.
     A pre-existing collection is never republished by a failed run — that would
     overwrite the settings its previous import saved.
+
+    ponytail: a collection deleted while its ingest runs is republished here.
+    Cancelling in-flight jobs on delete is the real fix and is out of scope.
     """
     if documents_created <= 0 and (
         collection_existed_before
@@ -3397,14 +3449,28 @@ async def _save_collection_config_after_ingest(
     try:
         await _get_api_compatibility_facade().save_collection_config(
             collection=collection,
-            config_json=config_json,
+            config_json=await _config_json_preserving_extras(
+                collection=collection,
+                config_json=config_json,
+                user_id=int(user.id),
+                context=context,
+            ),
             user_id=int(user.id),
         )
     except Exception as exc:  # noqa: BLE001
+        # The documents are committed and the collection lists them, so re-importing
+        # would only duplicate them. Report the lost settings, not a failed ingest.
+        logger.error(
+            "Ingested into '%s' but saving the collection config during %s failed; "
+            "the documents are listed, the chunking settings were not saved: %s",
+            collection,
+            context,
+            exc,
+        )
         raise CollectionConfigSaveError(
-            f"Ingested {documents_created} document(s) into '{collection}' but "
-            f"saving the collection config during {context} failed, so the "
-            f"knowledge base stays hidden; please retry the import: {exc}"
+            f"The documents were imported into '{collection}', but saving its "
+            f"chunking settings failed, so they fall back to the defaults. "
+            f"Do not re-import; set them again in the knowledge base settings: {exc}"
         ) from exc
 
 
@@ -4117,11 +4183,10 @@ async def ingest(
             status_code=200,
             content={**result.model_dump(), "file_id": file_record.file_id},
         )
-    except RollbackFailureError:
+    except (RollbackFailureError, CollectionConfigSaveError):
+        # The documents are committed; only the config write failed. Let the
+        # decorator map it instead of rolling a successful ingest back.
         raise
-    except CollectionConfigSaveError as e:
-        logger.error("Document ingestion could not publish collection config: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
     except Exception:
         if file_record is not None:
             rollback_result = IngestionResult(
@@ -4745,10 +4810,6 @@ async def ingest_cloud(
                 )
                 return rollback_execution.operation_result
 
-    # An empty batch publishes nothing, so it must not report success either.
-    if not request.files:
-        raise HTTPException(status_code=400, detail="No files were provided to ingest.")
-
     # Run all file processings concurrently
     api_results = await asyncio.gather(*[process_file(f) for f in request.files])
     results = [api_result.result for api_result in api_results]
@@ -4766,18 +4827,14 @@ async def ingest_cloud(
             successful_documents=successful_documents,
         )
 
-    try:
-        await _save_collection_config_after_ingest(
-            collection=safe_collection,
-            config_json=config.model_dump_json(exclude_unset=True),
-            user=_user,
-            context="ingest_cloud",
-            documents_created=successful_documents,
-            collection_existed_before=collection_existed_before,
-        )
-    except CollectionConfigSaveError as e:
-        logger.error("Cloud ingestion could not publish collection config: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    await _save_collection_config_after_ingest(
+        collection=safe_collection,
+        config_json=config.model_dump_json(exclude_unset=True),
+        user=_user,
+        context="ingest_cloud",
+        documents_created=successful_documents,
+        collection_existed_before=collection_existed_before,
+    )
 
     return results
 
@@ -5684,7 +5741,7 @@ async def ingest_web(
                 result,
             )
 
-        api_result = _demote_empty_ingest_to_error(
+        api_result = _demote_empty_crawl_to_error(
             api_result,
             collection_existed_before=collection_existed_before,
         )
@@ -5731,9 +5788,8 @@ async def ingest_web(
 
     except HTTPException:
         raise
-    except CollectionConfigSaveError as e:
-        logger.error("Web ingestion could not publish collection config: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except CollectionConfigSaveError:
+        raise
     except (ValueError, KeyError, TypeError) as e:
         if "collection_existed_before" in locals() and not collection_existed_before:
             await _cleanup_failed_new_collection_metadata(

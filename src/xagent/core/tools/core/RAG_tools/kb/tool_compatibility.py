@@ -217,6 +217,23 @@ class KBToolCompatibilityFacade:
             )
             return safe_collection
 
+    async def publish_agent_collection(
+        self,
+        *,
+        collection_name: str,
+        ingestion_config: IngestionConfig,
+        user_id: int,
+        is_admin: bool = False,
+    ) -> None:
+        from ....adapters.vibe import agent_kb_service
+
+        with self._storage_context():
+            await agent_kb_service._publish_collection_impl(
+                collection_name=collection_name,
+                ingestion_config=ingestion_config,
+                user_id=user_id,
+            )
+
     async def refresh_agent_collection_metadata(
         self,
         collection_name: str,

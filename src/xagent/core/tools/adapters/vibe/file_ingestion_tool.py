@@ -243,6 +243,7 @@ async def _create_knowledge_base_from_file_impl(
         if errors:
             message += f" Warnings: {'; '.join(errors)}"
 
+        await kb_service.publish_collection(collection_name, config)
         await kb_service.refresh_collection_metadata(collection_name)
 
         return CreateKnowledgeBaseFromFileResult(

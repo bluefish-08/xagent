@@ -151,6 +151,21 @@ async def _create_knowledge_base_from_url_impl(
                 pages_crawled=0,
             ).model_dump()
 
+        # A crawl can finish without a single recorded failure and still ingest
+        # nothing (robots.txt, an empty site). Publishing then would leave a
+        # visible, empty knowledge base.
+        if int(result.documents_created or 0) <= 0:
+            return CreateKnowledgeBaseFromUrlResult(
+                success=False,
+                collection_name=collection_name,
+                message=(
+                    f"No pages were ingested from {tool_args.url}, so the "
+                    f"knowledge base was not created"
+                ),
+                pages_crawled=result.pages_crawled,
+            ).model_dump()
+
+        await kb_service.publish_collection(collection_name, ingest_config)
         await kb_service.refresh_collection_metadata(collection_name)
 
         return CreateKnowledgeBaseFromUrlResult(

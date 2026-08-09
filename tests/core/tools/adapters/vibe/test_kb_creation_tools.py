@@ -121,7 +121,7 @@ def _fake_db_generator(db):
 
 
 @pytest.mark.asyncio
-async def test_agent_kb_service_prepare_collection_persists_config_and_sanitizes():
+async def test_agent_kb_service_prepare_collection_sanitizes_without_publishing():
     metadata_store = MagicMock()
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.get_collection = AsyncMock(
@@ -140,13 +140,8 @@ async def test_agent_kb_service_prepare_collection_persists_config_and_sanitizes
         )
 
     assert collection_name == "agent url kb"
-    metadata_store.save_collection_config.assert_awaited_once()
-    _, save_kwargs = metadata_store.save_collection_config.await_args
-    assert save_kwargs["collection"] == "agent url kb"
-    assert save_kwargs["user_id"] == 71
-    assert json.loads(save_kwargs["config_json"]) == {
-        "embedding_model_id": DEFAULT_EMBEDDING_MODEL_ID
-    }
+    # The config row is what makes the KB visible, so preparing must not write it.
+    metadata_store.save_collection_config.assert_not_awaited()
     metadata_store.save_collection.assert_awaited_once()
     saved_collection = metadata_store.save_collection.await_args.args[0]
     assert saved_collection.name == "agent url kb"
@@ -175,7 +170,7 @@ async def test_agent_kb_service_prepare_collection_preserves_existing_backend_bi
         )
 
     assert collection_name == "agent url kb"
-    metadata_store.save_collection_config.assert_awaited_once()
+    metadata_store.save_collection_config.assert_not_awaited()
     metadata_store.save_collection.assert_not_awaited()
     assert existing.extra_metadata["kb_storage"] == {"backend": "postgresql"}
     assert existing.extra_metadata["other"] == "kept"
@@ -214,7 +209,29 @@ async def test_agent_kb_service_refresh_collection_metadata_skips_non_admin_refr
 
 
 @pytest.mark.asyncio
-async def test_agent_kb_service_prepare_collection_raises_on_config_save_failure():
+async def test_agent_kb_service_publish_collection_persists_config():
+    metadata_store = MagicMock()
+    metadata_store.save_collection_config = AsyncMock()
+    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    ingest_config = IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID)
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+        return_value=metadata_store,
+    ):
+        await service.publish_collection("agent url kb", ingest_config)
+
+    metadata_store.save_collection_config.assert_awaited_once()
+    _, save_kwargs = metadata_store.save_collection_config.await_args
+    assert save_kwargs["collection"] == "agent url kb"
+    assert save_kwargs["user_id"] == 71
+    assert json.loads(save_kwargs["config_json"]) == {
+        "embedding_model_id": DEFAULT_EMBEDDING_MODEL_ID
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_kb_service_publish_collection_raises_on_config_save_failure():
     metadata_store = MagicMock()
     metadata_store.save_collection_config = AsyncMock(
         side_effect=RuntimeError("config save failed")
@@ -231,7 +248,7 @@ async def test_agent_kb_service_prepare_collection_raises_on_config_save_failure
             AgentKnowledgeBaseError, match="Failed to save collection config"
         ),
     ):
-        await service.prepare_collection("agent kb", ingest_config)
+        await service.publish_collection("agent kb", ingest_config)
 
 
 @pytest.mark.asyncio
@@ -250,6 +267,52 @@ async def test_agent_kb_service_refresh_collection_metadata_raises_on_failure():
         ),
     ):
         await service.refresh_collection_metadata("agent_url_kb")
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_url_empty_crawl_publishes_nothing(monkeypatch):
+    """A crawl with no failures and no documents must not create the KB."""
+    monkeypatch.setenv(WEB_CRAWL_TLS_IMPERSONATE, "auto")
+
+    ingest_result = WebIngestionResult(
+        status="success",
+        collection="agent_url_kb",
+        total_urls_found=0,
+        pages_crawled=0,
+        pages_failed=0,
+        documents_created=0,
+        chunks_created=0,
+        embeddings_created=0,
+        crawled_urls=[],
+        failed_urls={},
+        message="ok",
+        warnings=[],
+        elapsed_time_ms=1,
+    )
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_url_kb")
+    service.publish_collection = AsyncMock()
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.web_ingestion.run_web_ingestion",
+            new=AsyncMock(return_value=ingest_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromUrlTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"url": "https://example.com", "collection_name": "agent_url_kb"}
+        )
+
+    assert result["success"] is False
+    assert "No pages were ingested" in result["message"]
+    service.publish_collection.assert_not_awaited()
+    service.refresh_collection_metadata.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -273,6 +336,7 @@ async def test_create_kb_from_url_uses_shared_service(monkeypatch):
     )
     service = MagicMock()
     service.prepare_collection = AsyncMock(return_value="agent_url_kb")
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
     run_web_ingestion_mock = AsyncMock(return_value=ingest_result)
 
@@ -299,6 +363,7 @@ async def test_create_kb_from_url_uses_shared_service(monkeypatch):
         prepare_kwargs["ingestion_config"].embedding_model_id
         == DEFAULT_EMBEDDING_MODEL_ID
     )
+    service.publish_collection.assert_awaited_once()
     service.refresh_collection_metadata.assert_awaited_once_with("agent_url_kb")
     run_web_ingestion_mock.assert_awaited_once()
     _, run_kwargs = run_web_ingestion_mock.await_args
@@ -311,6 +376,7 @@ async def test_create_kb_from_url_returns_error_when_shared_service_fails():
     service.prepare_collection = AsyncMock(
         side_effect=AgentKnowledgeBaseError("config save failed")
     )
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
 
     with patch(
@@ -330,6 +396,7 @@ async def test_create_kb_from_url_returns_error_when_shared_service_fails():
 async def test_create_kb_from_url_rejects_invalid_start_url():
     service = MagicMock()
     service.prepare_collection = AsyncMock()
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
 
     with patch(
@@ -386,6 +453,7 @@ async def test_create_kb_from_file_uses_shared_service(tmp_path):
     )
     service = MagicMock()
     service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
 
     with (
@@ -412,6 +480,7 @@ async def test_create_kb_from_file_uses_shared_service(tmp_path):
         prepare_kwargs["ingestion_config"].embedding_model_id
         == DEFAULT_EMBEDDING_MODEL_ID
     )
+    service.publish_collection.assert_awaited_once()
     service.refresh_collection_metadata.assert_awaited_once_with("agent_file_kb")
     db.close.assert_called_once()
 
@@ -464,6 +533,7 @@ async def test_create_kb_from_file_continues_after_unexpected_ingest_error(tmp_p
 
     service = MagicMock()
     service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
     run_ingestion = Mock(side_effect=fake_run_ingestion)
 
@@ -574,8 +644,9 @@ async def test_create_kb_from_file_failed_ingest_records_operation_outcome(
     assert result["success"] is False
     assert result["collection_name"] == "agent_file_kb"
     assert "embedding failed" in result["message"]
-    assert metadata_store.saved_configs[-1]["collection"] == "agent_file_kb"
-    assert metadata_store.saved_configs[-1]["user_id"] == 71
+    # An ingest that landed nothing must not publish the config: that is what
+    # left failed agent imports visible and empty.
+    assert metadata_store.saved_configs == []
     assert metadata_store.saved_collections
     assert metadata_store.saved_collections[-1].owners == []
     assert metadata_store.saved_collections[-1].extra_metadata["kb_storage"] == {
@@ -709,6 +780,7 @@ async def test_create_kb_from_file_restores_durable_only_upload_before_ingestion
     )
     service = MagicMock()
     service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock()
     run_ingestion = Mock(return_value=ingest_result)
 
@@ -775,6 +847,7 @@ async def test_create_kb_from_file_returns_error_when_metadata_refresh_fails(tmp
     )
     service = MagicMock()
     service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.publish_collection = AsyncMock()
     service.refresh_collection_metadata = AsyncMock(
         side_effect=AgentKnowledgeBaseError("metadata refresh failed")
     )
