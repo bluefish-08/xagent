@@ -928,6 +928,28 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     }
   )
 
+  it("says nothing when the backend predates the claim fields", async () => {
+    // Shipping the dialog ahead of the endpoint would otherwise make every
+    // match read as a built knowledge base, since `!undefined` is true.
+    mockRoute(
+      (url) => url === "http://api.local/api/knowledge-bases/team-status",
+      () =>
+        createJsonResponse([
+          { name: "team-docs", storage_user_id: 3, ownership: "team", can_edit: true },
+        ])
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
+    })
+    expect(screen.queryByText("kb.ownership.nameIsTeamKnowledgeBase")).toBeNull()
+  })
+
   it("says nothing about a name the team does not hold", async () => {
     const { container } = render(
       <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />

@@ -136,6 +136,9 @@ function teamNameNotice(
 ): TranslationKey | null {
   const claim = claims.find((held) => held.name === name)
   if (!claim) return null
+  // A backend that predates these two fields would make every match look like a
+  // built knowledge base. Say nothing rather than say the wrong thing.
+  if (typeof claim.is_empty !== "boolean") return null
   if (!claim.is_empty) return "kb.ownership.nameIsTeamKnowledgeBase"
   const mine = claim.created_by_user_id !== null && String(claim.created_by_user_id) === userId
   return mine ? "kb.ownership.nameHeldByYou" : "kb.ownership.nameHeldByTeammate"
@@ -338,11 +341,12 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     void (async () => {
       try {
         const response = await apiRequest(`${getApiUrl()}/api/knowledge-bases/team-status`)
-        if (!response.ok) return
-        const held = await response.json()
+        // Drop what the last open found either way: a name released since then
+        // would otherwise keep warning about a claim that no longer exists.
+        const held = response.ok ? await response.json() : []
         if (!cancelled) setTeamClaims(Array.isArray(held) ? held : [])
       } catch {
-        // No warning is a fine outcome; creation does not depend on it.
+        if (!cancelled) setTeamClaims([])
       }
     })()
     return () => {
