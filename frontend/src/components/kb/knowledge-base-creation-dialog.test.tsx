@@ -717,6 +717,22 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     ).toHaveLength(0)
   })
 
+  it("acts on a key pressed while a child of the card holds focus", () => {
+    // The handler sits on the group and reads event.target, which is the card
+    // only while the card itself has focus. Anything nested — the icon, a label
+    // — would otherwise resolve to no index and drop the key silently.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    const team = container.querySelector("#kb-ownership-team") as HTMLElement
+    const inner = team.querySelector("span") as HTMLElement
+    expect(inner).toBeTruthy()
+
+    fireEvent.keyDown(inner, { key: "Enter" })
+    expect(team.getAttribute("aria-checked")).toBe("true")
+  })
+
   it("moves the ownership choice with the keyboard, not just the mouse", () => {
     // These are Cards standing in for radios, so the keyboard handling that a
     // real radio would give for free has to be written out.

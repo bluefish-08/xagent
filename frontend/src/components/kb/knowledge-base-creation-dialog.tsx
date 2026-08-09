@@ -146,10 +146,12 @@ function SelectableCardGroup<T extends string>({
   const styles = SELECTABLE_CARD_SIZES[size]
 
   // One handler on the group: keydown bubbles, and the card's position among its
-  // siblings is the index into `options`.
+  // siblings is the index into `options`. Resolve through `closest` so a key
+  // pressed while the icon or a label holds focus still finds its card.
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const cards = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]'))
-    const index = cards.indexOf(event.target as HTMLElement)
+    const card = (event.target as HTMLElement).closest('[role="radio"]')
+    const index = card ? cards.indexOf(card as HTMLElement) : -1
     if (index < 0) return
 
     if (event.key === "Enter" || event.key === " ") {
