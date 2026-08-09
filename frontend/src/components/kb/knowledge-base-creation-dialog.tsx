@@ -141,6 +141,11 @@ function teamNameNotice(
   return mine ? "kb.ownership.nameHeldByYou" : "kb.ownership.nameHeldByTeammate"
 }
 
+/** "unconfirmed" is a reserve that may or may not have committed server-side --
+ *  a network throw or a 5xx. It still has to be rolled back, but a 404 answering
+ *  that rollback is the expected "there was none", not a leaked reservation. */
+type ClaimState = "none" | "unconfirmed" | "held"
+
 const LEAKED_CLAIM_TOAST_DURATION = 12000
 
 const SELECTABLE_CARD_SIZES = {
@@ -322,9 +327,28 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       setNameError(null)
       setOwnership("personal")
       fetchEmbeddingModels()
-      fetchTeamClaims()
     }
   }, [open])
+
+  // Advisory only, and only inside a team: standalone builds have no such route,
+  // so a failure here costs the collision warning and nothing else.
+  useEffect(() => {
+    if (!open || !inTeam) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await apiRequest(`${getApiUrl()}/api/knowledge-bases/team-status`)
+        if (!response.ok) return
+        const held = await response.json()
+        if (!cancelled) setTeamClaims(Array.isArray(held) ? held : [])
+      } catch {
+        // No warning is a fine outcome; creation does not depend on it.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, inTeam])
 
   useEffect(() => {
     if (!isUploading || !currentUploadFileName || !currentUploadCollection) return
@@ -359,20 +383,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       window.clearInterval(interval)
     }
   }, [isUploading, currentUploadFileName, currentUploadCollection, completedUploadCount, selectedFiles.length])
-
-  /** Advisory only, and only inside a team: standalone builds have no such
-   *  route, so a failure here must leave creation entirely unaffected. */
-  const fetchTeamClaims = async () => {
-    if (!inTeam) return
-    try {
-      const response = await apiRequest(`${getApiUrl()}/api/knowledge-bases/team-status`)
-      if (!response.ok) return
-      const held = await response.json()
-      setTeamClaims(Array.isArray(held) ? held : [])
-    } catch {
-      // A missing or unhappy endpoint costs the warning, nothing else.
-    }
-  }
 
   const fetchEmbeddingModels = async () => {
     try {
@@ -494,18 +504,20 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  Deliberately not gated on `inTeam`: a token refresh drops it for the length
    *  of one request, and skipping the claim there would silently create a
    *  personal KB after the user asked for a team one. The server decides. */
-  const reserveTeamName = async (collection: string, claimed: { current: boolean }) => {
+  const reserveTeamName = async (collection: string, claimed: { current: ClaimState }) => {
     if (ownership !== "team") return false
     // True before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to
     // clear it. A response settles it either way: the server answered, so it
     // either holds the claim or never took one.
-    claimed.current = true
+    claimed.current = "unconfirmed"
     const response = await apiRequest(
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
       { method: "POST" },
     )
-    claimed.current = response.ok
+    // Only a 4xx is the server saying it did not take the claim. A 5xx is as
+    // ambiguous as the throw above -- the write may well have committed.
+    claimed.current = response.ok ? "held" : response.status >= 500 ? "unconfirmed" : "none"
     // 409 means the name is held by someone else -- another tenant's collection,
     // or a teammate's reservation. The caller's own reservation answers 204, so a
     // retry after a failed release reuses it rather than landing here.
@@ -528,13 +540,17 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  really empty is the server's call: 409 means it is not, and keeping it is
    *  then correct. Anything else non-ok leaves the name claimed, so say so —
    *  but only ever as a warning, since the ingest error is what the user needs. */
-  const releaseTeamName = async (collection: string) => {
+  const releaseTeamName = async (collection: string, claimed: ClaimState) => {
     try {
       const response = await apiRequest(
         `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/release-team-claim`,
         { method: "POST" },
       )
+      // 409: the server sees a collection behind the name, so keeping the claim
+      // is right. 404 after a reserve that never confirmed: there was simply no
+      // claim to give back. A 404 against one we did hold is worth reporting.
       if (response.ok || response.status === 409) return
+      if (response.status === 404 && claimed !== "held") return
       console.warn("Failed to release team claim:", response.status)
     } catch (error) {
       console.warn("Failed to release team claim:", error)
@@ -589,7 +605,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     const collectionName = trimmedCollectionName
     const successfulCollections: string[] = []
-    const teamClaimed = { current: false }
+    const teamClaimed: { current: ClaimState } = { current: "none" }
 
     try {
       const apiUrl = getApiUrl()
@@ -718,9 +734,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
-      // After the toast: releasing has no timeout, and the user should not wait
-      // on a slow network to be told why the ingest failed.
-      if (teamClaimed.current) await releaseTeamName(collectionName)
+      // Not awaited: releasing has no timeout, and the button should not read
+      // "Processing" over a slow network after the failure is already on screen.
+      if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
       if (successfulCollections.length > 0) {
         onSuccess?.(successfulCollections)
       }
@@ -744,7 +760,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setWebIngestionResult(null)
 
     const collectionName = trimmedCollectionName
-    const teamClaimed = { current: false }
+    const teamClaimed: { current: ClaimState } = { current: "none" }
 
     try {
       const apiUrl = getApiUrl()
@@ -856,7 +872,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
-      if (teamClaimed.current) await releaseTeamName(collectionName)
+      if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
       setIsWebIngesting(false)
       setWebIngestionProgress(0)
@@ -871,7 +887,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setIngestionResults([])
 
     const collectionName = trimmedCollectionName
-    const teamClaimed = { current: false }
+    const teamClaimed: { current: ClaimState } = { current: "none" }
 
     try {
       // Aggregate all selected files from all providers
@@ -978,7 +994,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
-      if (teamClaimed.current) await releaseTeamName(collectionName)
+      if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
       setIsCloudConnecting(false)
     }
@@ -1580,6 +1596,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     // Backstop for every import tab: submission must never fall
                     // back to a derived name, whatever navigation allows.
                     if (!requireCollectionName()) return
+                    // A second click cannot get through: each handler sets its
+                    // in-flight flag synchronously, before the first await, and
+                    // that disables this button. A test pins that ordering.
                     if (activeImportTab === "web") {
                       handleWebIngest()
                     } else if (activeImportTab === "cloud") {

@@ -942,6 +942,79 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
   })
 
+  it("reserves once when the create button is double-clicked", async () => {
+    // Nothing but a synchronous state write stood between two clicks in the
+    // same tick, and the second would have claimed the name all over again.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+
+    const create = screen.getByText("kb.dialog.createButton")
+    fireEvent.click(create)
+    fireEvent.click(create)
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+    expect(callsTo(RESERVE_URL)).toHaveLength(1)
+  })
+
+  it("takes the same name again after a release that failed", async () => {
+    // What kb.ownership.releaseFailed promises the user: the leaked claim is
+    // still theirs, so creating it again reuses it instead of colliding.
+    let ingestAttempts = 0
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => {
+        ingestAttempts += 1
+        return ingestAttempts === 1
+          ? createJsonResponse({ detail: "embedding model unavailable" }, 500)
+          : createJsonResponse(
+              createSucceededJob({
+                status: "success",
+                collection: "team-docs",
+                document_count: 1,
+                chunks_count: 1,
+                message: "ok",
+              })
+            )
+      }
+    )
+    mockRoute(
+      (url) => url === RELEASE_URL,
+      () => createJsonResponse({ detail: "storage offline" }, 500)
+    )
+
+    const onSuccess = vi.fn()
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={onSuccess} />
+    )
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    // The claim leaked, and the warning says it will be reused.
+    await waitFor(() => {
+      expect(toastWarningMock).toHaveBeenCalledWith(
+        "kb.ownership.releaseFailed",
+        expect.anything()
+      )
+    })
+
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledWith(["team-docs"])
+    })
+    // Reserving again answered 204 rather than colliding with our own claim.
+    expect(callsTo(RESERVE_URL)).toHaveLength(2)
+    expect(toastErrorMock).not.toHaveBeenCalledWith(
+      "kb.errors.nameUnavailable",
+      expect.anything()
+    )
+  })
+
   it("keeps a way back to personal after team membership is lost for good", async () => {
     // The control is normally gated on inTeam. Losing membership permanently
     // would take it away while every submit still reserved, with no way out of
@@ -1082,6 +1155,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       if (url.endsWith("/reserve-team")) {
         return Promise.resolve(createJsonResponse({ detail: "team storage is offline" }, 500))
       }
+      if (url.endsWith("/release-team-claim")) {
+        return Promise.resolve(createJsonResponse({ detail: "no claim" }, 404))
+      }
 
       throw new Error(`Unhandled apiRequest: ${url}`)
     })
@@ -1108,8 +1184,13 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(
       apiRequestMock.mock.calls.filter(([url]) => String(url).includes("/api/kb/ingest"))
     ).toHaveLength(0)
-    // Nothing was reserved, so nothing may be rolled back.
-    expect(callsTo(RELEASE_URL)).toHaveLength(0)
+    // A 5xx leaves it unknown whether the claim committed, so the rollback is
+    // attempted; the 404 that answers it is the ordinary "there was none" and
+    // must not be reported as a leaked reservation.
+    expect(callsTo(RELEASE_URL)).toHaveLength(1)
+    await waitFor(() => {
+      expect(toastWarningMock).not.toHaveBeenCalled()
+    })
     expect(onSuccess).not.toHaveBeenCalled()
   })
 
