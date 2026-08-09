@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Final, Mapping, Sequence
 
 from .schemas import IndexMetric
+
+logger = logging.getLogger(__name__)
 
 # ------------------------- Paths -------------------------
 
@@ -162,6 +165,22 @@ MODEL_SYNONYMS: Final[Mapping[str, str]] = {
 }
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive int from the environment, falling back on anything else."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Invalid %s=%r; must be positive, using %s", name, raw, default)
+        return default
+    return value
+
+
 @dataclass(frozen=True)
 class IndexPolicy:
     """Index policy configuration for embeddings tables.
@@ -212,10 +231,22 @@ class IndexPolicy:
     enable_immediate_reindex: bool = False
     enable_smart_reindex: bool = True
 
-    # Compaction configuration
-    compact_fragment_threshold: int = 100
-    compact_stale_version_threshold: int = 100
-    version_retention_days: int = 7
+    # Compaction configuration. Env overrides exist because this policy governs
+    # an always-on inline path: raising a threshold is the way to stand it down
+    # without a redeploy.
+    compact_fragment_threshold: int = field(
+        default_factory=lambda: _positive_int_env(
+            "XAGENT_KB_COMPACT_FRAGMENT_THRESHOLD", 100
+        )
+    )
+    compact_stale_version_threshold: int = field(
+        default_factory=lambda: _positive_int_env(
+            "XAGENT_KB_COMPACT_VERSION_THRESHOLD", 100
+        )
+    )
+    version_retention_days: int = field(
+        default_factory=lambda: _positive_int_env("XAGENT_KB_VERSION_RETENTION_DAYS", 7)
+    )
 
     def __post_init__(self) -> None:
         """Validate the compaction thresholds, then fill in default param dicts.

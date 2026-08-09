@@ -66,7 +66,9 @@ def _fragment_count(table: Any) -> int:
         )
         return int(count)
     except Exception as e:  # noqa: BLE001
-        logger.debug("Could not count fragments: %s", e)
+        # WARNING, not DEBUG: a lancedb API shape change would otherwise disable
+        # compaction permanently with no operator-visible signal.
+        logger.warning("Could not count fragments, treating as 0: %s", e)
         return 0
 
 
@@ -150,7 +152,7 @@ def _stale_version_count(table: Any, cutoff: datetime) -> int:
                 stale += 1
         return stale
     except Exception as e:  # noqa: BLE001
-        logger.debug("Could not count stale versions: %s", e)
+        logger.warning("Could not count stale versions, treating as 0: %s", e)
         return 0
 
 
@@ -1638,7 +1640,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # Fragment stats are the cheaper probe -- ~0.2 ms at 50 fragments,
             # ~2.2 ms at 1000, so it grows too, just far slower -- hence first.
             # ``or`` short-circuits only on True, so a healthy table always pays
-            # the version scan: ~4 ms at 100 retained versions, ~124 ms at 1000.
+            # the version scan, whose cost model lives on ``_stale_version_count``
+            # -- roughly linear in retained versions, and paid on every healthy
+            # table because ``or`` only short-circuits when fragments settle it.
             return (
                 _fragment_count(table) >= policy.compact_fragment_threshold
                 or _stale_version_count(table, cutoff)

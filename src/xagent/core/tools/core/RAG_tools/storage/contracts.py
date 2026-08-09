@@ -1346,7 +1346,10 @@ class VectorIndexStore(ABC):
             table_name: Table to optimize; need not be an embeddings table.
             cleanup_older_than: Retention window for old table versions; versions
                 younger than this are always kept so concurrent readers stay
-                valid. ``None`` lets the backend apply its own safe default.
+                valid. ``None`` falls back to
+                ``DEFAULT_INDEX_POLICY.version_retention_days`` -- a value shared
+                with the compaction predicate, not something internal to the
+                backend.
 
         Returns:
             True if the table was optimized successfully.
