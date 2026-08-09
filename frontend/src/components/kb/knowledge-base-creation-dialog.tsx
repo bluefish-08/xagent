@@ -506,10 +506,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  personal KB after the user asked for a team one. The server decides. */
   const reserveTeamName = async (collection: string, claimed: { current: ClaimState }) => {
     if (ownership !== "team") return false
-    // True before awaiting, because a retried POST can commit server-side and
+    // Set before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to
-    // clear it. A response settles it either way: the server answered, so it
-    // either holds the claim or never took one.
+    // clear it. Only the response below can settle it, and only when it is a
+    // 2xx or a 4xx.
     claimed.current = "unconfirmed"
     const response = await apiRequest(
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
