@@ -1046,7 +1046,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       {t("kb.dialog.cloudConnect.description")}
                     </p>
 
-                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-4">
                       {cloudProviders.map((provider) => (
                         <Card
                           key={provider.id}
@@ -1131,7 +1131,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                         className="mt-1.5"
                       />
                     </div>
-                    <div role="radiogroup" aria-label={t("kb.ownership.label")} className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-4">
                       <div>
                         <Label htmlFor="max_pages" className="text-sm font-medium">{t("kb.dialog.webImport.basic.maxPages")}</Label>
                         <Input
