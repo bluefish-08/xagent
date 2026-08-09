@@ -970,12 +970,37 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
       )
 
-      fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
-        target: { value: "team-docs" },
-      })
+      nameAndChooseTeam(container)
       expect(await screen.findByText(expected)).toBeInTheDocument()
     }
   )
+
+  it("says nothing about a team claim while Personal is selected", async () => {
+    // Creating a personal knowledge base never touches the team reservation, so
+    // "creating it now reuses that reservation" would simply be untrue.
+    mockRoute(
+      (url) => url === "http://api.local/api/knowledge-bases/team-status",
+      () =>
+        createJsonResponse([
+          { name: "team-docs", created_by_user_id: 7, is_empty: true },
+        ])
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
+    })
+    expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
+
+    // Switching to Team is what makes it relevant.
+    fireEvent.click(container.querySelector("#kb-ownership-team") as HTMLElement)
+    expect(await screen.findByText("kb.ownership.nameHeldByYou")).toBeInTheDocument()
+  })
 
   it("says nothing when the backend predates the claim fields", async () => {
     // Shipping the dialog ahead of the endpoint would otherwise make every
@@ -990,9 +1015,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     const { container } = render(
       <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
     )
-    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
-      target: { value: "team-docs" },
-    })
+    nameAndChooseTeam(container)
     await waitFor(() => {
       expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
     })
@@ -1006,6 +1029,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
       target: { value: "brand-new" },
     })
+    fireEvent.click(container.querySelector("#kb-ownership-team") as HTMLElement)
     await waitFor(() => {
       expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
     })
@@ -1083,6 +1107,66 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(toastErrorMock).not.toHaveBeenCalledWith(
       "kb.errors.nameUnavailable",
       expect.anything()
+    )
+  })
+
+  it("does not let a late release drop the claim a retry is using", async () => {
+    // The failure path fires the release without awaiting it, so Create becomes
+    // clickable again while that POST is still in flight. Reserving underneath
+    // it would hand the retry a claim the late release then deletes, quietly
+    // producing a personal knowledge base under a name asked to be team-owned.
+    let landRelease: (value: unknown) => void = () => {}
+    let ingestAttempts = 0
+    mockRoute(
+      (url) => url === RELEASE_URL,
+      () => new Promise((resolve) => {
+        landRelease = resolve
+      })
+    )
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => {
+        ingestAttempts += 1
+        return ingestAttempts === 1
+          ? createJsonResponse({ detail: "ingest exploded" }, 500)
+          : createJsonResponse(
+              createSucceededJob({
+                status: "success",
+                collection: "team-docs",
+                document_count: 1,
+                chunks_count: 1,
+                message: "ok",
+              })
+            )
+      }
+    )
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    // First attempt failed; the release is issued but deliberately left hanging.
+    await waitFor(() => {
+      expect(callsTo(RELEASE_URL)).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    // The retry must not have reserved yet: it is waiting on that release.
+    await waitFor(() => {
+      expect(ingestAttempts).toBe(1)
+    })
+    expect(callsTo(RESERVE_URL)).toHaveLength(1)
+
+    landRelease(createJsonResponse(null, 204))
+
+    await waitFor(() => {
+      expect(callsTo(RESERVE_URL)).toHaveLength(2)
+    })
+    expect(firstCallIndex((url) => url === RELEASE_URL)).toBeLessThan(
+      apiRequestMock.mock.calls.findLastIndex(([url]) => url === RESERVE_URL)
     )
   })
 

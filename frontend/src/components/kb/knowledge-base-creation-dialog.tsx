@@ -122,8 +122,10 @@ const failureStatus = (error: unknown, fromIngest?: number) =>
 
 interface TeamClaim {
   name: string
-  created_by_user_id: number | null
-  is_empty: boolean
+  // Optional because the payload is only shape-checked with Array.isArray: a
+  // backend predating these two fields hands us rows without them.
+  created_by_user_id?: number | null
+  is_empty?: boolean
 }
 
 /** Which warning, if any, a name has already earned inside the caller's team.
@@ -132,8 +134,10 @@ interface TeamClaim {
 function teamNameNotice(
   claims: TeamClaim[],
   name: string,
-  userId: string | undefined
+  userId: string | undefined,
+  ownership: "personal" | "team"
 ): TranslationKey | null {
+  if (ownership !== "team") return null
   const claim = claims.find((held) => held.name === name)
   if (!claim) return null
   // A backend that predates these two fields would make every match look like a
@@ -342,7 +346,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   // Advisory only, and only inside a team: standalone builds have no such route,
   // so a failure here costs the collision warning and nothing else.
   useEffect(() => {
-    if (!open || !inTeam) return
+    if (!open || !inTeam) {
+      setTeamClaims([])
+      return
+    }
     let cancelled = false
     void (async () => {
       try {
@@ -515,7 +522,12 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  of one request, and skipping the claim there would silently create a
    *  personal KB after the user asked for a team one. The server decides. */
   const reserveTeamName = async (collection: string, claimed: { current: ClaimState }) => {
-    if (ownership !== "team") return false
+    if (ownership !== "team") return
+    // A release from the previous attempt may still be in flight. Re-reserving
+    // our own claim answers 204, so without this the late release would drop the
+    // claim the retry is already ingesting under -- and the knowledge base the
+    // user asked to be team-owned would quietly land in personal storage.
+    await pendingRelease.current
     // Set before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to
     // clear it. Only the response below can settle it, and only when it is a
@@ -542,7 +554,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         response.status,
       )
     }
-    return true
   }
 
   /** A failed ingest must give the name back, or a teammate's later personal
@@ -550,7 +561,18 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  really empty is the server's call: 409 means it is not, and keeping it is
    *  then correct. Anything else non-ok leaves the name claimed, so say so —
    *  but only ever as a warning, since the ingest error is what the user needs. */
-  const releaseTeamName = async (collection: string, claimed: ClaimState) => {
+  /** Tracks the release still settling, so a retry cannot reserve underneath it. */
+  const pendingRelease = useRef<Promise<void> | null>(null)
+
+  const releaseTeamName = (collection: string, claimed: ClaimState) => {
+    const settled = releaseTeamNameOnce(collection, claimed).finally(() => {
+      if (pendingRelease.current === settled) pendingRelease.current = null
+    })
+    pendingRelease.current = settled
+    return settled
+  }
+
+  const releaseTeamNameOnce = async (collection: string, claimed: ClaimState) => {
     try {
       const response = await apiRequest(
         `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/release-team-claim`,
@@ -627,7 +649,6 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         const file = selectedFiles[i]
         const formData = new FormData()
 
-        const collectionName = trimmedCollectionName
         setCurrentUploadFileName(file.name)
         setCurrentUploadCollection(collectionName)
         setUploadProgressDetail(null)
@@ -1020,6 +1041,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   // fires onSuccess — into a consumer that then edits the agent the user is
   // building. Hold every exit shut instead: button, Esc and the overlay.
   const isIngestInFlight = isUploading || isWebIngesting || isCloudConnecting
+  const nameNotice = teamNameNotice(teamClaims, trimmedCollectionName, user?.id, ownership)
 
   const cloudProviders = [
     {
@@ -1084,10 +1106,8 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     aria-invalid={nameError !== null}
                     aria-describedby={nameError ? "collection_name_error" : undefined}
                   />
-                  {!nameError && teamNameNotice(teamClaims, trimmedCollectionName, user?.id) && (
-                    <p className="mt-2 text-sm text-amber-600">
-                      {t(teamNameNotice(teamClaims, trimmedCollectionName, user?.id)!)}
-                    </p>
+                  {!nameError && nameNotice && (
+                    <p className="mt-2 text-sm text-amber-600">{t(nameNotice)}</p>
                   )}
                   {nameError && (
                     <p id="collection_name_error" className="mt-2 text-sm text-destructive">
