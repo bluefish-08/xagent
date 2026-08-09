@@ -1138,7 +1138,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                       {cloudProviders.map((provider) => (
                         <Card
                           key={provider.id}
-                          className={`p-4 cursor-pointer transition-all hover:border-blue-500 relative ${cloudSelections[provider.id]?.length > 0 ? "border-blue-500 border-2" : ""}`}
+                          className={`p-4 cursor-pointer border-2 transition-colors hover:border-blue-500 relative ${cloudSelections[provider.id]?.length > 0 ? "border-blue-500" : "border-transparent"}`}
                           onClick={() => {
                             setSelectedCloudProvider(provider.id)
                             setIsCloudDialogOpen(true)
