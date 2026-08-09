@@ -926,6 +926,8 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(firstCallIndex((url) => url === RESERVE_URL)).toBeLessThan(
       firstCallIndex((url) => url.includes("/api/kb/ingest"))
     )
+    // A claim that succeeded and produced documents must be kept, not handed back.
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
   })
 
   it("does not ingest at all when the reservation is refused", async () => {
@@ -1242,6 +1244,31 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       )
     })
     expect(toastWarningMock).not.toHaveBeenCalled()
+  })
+
+  it("releases the name when the reserve request throws after the server took it", async () => {
+    // fetchWithRetry retries POST with no idempotent-method allowlist, so a
+    // network fault can leave a committed reservation behind a thrown request.
+    // A claim nobody knows about has no TTL and no UI to find it.
+    const base = apiRequestMock.getMockImplementation()!
+    apiRequestMock.mockImplementation((url: string, options?: RequestInit) =>
+      url.endsWith("/reserve-team")
+        ? Promise.reject(new Error("network down"))
+        : base(url, options)
+    )
+
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(callsTo(RELEASE_URL)).toHaveLength(1)
+    })
+    expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(0)
   })
 
   it("reports a taken name when the reservation conflicts", async () => {

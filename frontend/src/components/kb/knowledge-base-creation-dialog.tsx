@@ -441,13 +441,21 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  Deliberately not gated on `inTeam`: a token refresh drops it for the length
    *  of one request, and skipping the claim there would silently create a
    *  personal KB after the user asked for a team one. The server decides. */
-  const reserveTeamName = async (collection: string) => {
+  const reserveTeamName = async (collection: string, claimed: { current: boolean }) => {
     if (ownership !== "team") return false
+    // True before awaiting, because a retried POST can commit server-side and
+    // still throw here — and a claim nobody knows about has no TTL and no UI to
+    // clear it. A response settles it either way: the server answered, so it
+    // either holds the claim or never took one.
+    claimed.current = true
     const response = await apiRequest(
       `${getApiUrl()}/api/knowledge-bases/${encodeURIComponent(collection)}/reserve-team`,
       { method: "POST" },
     )
-    // Collection names are global, so 409 means someone already owns this one.
+    claimed.current = response.ok
+    // 409 means the name is held by someone else -- another tenant's collection,
+    // or a teammate's reservation. The caller's own reservation answers 204, so a
+    // retry after a failed release reuses it rather than landing here.
     if (response.status === 409) {
       rejectName("kb.errors.nameTaken")
       throw new Error(t("kb.errors.nameTaken"))
@@ -523,13 +531,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setIngestionResults([])
     setCompletedUploadCount(0)
 
+    const collectionName = trimmedCollectionName
     const successfulCollections: string[] = []
-    let teamReserved = false
+    const teamClaimed = { current: false }
 
     try {
       const apiUrl = getApiUrl()
       // Once, before the loop: every file shares one collection.
-      teamReserved = await reserveTeamName(trimmedCollectionName)
+      await reserveTeamName(collectionName, teamClaimed)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       for (let i = 0; i < selectedFiles.length; i++) {
         const file = selectedFiles[i]
@@ -655,7 +664,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       })
       // After the toast: releasing has no timeout, and the user should not wait
       // on a slow network to be told why the ingest failed.
-      if (teamReserved) await releaseTeamName(trimmedCollectionName)
+      if (teamClaimed.current) await releaseTeamName(collectionName)
       if (successfulCollections.length > 0) {
         onSuccess?.(successfulCollections)
       }
@@ -679,11 +688,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setWebIngestionResult(null)
 
     const collectionName = trimmedCollectionName
-    let teamReserved = false
+    const teamClaimed = { current: false }
 
     try {
       const apiUrl = getApiUrl()
-      teamReserved = await reserveTeamName(collectionName)
+      await reserveTeamName(collectionName, teamClaimed)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       const formData = new FormData()
 
@@ -791,7 +800,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
-      if (teamReserved) await releaseTeamName(collectionName)
+      if (teamClaimed.current) await releaseTeamName(collectionName)
     } finally {
       setIsWebIngesting(false)
       setWebIngestionProgress(0)
@@ -806,7 +815,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     setIngestionResults([])
 
     const collectionName = trimmedCollectionName
-    let teamReserved = false
+    const teamClaimed = { current: false }
 
     try {
       // Aggregate all selected files from all providers
@@ -814,7 +823,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         files.map(file => ({ provider, fileId: file.id, fileName: file.name }))
       )
 
-      teamReserved = await reserveTeamName(collectionName)
+      await reserveTeamName(collectionName, teamClaimed)
 
       // Prepare separators
       let separators: string[] | undefined = undefined
@@ -913,7 +922,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       toast.error(toastContent.title, {
         description: toastContent.description,
       })
-      if (teamReserved) await releaseTeamName(collectionName)
+      if (teamClaimed.current) await releaseTeamName(collectionName)
     } finally {
       setIsCloudConnecting(false)
     }
