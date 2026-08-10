@@ -871,6 +871,43 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     }
   })
 
+  it("stops polling a web-ingest job once the run is disowned", async () => {
+    // Sibling of the file-path test above: the web path passes the same
+    // keepWaiting predicate and must go quiet the same way.
+    vi.useFakeTimers()
+    try {
+      const runningJob = { ...createSucceededJob({}), status: "running", result: null }
+      mockRoute(
+        (url) => url === "http://api.local/api/kb/ingest-web/jobs",
+        () => createJsonResponse(runningJob)
+      )
+      mockRoute(
+        (url) => url === "http://api.local/api/jobs/job-1",
+        () => createJsonResponse(runningJob)
+      )
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+      fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+        target: { value: "stuck-docs" },
+      })
+      await goToStep3(container, "web")
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await vi.advanceTimersByTimeAsync(3000)
+      await vi.waitFor(() => {
+        expect(callsTo("http://api.local/api/jobs/job-1").length).toBeGreaterThan(0)
+      })
+
+      fireEvent.click(screen.getByTestId("dismiss-dialog"))
+      await vi.advanceTimersByTimeAsync(1000)
+      const polled = callsTo("http://api.local/api/jobs/job-1").length
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(callsTo("http://api.local/api/jobs/job-1")).toHaveLength(polled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("posts no further files once a multi-file upload is disowned", async () => {
     // Files already sent may finish server-side; the rest must never leave the
     // browser on behalf of a run the user walked away from.
@@ -1503,6 +1540,36 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       expect(callsTo(ingestUrl)).toHaveLength(0)
     }
   )
+
+  it("keeps the team claim when a disowned ingest later fails", async () => {
+    // Releasing on behalf of a run the user walked away from could pull the
+    // name out from under a server-side ingest still creating the collection
+    // -- and the failure toast would land on a dialog showing something else.
+    let failIngest: (value: unknown) => void = () => {}
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => new Promise((resolve) => {
+        failIngest = resolve
+      })
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+    toastErrorMock.mockReset()
+    failIngest(createJsonResponse({ detail: "ingest exploded" }, 500))
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(callsTo(RELEASE_URL)).toHaveLength(0)
+    expect(toastErrorMock).not.toHaveBeenCalled()
+  })
 
   it("does not paint a late 409 from a disowned reserve into a reopened dialog", async () => {
     // The reserve is the first await of every submit, so its 409 can land

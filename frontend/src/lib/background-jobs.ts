@@ -79,6 +79,12 @@ export function getBackgroundJobFailureMessage(
   return job.error_message || fallbackMessage
 }
 
+/** Poll `initialJob` to a terminal state and return it.
+ *
+ *  With `keepWaiting`, the promise can instead resolve early with the job in
+ *  its last-seen, possibly non-terminal state — the disowning caller stops
+ *  polling while the job keeps running server-side. Check
+ *  `isBackgroundJobTerminal` on the result when the difference matters. */
 export async function waitForBackgroundJob(
   apiUrl: string,
   initialJob: BackgroundJobResponse,
