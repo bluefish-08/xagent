@@ -26,6 +26,7 @@ from typing import (
     Optional,
     TypedDict,
     TypeVar,
+    Union,
     cast,
 )
 
@@ -1114,10 +1115,10 @@ async def _rollback_may_delete_collection(
     so by rollback time the row exists for every run and says nothing about
     whether the collection predated this one.
 
-    ponytail: these reads are not atomic with the delete that follows, so a
+    Caveat: these reads are not atomic with the delete that follows, so a
     sibling that commits inside the window is still exposed. Closing it needs a
     per-collection lock, which the codebase does not have anywhere yet — tracked
-    separately rather than invented in a bugfix.
+    in https://github.com/xorbitsai/xagent/issues/1242 rather than invented here.
     """
     if collection_existed_before or other_document_present:
         return False
@@ -3478,10 +3479,11 @@ async def _save_collection_config_after_ingest(
     A brand-new collection that produced nothing but could not roll back cleanly
     still publishes: documents without a config row are invisible to their owner
     and permanently block the name, which is worse than a visible collection.
-    A pre-existing collection is never republished by a failed run — that would
-    overwrite the settings its previous import saved.
+    A pre-existing collection takes this run's settings when the run produced
+    documents (a partial crawl counts) or when it succeeded while adding none;
+    a run that failed and produced nothing leaves the previous settings alone.
 
-    ponytail: a collection deleted while its ingest runs is republished here.
+    Caveat: a collection deleted while its ingest runs is republished here.
     Cancelling in-flight jobs on delete is the real fix and is out of scope.
     """
     publishes_new_collection = not collection_existed_before and (
@@ -3528,10 +3530,20 @@ async def _save_collection_config_after_ingest(
             context,
             exc,
         )
+        if collection_existed_before:
+            advice = (
+                "the settings fall back to the defaults. Do not re-import; set "
+                "them again in the knowledge base settings"
+            )
+        else:
+            # Nothing published it, so there is no settings page to visit yet.
+            advice = (
+                "'%s' is not listed yet. Re-run the import to publish it; the "
+                "documents already there will not be duplicated" % collection
+            )
         raise CollectionConfigSaveError(
             f"The documents were imported into '{collection}', but saving its "
-            f"chunking settings failed, so they fall back to the defaults. "
-            f"Do not re-import; set them again in the knowledge base settings: {exc}",
+            f"chunking settings failed, so {advice}: {exc}",
             file_id=file_id,
         ) from exc
 
@@ -4526,7 +4538,7 @@ async def ingest_cloud(
     request: CloudIngestRequest,
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
-) -> List[IngestionResult]:
+) -> Union[List[IngestionResult], JSONResponse]:
     """Ingest files from cloud storage."""
     _enforce_storage_gate(db, _user)
 
@@ -4894,14 +4906,32 @@ async def ingest_cloud(
             successful_documents=successful_documents,
         )
 
-    await _save_collection_config_after_ingest(
-        collection=safe_collection,
-        config_json=config.model_dump_json(exclude_unset=True),
-        user=_user,
-        context="ingest_cloud",
-        documents_created=successful_documents,
-        collection_existed_before=collection_existed_before,
-    )
+    landed_file_ids = [
+        result.file_id
+        for result in results
+        if result.status == "success" and result.file_id
+    ]
+    try:
+        await _save_collection_config_after_ingest(
+            collection=safe_collection,
+            config_json=config.model_dump_json(exclude_unset=True),
+            user=_user,
+            context="ingest_cloud",
+            documents_created=successful_documents,
+            collection_existed_before=collection_existed_before,
+            file_id=", ".join(landed_file_ids) or None,
+        )
+    except CollectionConfigSaveError as exc:
+        # Returning the batch keeps per-file outcomes visible; a bare 500 would
+        # hide which of the files actually landed.
+        logger.error("Cloud ingest could not publish the collection config: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": str(exc),
+                "results": [result.model_dump() for result in results],
+            },
+        )
 
     return results
 

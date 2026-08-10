@@ -29,8 +29,10 @@ def merge_collection_config_json(
     chunking group on the agent path, which sets just the embedding model —
     survive from ``existing_config_json``.
 
-    Always returns JSON serialized here, so the stored text never depends on
-    which branch produced it, in the same compact form pydantic writes.
+    Every merge result is serialized here, in the same compact form pydantic
+    writes, so the stored text does not depend on which branch produced it. The
+    two guard clauses below are the exception: unparsable or non-object input is
+    handed back untouched rather than reshaped.
     """
     try:
         new_settings = json.loads(new_config_json)

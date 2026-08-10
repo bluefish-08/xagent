@@ -1266,9 +1266,13 @@ class IngestionResult(BaseModel):
         would leave those runs with documents and no config row — invisible to
         their owner and blocking the name, which is the failure this PR removes.
 
-        This describes the run, not the collection. A caller that rolls its own
-        document back must either ask before the rollback or exclude the states
-        it rolled back.
+        This describes the run, not the collection, which is why callers that
+        roll back still differ in what they publish: `/ingest`, its job twin and
+        `/ingest-cloud` roll a ``partial`` document back, so they exclude those
+        states and publish nothing for them; the agent tools do not roll back, so
+        for them a ``partial`` document is still in the collection and must be
+        published. Same predicate, different rollback policy — a caller that rolls
+        back must either ask before doing so or exclude what it rolled back.
         """
         if self.status == "error":
             return 0

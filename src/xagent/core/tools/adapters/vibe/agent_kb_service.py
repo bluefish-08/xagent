@@ -31,7 +31,6 @@ class AgentKnowledgeBaseService:
         """Resolve the target name. Writes nothing, so a failure leaves nothing."""
         return await _get_tool_compatibility_facade().prepare_agent_collection(
             collection_name=collection_name,
-            is_admin=self.is_admin,
         )
 
     async def collection_exists(self, collection_name: str) -> bool:

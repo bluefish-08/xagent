@@ -4998,3 +4998,83 @@ def test_kb_ingest_cloud_empty_batch_is_rejected(test_env) -> None:
 
     assert response.status_code == 422
     metadata_store.save_collection_config.assert_not_awaited()
+
+
+def test_kb_ingest_cloud_config_save_failure_keeps_per_file_results(
+    test_env, temp_uploads
+) -> None:
+    """A bare 500 would hide which files of the batch actually landed."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import (
+        IngestionResult,
+        IngestionStepResult,
+    )
+
+    app, headers, _user, _ = test_env
+    client = TestClient(app, raise_server_exceptions=False)
+    metadata_store = MagicMock()
+    metadata_store.get_collection_config = AsyncMock(return_value=None)
+    metadata_store.save_collection_config = AsyncMock(
+        side_effect=RuntimeError("config store down")
+    )
+    metadata_store.delete_collection_metadata = AsyncMock()
+
+    class _FakeFilesService:
+        def get_media(self, fileId: str):
+            return {"fileId": fileId}
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFilesService()
+
+    class _FakeDownloader:
+        def __init__(self, fh, request_file):
+            self._fh = fh
+
+        def next_chunk(self):
+            self._fh.write(b"cloud-content")
+            return None, True
+
+    with (
+        patch(
+            "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+            return_value=metadata_store,
+        ),
+        patch("xagent.web.api.kb._ensure_collection_access", new_callable=AsyncMock),
+        patch("xagent.web.api.kb.get_collection_sync", return_value=MagicMock()),
+        patch("xagent.web.api.kb.list_document_records", return_value=[{"d": 1}]),
+        patch("xagent.web.api.kb.get_google_credentials", return_value=object()),
+        patch("xagent.web.api.kb.build", return_value=_FakeDriveService()),
+        patch("xagent.web.api.kb.MediaIoBaseDownload", _FakeDownloader),
+        patch(
+            "xagent.web.api.kb.run_document_ingestion",
+            return_value=IngestionResult(
+                status="success",
+                doc_id="cloud-doc-id",
+                parse_hash="hash",
+                chunk_count=1,
+                completed_steps=[IngestionStepResult(name="register_document")],
+                message="success",
+                file_id="cloud-file-1",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/kb/ingest-cloud",
+            json={
+                "collection": "cloud_publish_failure",
+                "chunk_size": 2048,
+                "files": [
+                    {
+                        "provider": "google-drive",
+                        "fileId": "drive-file-1",
+                        "fileName": "doc.txt",
+                    }
+                ],
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert [item["status"] for item in payload["results"]] == ["success"]
+    assert "cloud-file-1" in payload["detail"]

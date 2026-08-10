@@ -204,7 +204,6 @@ class KBToolCompatibilityFacade:
         self,
         *,
         collection_name: str,
-        is_admin: bool = False,
     ) -> str:
         from ....adapters.vibe import agent_kb_service
 

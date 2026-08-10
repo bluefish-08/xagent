@@ -99,7 +99,10 @@ async def _create_knowledge_base_from_url_impl(
             WebCrawlConfig,
         )
         from ...core.RAG_tools.pipelines.web_ingestion import run_web_ingestion
-        from .agent_kb_service import AgentKnowledgeBaseService
+        from .agent_kb_service import (
+            AgentKnowledgeBaseError,
+            AgentKnowledgeBaseService,
+        )
 
         tool_args = CreateKnowledgeBaseFromUrlArgs.model_validate(args)
 
@@ -169,7 +172,21 @@ async def _create_knowledge_base_from_url_impl(
                 pages_crawled=result.pages_crawled,
             ).model_dump()
 
-        await kb_service.publish_collection(collection_name, ingest_config)
+        try:
+            await kb_service.publish_collection(collection_name, ingest_config)
+        except AgentKnowledgeBaseError as exc:
+            # The pages landed; retrying would re-crawl and duplicate them.
+            logger.error("Could not publish agent knowledge base: %s", exc)
+            return CreateKnowledgeBaseFromUrlResult(
+                success=False,
+                collection_name=collection_name,
+                message=(
+                    f"Imported {result.pages_crawled} page(s) into "
+                    f"'{collection_name}' but could not publish it, so it is not "
+                    f"listed yet. Do not re-import; retry publishing: {exc}"
+                ),
+                pages_crawled=result.pages_crawled,
+            ).model_dump()
         await kb_service.refresh_collection_metadata(collection_name)
 
         return CreateKnowledgeBaseFromUrlResult(

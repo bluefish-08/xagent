@@ -1048,3 +1048,118 @@ async def test_agent_publish_keeps_settings_changed_during_the_crawl():
     assert saved["embedding_model_id"] == DEFAULT_EMBEDDING_MODEL_ID
     assert saved["chunk_size"] == 999
     assert saved["rerank_model_id"] == "bge-reranker"
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_url_publish_failure_keeps_the_collection_name():
+    """The pages landed; retrying would re-crawl, so the caller needs the name."""
+    ingest_result = WebIngestionResult(
+        status="success",
+        collection="agent_url_kb",
+        total_urls_found=1,
+        pages_crawled=1,
+        pages_failed=0,
+        documents_created=1,
+        chunks_created=3,
+        embeddings_created=3,
+        crawled_urls=["https://example.com"],
+        failed_urls={},
+        message="ok",
+        warnings=[],
+        elapsed_time_ms=1,
+    )
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_url_kb")
+    service.collection_exists = AsyncMock(return_value=False)
+    service.cleanup_failed_collection = AsyncMock()
+    service.publish_collection = AsyncMock(
+        side_effect=AgentKnowledgeBaseError("config store down")
+    )
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.web_ingestion.run_web_ingestion",
+            new=AsyncMock(return_value=ingest_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromUrlTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"url": "https://example.com", "collection_name": "agent_url_kb"}
+        )
+
+    assert result["success"] is False
+    assert result["collection_name"] == "agent_url_kb"
+    assert "Do not re-import" in result["message"]
+    service.refresh_collection_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_file_publishes_a_partial_it_did_not_roll_back(tmp_path):
+    """The agent path keeps a partial document, so it must publish it.
+
+    `/ingest` and `/ingest-cloud` roll a partial back and publish nothing for it;
+    the difference is the rollback policy, not the predicate.
+    """
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    file_record = SimpleNamespace(
+        user_id=7,
+        filename="notes.txt",
+        storage_path=str(source_file),
+        file_id="file-1",
+    )
+
+    query = MagicMock()
+    query.filter.return_value = query
+    query.all.return_value = [file_record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    def fake_get_db():
+        yield from _fake_db_generator(db)
+
+    partial_result = IngestionResult(
+        status="partial",
+        doc_id="doc-1",
+        parse_hash="parse-1",
+        chunk_count=2,
+        embedding_count=0,
+        vector_count=0,
+        completed_steps=[_ingestion_step("register_document", doc_id="doc-1")],
+        failed_step="compute_embeddings",
+        message="embeddings incomplete",
+        warnings=[],
+        file_id="file-1",
+    )
+
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_partial_kb")
+    service.collection_exists = AsyncMock(return_value=False)
+    service.cleanup_failed_collection = AsyncMock()
+    service.publish_collection = AsyncMock()
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch("xagent.web.models.database.get_db", side_effect=fake_get_db),
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.document_ingestion.run_document_ingestion",
+            new=Mock(return_value=partial_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromFileTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"file_ids": ["file-1"], "collection_name": "agent_partial_kb"}
+        )
+
+    assert result["success"] is True
+    service.publish_collection.assert_awaited_once()
+    service.cleanup_failed_collection.assert_not_awaited()

@@ -1049,3 +1049,48 @@ def test_missing_user_is_ignored_when_there_is_nothing_to_publish(
     )
 
     get_user.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("existed_before", "expected"),
+    [(True, "knowledge base settings"), (False, "not listed yet")],
+)
+@pytest.mark.asyncio
+async def test_config_save_failure_advice_matches_what_the_user_can_do(
+    monkeypatch: pytest.MonkeyPatch,
+    existed_before: bool,
+    expected: str,
+) -> None:
+    """A collection that was never published has no settings page to visit."""
+
+    async def _failing_save(**kwargs: Any) -> None:
+        raise RuntimeError("config store down")
+
+    async def _no_existing_config(**kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(
+            save_collection_config=_failing_save,
+            get_collection_config=_no_existing_config,
+        ),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    with pytest.raises(kb_module.CollectionConfigSaveError) as excinfo:
+        await kb_module._save_collection_config_after_ingest(
+            collection="q3",
+            config_json='{"chunk_size": 2048}',
+            user=user,
+            context="ingest",
+            documents_created=1,
+            collection_existed_before=existed_before,
+        )
+
+    assert expected in str(excinfo.value)

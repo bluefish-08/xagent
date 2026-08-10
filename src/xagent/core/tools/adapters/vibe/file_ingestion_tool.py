@@ -131,7 +131,10 @@ async def _create_knowledge_base_from_file_impl(
         from ...core.RAG_tools.pipelines.document_ingestion import (
             run_document_ingestion,
         )
-        from .agent_kb_service import AgentKnowledgeBaseService
+        from .agent_kb_service import (
+            AgentKnowledgeBaseError,
+            AgentKnowledgeBaseService,
+        )
 
         tool_args = CreateKnowledgeBaseFromFileArgs.model_validate(args)
 
@@ -245,7 +248,22 @@ async def _create_knowledge_base_from_file_impl(
         if errors:
             message += f" Warnings: {'; '.join(errors)}"
 
-        await kb_service.publish_collection(collection_name, config)
+        try:
+            await kb_service.publish_collection(collection_name, config)
+        except AgentKnowledgeBaseError as exc:
+            # The files landed; retrying would duplicate them. Report the
+            # collection name so the caller can act on what exists.
+            logger.error("Could not publish agent knowledge base: %s", exc)
+            return CreateKnowledgeBaseFromFileResult(
+                success=False,
+                collection_name=collection_name,
+                message=(
+                    f"Ingested {ingested_count} file(s) into '{collection_name}' but "
+                    f"could not publish it, so it is not listed yet. Do not re-import; "
+                    f"retry publishing: {exc}"
+                ),
+                files_ingested=ingested_count,
+            ).model_dump()
         await kb_service.refresh_collection_metadata(collection_name)
 
         return CreateKnowledgeBaseFromFileResult(
