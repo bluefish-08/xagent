@@ -1360,7 +1360,6 @@ def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
                 embeddings_created=0,
                 crawled_urls=[],
                 failed_urls={},
-                chunk_count=1,
                 message="crawl completed",
                 warnings=[],
                 elapsed_time_ms=1,

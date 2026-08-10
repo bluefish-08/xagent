@@ -281,12 +281,27 @@ class KBToolCompatibilityFacade:
             if records:
                 return
 
-            delete_collection = getattr(get_metadata_store(), "delete_collection", None)
-            if callable(delete_collection):
-                await _maybe_await(delete_collection(collection))
-                logger.info(
-                    "Removed metadata left by a failed agent import: %s", collection
+            # Same call the API paths use: owner-scoped, and it only drops the
+            # metadata row once no tenant holds a config for that name, so a
+            # sibling that published under the same name is never disturbed.
+            delete_metadata = getattr(
+                get_metadata_store(), "delete_collection_metadata", None
+            )
+            if not callable(delete_metadata):
+                return
+            deleted = await _maybe_await(
+                delete_metadata(
+                    collection_name=collection,
+                    user_id=user_id,
+                    is_admin=False,
+                    delete_orphaned_metadata=True,
                 )
+            )
+            logger.info(
+                "Cleaned metadata left by a failed agent import for %s: %s",
+                collection,
+                deleted,
+            )
 
     async def refresh_agent_collection_metadata(
         self,

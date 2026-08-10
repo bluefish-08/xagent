@@ -39,9 +39,17 @@ class _FakeMetadataStore:
         self.saved.append(collection)
         self.collection = collection
 
-    async def delete_collection(self, collection_name: str) -> None:
+    async def delete_collection_metadata(
+        self,
+        *,
+        collection_name: str,
+        user_id: int,
+        is_admin: bool = False,
+        delete_orphaned_metadata: bool = False,
+    ) -> dict[str, int]:
         self.deleted.append(collection_name)
         self.collection = None
+        return {"metadata_rows": 1, "config_rows": 0}
 
 
 class _FakeStorageShim:
@@ -292,3 +300,30 @@ async def test_cleanup_failed_agent_collection_keeps_a_populated_collection():
     await facade.cleanup_failed_agent_collection("agent_kb", user_id=7)
 
     assert metadata_store.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failed_agent_collection_deletes_as_the_owner():
+    """An admin-scoped or non-orphan delete would drop another tenant's row."""
+    metadata_store = _FakeMetadataStore(CollectionInfo(name="agent_kb"))
+    calls: list[dict[str, object]] = []
+
+    async def _delete_collection_metadata(**kwargs: object) -> dict[str, int]:
+        calls.append(kwargs)
+        return {"metadata_rows": 1, "config_rows": 0}
+
+    metadata_store.delete_collection_metadata = _delete_collection_metadata  # type: ignore[assignment]
+    shim = _FakeStorageShim(metadata_store)
+    shim.vector_store = _CountingVectorStore([])
+    facade = KBToolCompatibilityFacade(storage_shim=shim)
+
+    await facade.cleanup_failed_agent_collection("agent_kb", user_id=7, is_admin=True)
+
+    assert calls == [
+        {
+            "collection_name": "agent_kb",
+            "user_id": 7,
+            "is_admin": False,
+            "delete_orphaned_metadata": True,
+        }
+    ]

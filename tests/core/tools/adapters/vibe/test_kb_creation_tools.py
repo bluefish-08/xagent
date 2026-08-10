@@ -63,9 +63,17 @@ class _FakeMetadataStore:
         self.saved_collections.append(collection)
         self.collection = collection
 
-    async def delete_collection(self, collection_name: str) -> None:
+    async def delete_collection_metadata(
+        self,
+        *,
+        collection_name: str,
+        user_id: int,
+        is_admin: bool = False,
+        delete_orphaned_metadata: bool = False,
+    ) -> dict[str, int]:
         self.deleted_collections.append(collection_name)
         self.collection = None
+        return {"metadata_rows": 1, "config_rows": 0}
 
 
 class _FakeVectorStore:

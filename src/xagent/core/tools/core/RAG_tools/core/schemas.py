@@ -1265,8 +1265,12 @@ class IngestionResult(BaseModel):
         document level. A re-ingest with nothing new to embed does count — its
         chunks are already in the collection, so ``chunk_count`` stays positive
         while ``embedding_count`` is zero. ``partial`` counts for the same
-        reason: whatever landed is real, and callers that roll their document
-        back simply ask before the rollback, not after.
+        reason: whatever landed is real.
+
+        This describes the run, not the collection. A caller that rolls its own
+        document back must either ask before the rollback or exclude the states
+        it rolled back — after a rollback the document is gone but the counts on
+        this result still describe what the run had produced.
         """
         if self.status == "error":
             return 0

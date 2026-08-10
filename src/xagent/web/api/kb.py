@@ -1109,37 +1109,23 @@ async def _rollback_may_delete_collection(
     or published the config since. Either one makes the delete destructive, and
     both are re-read here rather than inferred from the stamp.
 
+    The stamp itself cannot be re-read: `initialize_collection` creates the
+    collection metadata row at step 0 of the ingest (collection_manager.py:598),
+    so by rollback time the row exists for every run and says nothing about
+    whether the collection predated this one.
+
     ponytail: these reads are not atomic with the delete that follows, so a
     sibling that commits inside the window is still exposed. Closing it needs a
     per-collection lock, which the codebase does not have anywhere yet — tracked
     separately rather than invented in a bugfix.
     """
-    if other_document_present:
-        return False
-    if collection_existed_before or _collection_exists_now(collection_name):
+    if collection_existed_before or other_document_present:
         return False
     return not await _collection_config_exists(
         collection_name=collection_name,
         user_id=user_id,
         context=context,
     )
-
-
-def _collection_exists_now(collection_name: str) -> bool:
-    """Re-read the stamped `collection_existed_before` at decision time."""
-    try:
-        get_collection_sync(collection_name)
-    except ValueError:
-        return False
-    except Exception as exc:  # noqa: BLE001
-        # Unknown state must not authorize a destructive delete.
-        logger.warning(
-            "Could not re-read collection %s during rollback: %s",
-            collection_name,
-            exc,
-        )
-        return True
-    return True
 
 
 def _collection_holds_documents(
@@ -3434,8 +3420,14 @@ async def _config_json_preserving_extras(
     config_json: str,
     user_id: int,
     context: str,
-) -> str:
-    """Read the current config row and apply the shared merge rule to it."""
+    collection_existed_before: bool,
+) -> Optional[str]:
+    """Read the current config row and apply the shared merge rule to it.
+
+    Returns ``None`` when a pre-existing collection's settings cannot be read:
+    this write replaces the row wholesale, so writing blind would drop whatever
+    the user had. A brand-new collection has nothing to lose and still writes.
+    """
     try:
         existing = await _get_api_compatibility_facade().get_collection_config(
             collection=collection,
@@ -3443,9 +3435,19 @@ async def _config_json_preserving_extras(
             is_admin=False,
         )
     except Exception as exc:  # noqa: BLE001
+        if collection_existed_before:
+            logger.error(
+                "Could not read the existing collection config of %s/user_%s "
+                "during %s; keeping its settings rather than overwriting: %s",
+                collection,
+                user_id,
+                context,
+                exc,
+            )
+            return None
         logger.warning(
-            "Could not read the existing collection config of %s/user_%s "
-            "during %s, saving this ingest's settings alone: %s",
+            "Could not read the collection config of new %s/user_%s during %s, "
+            "saving this ingest's settings alone: %s",
             collection,
             user_id,
             context,
@@ -3467,6 +3469,7 @@ async def _save_collection_config_after_ingest(
     context: str,
     documents_created: int,
     collection_existed_before: bool = True,
+    run_succeeded: bool = False,
     file_id: Optional[str] = None,
 ) -> None:
     """Publish the collection config only once ingest actually produced documents.
@@ -3481,26 +3484,38 @@ async def _save_collection_config_after_ingest(
     ponytail: a collection deleted while its ingest runs is republished here.
     Cancelling in-flight jobs on delete is the real fix and is out of scope.
     """
-    if documents_created <= 0 and (
-        collection_existed_before
-        or not _collection_holds_documents(
+    publishes_new_collection = not collection_existed_before and (
+        documents_created > 0
+        or _collection_holds_documents(
             collection_name=collection,
             user_id=int(user.id),
             context=context,
             on_error=False,
         )
-    ):
+    )
+    # A pre-existing collection takes this run's settings when the run produced
+    # something, and also when it succeeded while adding nothing (a file that
+    # parsed to no chunks) — the user still submitted those settings with it.
+    updates_existing_settings = collection_existed_before and (
+        documents_created > 0 or run_succeeded
+    )
+    if not publishes_new_collection and not updates_existing_settings:
+        return
+
+    merged_config_json = await _config_json_preserving_extras(
+        collection=collection,
+        config_json=config_json,
+        user_id=int(user.id),
+        context=context,
+        collection_existed_before=collection_existed_before,
+    )
+    if merged_config_json is None:
         return
 
     try:
         await _get_api_compatibility_facade().save_collection_config(
             collection=collection,
-            config_json=await _config_json_preserving_extras(
-                collection=collection,
-                config_json=config_json,
-                user_id=int(user.id),
-                context=context,
-            ),
+            config_json=merged_config_json,
             user_id=int(user.id),
         )
     except Exception as exc:  # noqa: BLE001
@@ -4216,7 +4231,27 @@ async def ingest(
             except OSError:
                 logger.warning("Failed to remove ingest backup %s", file_backup_path)
 
-        # Success here means exactly one document landed, so publish the config.
+        # A file can parse successfully into zero non-blank chunks. Nothing is
+        # searchable then, so publishing would recreate the empty-but-visible
+        # knowledge base one level down, and staying silent would burn the name.
+        if not result.produced_documents:
+            if not collection_existed_before:
+                await _cleanup_failed_new_collection_metadata(
+                    collection_name=safe_collection,
+                    user=_user,
+                )
+            return JSONResponse(
+                status_code=422,
+                content={
+                    **result.model_dump(),
+                    "status": "error",
+                    "message": (
+                        f"{result.message}. No indexable content was found in "
+                        f"{safe_filename}, so nothing was added."
+                    ),
+                },
+            )
+
         await _save_collection_config_after_ingest(
             collection=safe_collection,
             config_json=config.model_dump_json(exclude_unset=True),
@@ -4224,6 +4259,7 @@ async def ingest(
             context="ingest",
             documents_created=result.produced_documents,
             collection_existed_before=collection_existed_before,
+            run_succeeded=True,
             file_id=str(file_record.file_id),
         )
 
@@ -4862,7 +4898,11 @@ async def ingest_cloud(
     api_results = await asyncio.gather(*[process_file(f) for f in request.files])
     results = [api_result.result for api_result in api_results]
 
-    successful_documents = sum(result.produced_documents for result in results)
+    # `partial` and `error` files were rolled back inside `process_file` above,
+    # so only the clean successes still have documents in the collection.
+    successful_documents = sum(
+        result.produced_documents for result in results if result.status == "success"
+    )
     has_failure = any(result.status in {"error", "partial"} for result in results)
 
     if has_failure:

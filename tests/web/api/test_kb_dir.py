@@ -2617,6 +2617,7 @@ async def test_collection_config_save_failure_after_ingest_raises() -> None:
 
     facade = MagicMock()
     facade.save_collection_config = AsyncMock(side_effect=RuntimeError("boom"))
+    facade.get_collection_config = AsyncMock(return_value=None)
 
     with (
         patch("xagent.web.api.kb._get_api_compatibility_facade", return_value=facade),
@@ -2628,6 +2629,7 @@ async def test_collection_config_save_failure_after_ingest_raises() -> None:
             user=MagicMock(id=1),
             context="unit-test",
             documents_created=3,
+            collection_existed_before=False,
         )
 
 
@@ -4987,4 +4989,133 @@ def test_kb_ingest_cloud_empty_batch_is_rejected(test_env) -> None:
         )
 
     assert response.status_code == 422
+    metadata_store.save_collection_config.assert_not_awaited()
+
+
+def test_kb_ingest_zero_chunk_parse_reports_error_and_frees_the_name(
+    test_env, temp_uploads
+) -> None:
+    """A file that parses to no chunks adds nothing, so it must not take a name."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionResult
+
+    app, headers, _user, _ = test_env
+    client = TestClient(app, raise_server_exceptions=False)
+    metadata_store = MagicMock()
+    metadata_store.get_collection_config = AsyncMock(return_value=None)
+    metadata_store.save_collection_config = AsyncMock()
+    metadata_store.delete_collection_metadata = AsyncMock(
+        return_value={"metadata_rows": 1, "config_rows": 0}
+    )
+
+    with (
+        patch(
+            "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+            return_value=metadata_store,
+        ),
+        patch("xagent.web.api.kb._ensure_collection_access", new_callable=AsyncMock),
+        patch("xagent.web.api.kb.get_collection_sync", side_effect=ValueError("new")),
+        patch("xagent.web.api.kb.list_document_records", return_value=[]),
+        patch(
+            "xagent.web.api.kb._upsert_uploaded_file_record",
+            return_value=MagicMock(file_id="file-1"),
+        ),
+        patch(
+            "xagent.web.api.kb.run_document_ingestion",
+            return_value=IngestionResult(
+                status="success",
+                doc_id="doc-1",
+                parse_hash="hash",
+                chunk_count=0,
+                message="ok",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/kb/ingest",
+            files={"file": ("blank.txt", b"   ", "text/plain")},
+            data={"collection": "zero_chunk_kb", "chunk_size": "2048"},
+            headers=headers,
+        )
+
+    assert response.status_code == 422
+    assert "No indexable content" in response.json()["message"]
+    metadata_store.save_collection_config.assert_not_awaited()
+    metadata_store.delete_collection_metadata.assert_awaited_once()
+
+
+def test_kb_ingest_cloud_partial_file_is_not_counted_after_rollback(
+    test_env, temp_uploads
+) -> None:
+    """process_file rolls a partial back, so the batch must not publish for it."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionResult
+
+    app, headers, _user, _ = test_env
+    client = TestClient(app)
+    metadata_store = MagicMock()
+    metadata_store.get_collection_config = AsyncMock(return_value=None)
+    metadata_store.save_collection_config = AsyncMock()
+    metadata_store.delete_collection_metadata = AsyncMock(
+        return_value={"metadata_rows": 1, "config_rows": 0}
+    )
+
+    class _FakeFilesService:
+        def get_media(self, fileId: str):
+            return {"fileId": fileId}
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFilesService()
+
+    class _FakeDownloader:
+        def __init__(self, fh, request_file):
+            self._fh = fh
+
+        def next_chunk(self):
+            self._fh.write(b"cloud-content")
+            return None, True
+
+    with (
+        patch(
+            "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+            return_value=metadata_store,
+        ),
+        patch("xagent.web.api.kb._ensure_collection_access", new_callable=AsyncMock),
+        patch("xagent.web.api.kb.get_collection_sync", side_effect=ValueError("new")),
+        patch("xagent.web.api.kb.list_document_records", return_value=[]),
+        patch("xagent.web.api.kb.get_google_credentials", return_value=object()),
+        patch("xagent.web.api.kb.build", return_value=_FakeDriveService()),
+        patch("xagent.web.api.kb.MediaIoBaseDownload", _FakeDownloader),
+        patch(
+            "xagent.web.api.kb._rollback_failed_cloud_ingestion",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "xagent.web.api.kb.run_document_ingestion",
+            return_value=IngestionResult(
+                status="partial",
+                doc_id="cloud-doc-id",
+                parse_hash="hash",
+                chunk_count=4,
+                message="half of it landed",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/kb/ingest-cloud",
+            json={
+                "collection": "cloud_partial_collection",
+                "chunk_size": 2048,
+                "files": [
+                    {
+                        "provider": "google-drive",
+                        "fileId": "drive-file-1",
+                        "fileName": "doc.txt",
+                    }
+                ],
+            },
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    # The document was rolled back, so nothing may be published for it.
     metadata_store.save_collection_config.assert_not_awaited()

@@ -82,6 +82,11 @@ def _save_job_collection_config_after_ingest(
     documents_created: int,
     result_payload: dict[str, Any] | None = None,
 ) -> None:
+    if documents_created <= 0 and _collection_existed_before(payload):
+        # Nothing to publish, so a missing user is not this job's problem and
+        # raising here would skip the caller's failure cleanup.
+        return
+
     user = _get_job_user(
         db, payload, context=f"save collection config during {context}"
     )

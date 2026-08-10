@@ -603,6 +603,7 @@ async def test_config_merge_keeps_settings_this_ingest_does_not_own(
             config_json='{"chunk_size": 2048}',
             user_id=1,
             context="test",
+            collection_existed_before=True,
         )
     )
 
@@ -833,15 +834,13 @@ async def test_cleanup_does_not_delete_when_the_store_read_fails(
 
 
 @pytest.mark.parametrize(
-    ("existed_before", "other_document", "exists_now", "config", "may_delete"),
+    ("existed_before", "other_document", "config", "may_delete"),
     [
-        (False, False, False, None, True),
-        # the stamp says new, but the collection is there now
-        (False, False, True, None, False),
+        (False, False, None, True),
         # a sibling landed a document, or published the config
-        (False, True, False, None, False),
-        (False, False, False, "{}", False),
-        (True, False, False, None, False),
+        (False, True, None, False),
+        (False, False, "{}", False),
+        (True, False, None, False),
     ],
 )
 @pytest.mark.asyncio
@@ -849,19 +848,12 @@ async def test_rollback_may_delete_collection_reads_live_state(
     monkeypatch: pytest.MonkeyPatch,
     existed_before: bool,
     other_document: bool,
-    exists_now: bool,
     config: Any,
     may_delete: bool,
 ) -> None:
-    def _get_collection_sync(name: str) -> Any:
-        if exists_now:
-            return object()
-        raise ValueError("missing")
-
     async def _get_collection_config(**kwargs: Any) -> Any:
         return config
 
-    monkeypatch.setattr(kb_module, "get_collection_sync", _get_collection_sync)
     monkeypatch.setattr(
         kb_module,
         "_get_api_compatibility_facade",
@@ -881,15 +873,19 @@ async def test_rollback_may_delete_collection_reads_live_state(
 
 
 @pytest.mark.asyncio
-async def test_rollback_keeps_the_collection_when_the_re_read_fails(
+async def test_rollback_keeps_the_collection_when_the_config_read_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unknown state must not authorize deleting a whole collection."""
 
-    def _get_collection_sync(name: str) -> Any:
+    async def _get_collection_config(**kwargs: Any) -> Any:
         raise RuntimeError("metadata store down")
 
-    monkeypatch.setattr(kb_module, "get_collection_sync", _get_collection_sync)
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(get_collection_config=_get_collection_config),
+    )
 
     assert (
         await kb_module._rollback_may_delete_collection(
@@ -956,3 +952,94 @@ def test_job_with_a_missing_user_fails_instead_of_succeeding_silently(
 
     assert excinfo.value.retryable is False
     assert excinfo.value.result == {"file_id": "file-1"}
+
+
+@pytest.mark.asyncio
+async def test_unreadable_config_does_not_overwrite_an_existing_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write replaces the row wholesale, so writing blind would drop settings."""
+    save = AsyncMock()
+
+    async def _unreadable(**kwargs: Any) -> Any:
+        raise RuntimeError("config store down")
+
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(
+            save_collection_config=save, get_collection_config=_unreadable
+        ),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._save_collection_config_after_ingest(
+        collection="kb",
+        config_json='{"chunk_size": 2048}',
+        user=user,
+        context="ingest",
+        documents_created=1,
+        collection_existed_before=True,
+    )
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_config_still_publishes_a_new_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A brand-new collection has no settings to lose."""
+    save = AsyncMock()
+
+    async def _unreadable(**kwargs: Any) -> Any:
+        raise RuntimeError("config store down")
+
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(
+            save_collection_config=save, get_collection_config=_unreadable
+        ),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._save_collection_config_after_ingest(
+        collection="kb",
+        config_json='{"chunk_size": 2048}',
+        user=user,
+        context="ingest",
+        documents_created=1,
+        collection_existed_before=False,
+    )
+
+    save.assert_awaited_once()
+
+
+def test_missing_user_is_ignored_when_there_is_nothing_to_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raising here would skip the caller's failure cleanup."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+    from xagent.web.jobs import kb_tasks
+
+    get_user = MagicMock(return_value=None)
+    monkeypatch.setattr(kb_tasks, "_get_job_user", get_user)
+
+    kb_tasks._save_job_collection_config_after_ingest(
+        MagicMock(),
+        {"collection": "job-kb", "user_id": 13, "collection_existed_before": True},
+        IngestionConfig(),
+        context="background web ingest",
+        documents_created=0,
+    )
+
+    get_user.assert_not_called()
