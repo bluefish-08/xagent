@@ -129,23 +129,33 @@ interface TeamClaim {
 }
 
 /** Which warning, if any, a name has already earned inside the caller's team.
- *  Advisory only -- the server still arbitrates, this just moves the answer
- *  ahead of the ingest instead of after it. */
+ *
+ *  Advisory only -- the server still arbitrates -- but it has to speak up on the
+ *  Personal path too: the ingest endpoints take no ownership parameter and
+ *  resolve storage from the collection name, so a name the team holds produces a
+ *  team-owned knowledge base whatever is picked here. Staying silent there would
+ *  let a private file land in team storage with nothing said. */
 function teamNameNotice(
   claims: TeamClaim[],
   name: string,
   userId: string | undefined,
   ownership: "personal" | "team"
 ): TranslationKey | null {
-  if (ownership !== "team") return null
   const claim = claims.find((held) => held.name === name)
   if (!claim) return null
-  // A backend that predates these two fields would make every match look like a
-  // built knowledge base. Say nothing rather than say the wrong thing.
+  // True regardless of `is_empty`: being listed at all means the team holds the
+  // name, which is what decides where the bytes go.
+  if (ownership !== "team") return "kb.ownership.nameBelongsToTeam"
+  // A backend predating this field would make every match look built.
   if (typeof claim.is_empty !== "boolean") return null
   if (!claim.is_empty) return "kb.ownership.nameIsTeamKnowledgeBase"
-  const mine = claim.created_by_user_id !== null && String(claim.created_by_user_id) === userId
-  return mine ? "kb.ownership.nameHeldByYou" : "kb.ownership.nameHeldByTeammate"
+  // Only claim it is yours when the payload actually says so -- `undefined` is
+  // not `null`, and an unauthenticated render has no id to compare against.
+  const mine =
+    typeof claim.created_by_user_id === "number" &&
+    Boolean(userId) &&
+    String(claim.created_by_user_id) === userId
+  return mine ? "kb.ownership.nameHeldByYou" : "kb.ownership.nameHeldInTeam"
 }
 
 /** "unconfirmed" is a reserve that may or may not have committed server-side --
@@ -154,6 +164,9 @@ function teamNameNotice(
 type ClaimState = "none" | "unconfirmed" | "held"
 
 const LEAKED_CLAIM_TOAST_DURATION = 12000
+
+/** How long a retry waits for the previous release before going ahead anyway. */
+const RELEASE_SETTLE_TIMEOUT_MS = 10_000
 
 const SELECTABLE_CARD_SIZES = {
   sm: { card: "p-4 gap-1", icon: "w-5 h-5 mb-1", label: "text-sm" },
@@ -527,7 +540,16 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // our own claim answers 204, so without this the late release would drop the
     // claim the retry is already ingesting under -- and the knowledge base the
     // user asked to be team-owned would quietly land in personal storage.
-    await pendingRelease.current
+    //
+    // Bounded, because `apiRequest` has no timeout of its own: a black-holed
+    // release would otherwise wedge every later submission on this dialog with
+    // no way out but a page reload. Proceeding after the wait is the lesser
+    // risk -- the window it reopens is the one above, and only for a release
+    // that has already hung for this long.
+    await Promise.race([
+      pendingRelease.current,
+      new Promise((resolve) => window.setTimeout(resolve, RELEASE_SETTLE_TIMEOUT_MS)),
+    ])
     // Set before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to
     // clear it. Only the response below can settle it, and only when it is a
@@ -777,10 +799,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         onSuccess?.(successfulCollections)
       }
     } finally {
-      setIsUploading(false)
-      setCurrentUploadFileName(null)
-      setCurrentUploadCollection(null)
-      setUploadProgressDetail(null)
+      // Only the current submission owns these flags: an abandoned handler
+      // finishing later must not clear the state of the one that replaced it.
+      if (submission.current === mySubmission) {
+        setIsUploading(false)
+        setCurrentUploadFileName(null)
+        setCurrentUploadCollection(null)
+        setUploadProgressDetail(null)
+      }
     }
   }
 
@@ -912,7 +938,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       })
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
-      setIsWebIngesting(false)
+      if (submission.current === mySubmission) setIsWebIngesting(false)
       setWebIngestionProgress(0)
     }
   }
@@ -1011,9 +1037,8 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         throw new Error(failedResults[0].message || t("kb.errors.cloudIngestFailed"))
       }
 
-      toast.success(t("kb.dialog.fileUpload.processSuccess"))
-
       if (submission.current !== mySubmission) return
+      toast.success(t("kb.dialog.fileUpload.processSuccess"))
       // Reset and close
       resetState()
       onOpenChange(false)
@@ -1036,13 +1061,26 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       })
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
-      setIsCloudConnecting(false)
+      if (submission.current === mySubmission) setIsCloudConnecting(false)
     }
   }
 
   // The dialog stays mounted after it closes, so a request outliving it still
   // fires onSuccess — into a consumer that then edits the agent the user is
-  // building. Hold every exit shut instead: button, Esc and the overlay.
+  // building. Every exit stays open; closing disowns the request instead.
+  /** Disown whatever is still running and put the dialog back to a usable state.
+   *
+   *  Both close paths go through here: leaving the in-flight flags set would
+   *  reopen onto a "Processing" button owned by a request whose result is
+   *  already discarded, which is the trap this whole change exists to avoid. */
+  const abandonSubmission = () => {
+    submission.current += 1
+    setIsUploading(false)
+    setIsWebIngesting(false)
+    setIsCloudConnecting(false)
+    resetState()
+  }
+
   const isIngestInFlight = isUploading || isWebIngesting || isCloudConnecting
   const nameNotice = teamNameNotice(teamClaims, trimmedCollectionName, user?.id, ownership)
 
@@ -1063,7 +1101,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         // handler is abandoned, which is what the stale-onSuccess guard needs.
         // Blocking the exits instead left the dialog unclosable whenever a job
         // failed to reach a terminal state.
-        if (!next) submission.current += 1
+        if (!next) abandonSubmission()
         onOpenChange(next)
       }}>
         <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col p-0 bg-slate-50">
@@ -1107,10 +1145,22 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                     className="mt-1.5"
                     aria-required="true"
                     aria-invalid={nameError !== null}
-                    aria-describedby={nameError ? "collection_name_error" : undefined}
+                    aria-describedby={
+                      nameError
+                        ? "collection_name_error"
+                        : nameNotice
+                          ? "collection_name_notice"
+                          : undefined
+                    }
                   />
                   {!nameError && nameNotice && (
-                    <p className="mt-2 text-sm text-amber-600">{t(nameNotice)}</p>
+                    <p
+                      id="collection_name_notice"
+                      role="status"
+                      className="mt-2 text-sm text-amber-600"
+                    >
+                      {t(nameNotice)}
+                    </p>
                   )}
                   {nameError && (
                     <p id="collection_name_error" className="mt-2 text-sm text-destructive">
@@ -1605,8 +1655,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
           <div className="p-6 pt-4 flex justify-between border-t bg-white rounded-b-lg">
             <Button variant="outline" onClick={() => {
-              submission.current += 1
-              resetState()
+              abandonSubmission()
               onOpenChange(false)
             }}>
               {t("common.cancel")}

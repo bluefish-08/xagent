@@ -703,6 +703,32 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     expect(onSuccess).not.toHaveBeenCalled()
   })
 
+  it("reopens usable after closing mid-ingest", async () => {
+    // Bumping the counter alone left isUploading set, so reopening showed a
+    // disabled "Processing" button owned by a request already disowned.
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => new Promise(() => {})
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "half-done" },
+    })
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(screen.getByText("kb.dialog.fileUpload.processing")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+
+    expect(screen.queryByText("kb.dialog.fileUpload.processing")).toBeNull()
+    // Back on step 1 with an empty name, not mid-flight on a discarded run.
+    expect((container.querySelector("#collection_name") as HTMLInputElement)?.value).toBe("")
+  })
+
   it("still closes when the ingest never reaches a terminal state", async () => {
     // A job stuck in "running" used to poll forever with every exit blocked,
     // leaving a page reload as the only way out.
@@ -952,7 +978,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
 
   it.each([
     ["own bare claim", 7, true, "kb.ownership.nameHeldByYou"],
-    ["a teammate's bare claim", 99, true, "kb.ownership.nameHeldByTeammate"],
+    ["reserved by someone in the team", 99, true, "kb.ownership.nameHeldInTeam"],
     ["a built team knowledge base", 99, false, "kb.ownership.nameIsTeamKnowledgeBase"],
   ])(
     "warns on step 1 that the name is %s",
@@ -975,9 +1001,10 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     }
   )
 
-  it("says nothing about a team claim while Personal is selected", async () => {
-    // Creating a personal knowledge base never touches the team reservation, so
-    // "creating it now reuses that reservation" would simply be untrue.
+  it("warns that a team-held name produces a team knowledge base on the Personal path", async () => {
+    // The ingest endpoints take no ownership parameter and resolve storage from
+    // the name, so picking Personal does not keep the files personal. Saying
+    // nothing here is how a private file reaches team storage unannounced.
     mockRoute(
       (url) => url === "http://api.local/api/knowledge-bases/team-status",
       () =>
@@ -992,12 +1019,13 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       target: { value: "team-docs" },
     })
 
-    await waitFor(() => {
-      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
-    })
-    expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
+    expect(await screen.findByText("kb.ownership.nameBelongsToTeam")).toBeInTheDocument()
+    // The input points a screen reader at whichever message is showing.
+    expect(container.querySelector("#collection_name")?.getAttribute("aria-describedby")).toBe(
+      "collection_name_notice"
+    )
 
-    // Switching to Team is what makes it relevant.
+    // Switching to Team swaps in the reservation-specific wording.
     fireEvent.click(container.querySelector("#kb-ownership-team") as HTMLElement)
     expect(await screen.findByText("kb.ownership.nameHeldByYou")).toBeInTheDocument()
   })
@@ -1033,7 +1061,7 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
     })
-    expect(screen.queryByText("kb.ownership.nameHeldByTeammate")).toBeNull()
+    expect(screen.queryByText("kb.ownership.nameHeldInTeam")).toBeNull()
     expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
   })
 
@@ -1168,6 +1196,56 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(firstCallIndex((url) => url === RELEASE_URL)).toBeLessThan(
       apiRequestMock.mock.calls.findLastIndex(([url]) => url === RESERVE_URL)
     )
+  })
+
+  it("gives up waiting on a release that never answers", async () => {
+    // apiRequest has no timeout, so an unbounded await here wedged every later
+    // submission on this dialog instance with only a page reload to recover.
+    vi.useFakeTimers()
+    try {
+      mockRoute(
+        (url) => url === RELEASE_URL,
+        () => new Promise(() => {})
+      )
+      let ingestAttempts = 0
+      mockRoute(
+        (url) => url === "http://api.local/api/kb/ingest/jobs",
+        () => {
+          ingestAttempts += 1
+          return ingestAttempts === 1
+            ? createJsonResponse({ detail: "ingest exploded" }, 500)
+            : createJsonResponse(
+                createSucceededJob({
+                  status: "success",
+                  collection: "team-docs",
+                  document_count: 1,
+                  chunks_count: 1,
+                  message: "ok",
+                })
+              )
+        }
+      )
+
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+      nameAndChooseTeam(container)
+      await goToStep3(container, "file")
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await vi.waitFor(() => {
+        expect(callsTo(RELEASE_URL)).toHaveLength(1)
+      })
+
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      // The release never answered; the retry proceeded rather than hanging.
+      await vi.waitFor(() => {
+        expect(callsTo(RESERVE_URL)).toHaveLength(2)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("keeps a way back to personal after team membership is lost for good", async () => {

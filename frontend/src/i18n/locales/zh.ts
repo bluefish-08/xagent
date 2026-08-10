@@ -1887,7 +1887,8 @@ const zh = {
       failed: "更新知识库归属失败",
       reserveFailed: "无法为团队登记该名称",
       nameHeldByYou: "你已登记过该名称，现在创建会沿用这条登记。",
-      nameHeldByTeammate: "队友已登记该名称。请他们释放，或另取一个。",
+      nameHeldInTeam: "团队里已经登记了该名称。请持有者释放，或另取一个。",
+      nameBelongsToTeam: "该名称归你的团队所有，用它创建的知识库会属于团队，而不是你个人。",
       nameIsTeamKnowledgeBase: "团队里已经有同名的知识库。",
       releaseFailed: "该名称的团队登记未能释放，可能需要团队管理员清理。",
       personalDesc: "仅你自己可见",
@@ -1896,7 +1897,6 @@ const zh = {
     errors: {
       loadFailed: "知识库加载失败",
       nameRequired: "知识库名称不能为空",
-      nameTaken: "同名知识库已存在，请换一个名称。",
       createFailed: "创建知识库失败",
       uploadFileRequired: "请选择要上传的文件",
       uploadFailedFile: "上传文件失败: {name}",
