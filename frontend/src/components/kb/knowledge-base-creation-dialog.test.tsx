@@ -1378,13 +1378,20 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
         expect(callsTo(RELEASE_URL)).toHaveLength(1)
       })
 
+      toastErrorMock.mockReset()
       fireEvent.click(screen.getByText("kb.dialog.createButton"))
       await vi.advanceTimersByTimeAsync(10_000)
 
-      // The release never answered; the retry proceeded rather than hanging.
+      // The release never answered; the retry failed visibly instead of either
+      // hanging forever or reserving underneath a release that may still land
+      // and drop the fresh claim mid-ingest.
       await vi.waitFor(() => {
-        expect(callsTo(RESERVE_URL)).toHaveLength(2)
+        expect(JSON.stringify(toastErrorMock.mock.calls)).toContain(
+          "kb.ownership.releaseStillPending"
+        )
       })
+      expect(callsTo(RESERVE_URL)).toHaveLength(1)
+      expect(ingestAttempts).toBe(1)
     } finally {
       vi.useRealTimers()
     }

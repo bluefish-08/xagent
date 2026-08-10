@@ -544,13 +544,18 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     //
     // Bounded, because `apiRequest` has no timeout of its own: a black-holed
     // release would otherwise wedge every later submission on this dialog with
-    // no way out but a page reload. Proceeding after the wait is the lesser
-    // risk -- the window it reopens is the one above, and only for a release
-    // that has already hung for this long.
-    await Promise.race([
-      pendingRelease.current,
-      new Promise((resolve) => window.setTimeout(resolve, RELEASE_SETTLE_TIMEOUT_MS)),
-    ])
+    // no way out but a page reload. Timing out fails the attempt rather than
+    // proceeding: proceeding would reopen the very race above, silently, while
+    // this is a visible error the user can retry once the release settles.
+    if (pendingRelease.current) {
+      const settled = await Promise.race([
+        pendingRelease.current.then(() => true),
+        new Promise<boolean>((resolve) =>
+          window.setTimeout(() => resolve(false), RELEASE_SETTLE_TIMEOUT_MS),
+        ),
+      ])
+      if (!settled) throw new Error(t("kb.ownership.releaseStillPending"))
+    }
     // Set before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to
     // clear it. Only the response below can settle it, and only when it is a
