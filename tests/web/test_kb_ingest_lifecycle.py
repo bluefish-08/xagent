@@ -1051,6 +1051,24 @@ def test_missing_user_is_ignored_when_there_is_nothing_to_publish(
     get_user.assert_not_called()
 
 
+def test_missing_user_on_a_failed_new_collection_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's metadata cleanup runs after this; raising would orphan the row."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+    from xagent.web.jobs import kb_tasks
+
+    monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: None)
+
+    kb_tasks._save_job_collection_config_after_ingest(
+        MagicMock(),
+        {"collection": "job-kb", "user_id": 13, "collection_existed_before": False},
+        IngestionConfig(),
+        context="background web ingest",
+        documents_created=0,
+    )
+
+
 @pytest.mark.parametrize(
     ("existed_before", "expected"),
     [(True, "knowledge base settings"), (False, "not listed yet")],
