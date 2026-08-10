@@ -49,12 +49,14 @@ class AgentKnowledgeBaseService:
         self,
         collection_name: str,
         ingestion_config: IngestionConfig,
+        collection_existed_before: bool = False,
     ) -> None:
         """Make the knowledge base visible; call only once it holds documents."""
         await _get_tool_compatibility_facade().publish_agent_collection(
             collection_name=collection_name,
             ingestion_config=ingestion_config,
             user_id=self.user_id,
+            collection_existed_before=collection_existed_before,
         )
 
     async def refresh_collection_metadata(self, collection_name: str) -> None:
@@ -82,6 +84,7 @@ async def _publish_collection_impl(
     collection_name: str,
     ingestion_config: IngestionConfig,
     user_id: int,
+    collection_existed_before: bool = False,
 ) -> None:
     from ...core.RAG_tools.kb.config_merge import merge_collection_config_json
     from ...core.RAG_tools.storage.factory import get_metadata_store
@@ -96,8 +99,21 @@ async def _publish_collection_impl(
             collection_name, user_id, is_admin=False
         )
     except Exception as exc:  # noqa: BLE001
+        if collection_existed_before:
+            # The write replaces the row wholesale and the agent config sets only
+            # the embedding model, so writing blind here would wipe the chunking
+            # and rerank settings the user saved. The collection is already
+            # listed, so keeping its settings costs this run nothing.
+            logger.error(
+                "Could not read the existing config of agent knowledge base %s; "
+                "keeping its settings rather than overwriting: %s",
+                collection_name,
+                exc,
+            )
+            return
         logger.warning(
-            "Could not read the existing config of agent knowledge base %s: %s",
+            "Could not read the config of new agent knowledge base %s, saving "
+            "this ingest's settings alone: %s",
             collection_name,
             exc,
         )

@@ -218,6 +218,7 @@ class KBToolCompatibilityFacade:
         collection_name: str,
         ingestion_config: IngestionConfig,
         user_id: int,
+        collection_existed_before: bool = False,
     ) -> None:
         from ....adapters.vibe import agent_kb_service
 
@@ -230,6 +231,7 @@ class KBToolCompatibilityFacade:
                 collection_name=collection_name,
                 ingestion_config=ingestion_config,
                 user_id=user_id,
+                collection_existed_before=collection_existed_before,
             )
 
     async def agent_collection_exists(self, collection: str) -> bool:
@@ -265,9 +267,13 @@ class KBToolCompatibilityFacade:
 
         with self._storage_context():
             try:
-                # Owner-scoped on both sides: an admin-wide read would see
-                # another tenant's documents and abort a cleanup that is safe,
-                # leaving this import's orphaned row to block the name forever.
+                # Owner-scoped on both sides, matching the delete below: an
+                # admin-wide read would see another tenant's documents under the
+                # same name and abort, leaving this import's orphaned row to
+                # block the name forever. What this read cannot see is a sibling
+                # whose documents landed but whose config is not published yet;
+                # the delete's own "no tenant holds a config" check is the only
+                # guard left there, and that window is tracked in issue #1242.
                 records = get_vector_index_store().list_document_records(
                     collection_name=collection,
                     user_id=user_id,

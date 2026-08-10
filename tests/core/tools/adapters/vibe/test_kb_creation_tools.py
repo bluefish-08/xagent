@@ -54,6 +54,17 @@ class _FakeMetadataStore:
             }
         )
 
+    async def get_collection_config(
+        self,
+        collection: str,
+        user_id: int | None,
+        is_admin: bool = False,
+    ) -> str | None:
+        for saved in reversed(self.saved_configs):
+            if saved["collection"] == collection:
+                return str(saved["config_json"])
+        return None
+
     async def get_collection(self, collection: str) -> CollectionInfo:
         if self.collection is None or self.collection.name != collection:
             raise ValueError(f"Collection {collection!r} not found")
@@ -1296,3 +1307,60 @@ async def test_create_kb_from_file_failed_ingest_cleans_up_a_new_collection(tmp_
     assert result["success"] is False
     service.cleanup_failed_collection.assert_awaited_once_with("agent_file_kb")
     service.publish_collection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_publish_keeps_settings_when_the_config_read_fails():
+    """The agent config sets only the embedding model, so a blind write wipes the rest."""
+    metadata_store = MagicMock()
+    metadata_store.save_collection_config = AsyncMock()
+    metadata_store.get_collection_config = AsyncMock(
+        side_effect=RuntimeError("config store down")
+    )
+    metadata_store.get_collection = AsyncMock(
+        return_value=CollectionInfo(name="agent url kb")
+    )
+    metadata_store.save_collection = AsyncMock()
+    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+        return_value=metadata_store,
+    ):
+        await service.publish_collection(
+            "agent url kb",
+            IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID),
+            collection_existed_before=True,
+        )
+
+    metadata_store.save_collection_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_publish_of_a_new_collection_survives_a_config_read_failure():
+    """A new collection has no settings to lose, and not writing leaves it invisible."""
+    metadata_store = MagicMock()
+    metadata_store.save_collection_config = AsyncMock()
+    metadata_store.get_collection_config = AsyncMock(
+        side_effect=RuntimeError("config store down")
+    )
+    metadata_store.get_collection = AsyncMock(
+        side_effect=ValueError("Collection 'agent url kb' not found")
+    )
+    metadata_store.save_collection = AsyncMock()
+    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+
+    with patch(
+        "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
+        return_value=metadata_store,
+    ):
+        await service.publish_collection(
+            "agent url kb",
+            IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID),
+            collection_existed_before=False,
+        )
+
+    _, save_kwargs = metadata_store.save_collection_config.await_args
+    assert json.loads(save_kwargs["config_json"])["embedding_model_id"] == (
+        DEFAULT_EMBEDDING_MODEL_ID
+    )

@@ -92,9 +92,10 @@ def _save_job_collection_config_after_ingest(
     )
     if user is None:
         if documents_created <= 0:
-            # A new collection with nothing ingested: the publish decision needs
-            # the store anyway, and raising here would skip the caller's failure
-            # cleanup and orphan the metadata row.
+            # Nothing landed, so there is nothing this user was needed for.
+            # Raising would replace the real failure — the crawl's own message,
+            # retryable when the crawl genuinely failed — with a non-retryable
+            # "user no longer exists" that says nothing about what went wrong.
             return
         # Returning here would mark the job SUCCEEDED with nothing published:
         # a successful import the user cannot see and has no error to act on.

@@ -173,7 +173,11 @@ async def _create_knowledge_base_from_url_impl(
             ).model_dump()
 
         try:
-            await kb_service.publish_collection(collection_name, ingest_config)
+            await kb_service.publish_collection(
+                collection_name,
+                ingest_config,
+                collection_existed_before=collection_existed_before,
+            )
         except AgentKnowledgeBaseError as exc:
             # The pages landed; retrying would re-crawl and duplicate them.
             logger.error("Could not publish agent knowledge base: %s", exc)

@@ -156,6 +156,7 @@ async def test_publish_agent_collection_binds_backend_with_the_config(monkeypatc
         collection_name: str,
         ingestion_config: IngestionConfig,
         user_id: int,
+        collection_existed_before: bool = False,
     ) -> None:
         published.append(user_id)
 

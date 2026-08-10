@@ -249,7 +249,11 @@ async def _create_knowledge_base_from_file_impl(
             message += f" Warnings: {'; '.join(errors)}"
 
         try:
-            await kb_service.publish_collection(collection_name, config)
+            await kb_service.publish_collection(
+                collection_name,
+                config,
+                collection_existed_before=collection_existed_before,
+            )
         except AgentKnowledgeBaseError as exc:
             # The files landed; retrying would duplicate them. Report the
             # collection name so the caller can act on what exists.
