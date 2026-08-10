@@ -1412,7 +1412,6 @@ def test_ingest_web_error_with_successful_docs_keeps_new_collection_config(
     metadata_store.get_collection_config = AsyncMock(return_value=None)
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.delete_collection_metadata = AsyncMock()
-    metadata_store.delete_collection = AsyncMock()
 
     with (
         patch(
@@ -1453,7 +1452,6 @@ def test_ingest_web_error_with_successful_docs_keeps_new_collection_config(
     assert response.status_code == 500
     metadata_store.delete_collection_metadata.assert_not_awaited()
     metadata_store.save_collection_config.assert_awaited_once()
-    metadata_store.delete_collection.assert_not_awaited()
 
 
 def test_ingest_web_error_with_rollback_side_effects_skips_metadata_cleanup(
@@ -1514,7 +1512,6 @@ def test_ingest_web_existing_collection_error_keeps_previous_config(app_with_kb)
     metadata_store.get_collection_config = AsyncMock(return_value='{"chunk_size":333}')
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.delete_collection_metadata = AsyncMock()
-    metadata_store.delete_collection = AsyncMock()
 
     with (
         patch(
@@ -1565,7 +1562,6 @@ def test_ingest_web_config_only_collection_error_drops_ghost_config(
     metadata_store.get_collection_config = AsyncMock(return_value='{"chunk_size":333}')
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.delete_collection_metadata = AsyncMock()
-    metadata_store.delete_collection = AsyncMock()
 
     with (
         patch(
@@ -1731,7 +1727,6 @@ def test_ingest_web_zero_pages_without_failures_reports_error(app_with_kb):
     metadata_store.get_collection_config = AsyncMock(return_value=None)
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.delete_collection_metadata = AsyncMock()
-    metadata_store.delete_collection = AsyncMock()
 
     with (
         patch(

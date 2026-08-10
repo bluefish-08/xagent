@@ -1769,3 +1769,104 @@ def test_registered_handler_retryable_error_flows_through_execute_background_job
         assert "transient downstream failure" in str(refreshed.error_message)
     finally:
         verify_db.close()
+
+
+class _ExplodingEmbeddingAdapter(_StubEmbeddingAdapter):
+    """Fails where the real pipeline embeds, after the collection row exists."""
+
+    def encode(self, text, dimension=None, instruct=None):
+        raise RuntimeError("embedding backend down")
+
+
+def test_kb_document_job_failed_new_collection_publishes_nothing_end_to_end(
+    tmp_path, monkeypatch
+):
+    """The real publish/cleanup path, not a stub: a failed new collection leaves no row.
+
+    Every other job test patches ``_save_job_collection_config_after_ingest`` out,
+    so the config write and the metadata cleanup are never exercised together for
+    the scenario this PR targets.
+    """
+    import asyncio
+
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+    monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
+    monkeypatch.setenv("LANCEDB_DIR", str((tmp_path / "lancedb").resolve()))
+
+    from xagent.core.model.model import EmbeddingModelConfig
+    from xagent.core.storage.manager import initialize_storage_manager
+    from xagent.core.tools.core.RAG_tools.pipelines import document_ingestion
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+    from xagent.web.jobs.exceptions import BackgroundJobHandlerError
+    from xagent.web.jobs.kb_tasks import handle_kb_ingest_document
+
+    storage_root = tmp_path / "storage"
+    uploads_dir = storage_root / "uploads"
+    uploads_dir.mkdir(parents=True)
+    initialize_storage_manager(str(storage_root), str(uploads_dir))
+
+    stub_config = EmbeddingModelConfig(
+        id="embedding-default",
+        model_name="stub",
+        model_provider="stub",
+        dimension=2,
+    )
+    monkeypatch.setattr(
+        document_ingestion,
+        "_resolve_embedding_adapter",
+        lambda _cfg: (stub_config, _ExplodingEmbeddingAdapter()),
+    )
+    monkeypatch.setattr(
+        "xagent.core.tools.core.RAG_tools.management.collection_manager.resolve_embedding_adapter",
+        lambda *args, **kwargs: (stub_config, _StubEmbeddingAdapter()),
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "kb-failed-publish.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="kb-failed-publish-test")
+        staged_file = tmp_path / "stage" / "doc.txt"
+        target_file = tmp_path / "canonical" / "doc.txt"
+        staged_file.parent.mkdir(parents=True)
+        staged_file.write_text("staged content", encoding="utf-8")
+        ingestion_config = IngestionConfig(embedding_model_id="embedding-default")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_DOCUMENT,
+            payload={
+                "collection": "failed_kb",
+                "source_path": str(staged_file),
+                "target_path": str(target_file),
+                "file_id": "66666666-6666-4666-8666-666666666666",
+                "filename": "doc.txt",
+                "mime_type": "text/plain",
+                "file_size": staged_file.stat().st_size,
+                "user_id": int(user.id),
+                "is_admin": False,
+                "ingestion_config": ingestion_config.model_dump(mode="json"),
+                "collection_existed_before": False,
+            },
+        )
+
+        with pytest.raises(BackgroundJobHandlerError):
+            handle_kb_ingest_document(db, job)
+
+        store = get_metadata_store()
+        assert (
+            asyncio.run(
+                store.get_collection_config(
+                    collection="failed_kb",
+                    user_id=int(user.id),
+                    is_admin=False,
+                )
+            )
+            is None
+        )
+        # The name has to stay reusable: a leftover metadata row is invisible to
+        # its owner and still answers 409 from every route. The store raises
+        # rather than returning None when the row is gone.
+        with pytest.raises(ValueError):
+            asyncio.run(store.get_collection("failed_kb"))
+    finally:
+        db.close()

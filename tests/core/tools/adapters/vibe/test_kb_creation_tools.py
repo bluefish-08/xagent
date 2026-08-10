@@ -336,6 +336,9 @@ async def test_create_kb_from_url_empty_crawl_publishes_nothing(monkeypatch):
     assert result["success"] is False
     assert "No pages were ingested" in result["message"]
     service.publish_collection.assert_not_awaited()
+    # The pipeline wrote a metadata row for a collection that now holds nothing;
+    # leaving it behind 409-blocks the name while staying invisible to its owner.
+    service.cleanup_failed_collection.assert_awaited_once_with("agent_url_kb")
     service.refresh_collection_metadata.assert_not_awaited()
 
 
@@ -593,6 +596,8 @@ async def test_create_kb_from_file_continues_after_unexpected_ingest_error(tmp_p
         in result["message"]
     )
     service.refresh_collection_metadata.assert_awaited_once_with("agent_file_kb")
+    # One file landed, so the collection is real: cleaning it up would delete it.
+    service.cleanup_failed_collection.assert_not_awaited()
     assert run_ingestion.call_count == 2
     db.close.assert_called_once()
 
@@ -1163,3 +1168,131 @@ async def test_create_kb_from_file_publishes_a_partial_it_did_not_roll_back(tmp_
     assert result["success"] is True
     service.publish_collection.assert_awaited_once()
     service.cleanup_failed_collection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_file_publish_failure_keeps_the_collection_name(tmp_path):
+    """The files landed; retrying would duplicate them, so the caller needs the name."""
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    file_record = SimpleNamespace(
+        user_id=7,
+        filename="notes.txt",
+        storage_path=str(source_file),
+        file_id="file-1",
+    )
+
+    query = MagicMock()
+    query.filter.return_value = query
+    query.all.return_value = [file_record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    def fake_get_db():
+        yield from _fake_db_generator(db)
+
+    ingest_result = IngestionResult(
+        status="success",
+        doc_id="doc-1",
+        parse_hash="parse-1",
+        chunk_count=2,
+        embedding_count=2,
+        vector_count=2,
+        completed_steps=[_ingestion_step("register_document", doc_id="doc-1")],
+        message="ok",
+        warnings=[],
+        file_id="file-1",
+    )
+
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.collection_exists = AsyncMock(return_value=False)
+    service.cleanup_failed_collection = AsyncMock()
+    service.publish_collection = AsyncMock(
+        side_effect=AgentKnowledgeBaseError("config store down")
+    )
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch("xagent.web.models.database.get_db", side_effect=fake_get_db),
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.document_ingestion.run_document_ingestion",
+            new=Mock(return_value=ingest_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromFileTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"file_ids": ["file-1"], "collection_name": "agent_file_kb"}
+        )
+
+    assert result["success"] is False
+    assert result["collection_name"] == "agent_file_kb"
+    assert "Do not re-import" in result["message"]
+    # The document is in the collection, so cleaning up would delete it.
+    service.cleanup_failed_collection.assert_not_awaited()
+    service.refresh_collection_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_file_failed_ingest_cleans_up_a_new_collection(tmp_path):
+    """Nothing landed, so the metadata row the pipeline wrote must not block the name."""
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    file_record = SimpleNamespace(
+        user_id=7,
+        filename="notes.txt",
+        storage_path=str(source_file),
+        file_id="file-1",
+    )
+
+    query = MagicMock()
+    query.filter.return_value = query
+    query.all.return_value = [file_record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    def fake_get_db():
+        yield from _fake_db_generator(db)
+
+    failed_result = IngestionResult(
+        status="error",
+        doc_id="doc-1",
+        parse_hash="",
+        chunk_count=0,
+        completed_steps=[],
+        failed_step="parse_document",
+        message="parse failed",
+        warnings=[],
+        file_id="file-1",
+    )
+
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.collection_exists = AsyncMock(return_value=False)
+    service.cleanup_failed_collection = AsyncMock()
+    service.publish_collection = AsyncMock()
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch("xagent.web.models.database.get_db", side_effect=fake_get_db),
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.document_ingestion.run_document_ingestion",
+            new=Mock(return_value=failed_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromFileTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"file_ids": ["file-1"], "collection_name": "agent_file_kb"}
+        )
+
+    assert result["success"] is False
+    service.cleanup_failed_collection.assert_awaited_once_with("agent_file_kb")
+    service.publish_collection.assert_not_awaited()

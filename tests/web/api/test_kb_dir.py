@@ -2521,8 +2521,15 @@ def test_kb_ingest_success_publishes_collection_config(test_env, temp_uploads) -
                 completed_steps=[IngestionStepResult(name="register_document")],
                 message="ok",
             ),
-        ),
+        ) as ingest_mock,
     ):
+        # Same parent, so the assertion below sees one ordered call log: saving
+        # the config first is exactly the bug this PR fixes, and a test that
+        # only counts the calls would pass on it.
+        order = MagicMock()
+        order.attach_mock(ingest_mock, "ingest")
+        order.attach_mock(metadata_store.save_collection_config, "save")
+
         response = client.post(
             "/api/kb/ingest",
             files={"file": ("test_doc.txt", b"content", "text/plain")},
@@ -2531,6 +2538,7 @@ def test_kb_ingest_success_publishes_collection_config(test_env, temp_uploads) -
         )
 
     assert response.status_code == 200
+    assert [name for name, _, _ in order.mock_calls] == ["ingest", "save"]
     saved = metadata_store.save_collection_config.await_args_list
     assert len(saved) == 1
     assert saved[0].kwargs["collection"] == "brand_new_collection"
@@ -2538,7 +2546,7 @@ def test_kb_ingest_success_publishes_collection_config(test_env, temp_uploads) -
     metadata_store.delete_collection_metadata.assert_not_awaited()
 
 
-def test_kb_ingest_config_only_collection_failure_drops_ghost_config(
+def test_kb_ingest_config_only_collection_failure_does_not_republish_ghost_config(
     test_env, temp_uploads
 ) -> None:
     """A failed ingest must not republish the config of a config-only ghost.
