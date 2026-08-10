@@ -695,9 +695,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     try {
       const apiUrl = getApiUrl()
+      // Capability probe before the claim: it does not depend on the reserve,
+      // and asking afterwards would hold the name through an extra round trip.
+      const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       // Once, before the loop: every file shares one collection.
       await reserveTeamName(collectionName, teamClaimed, live)
-      const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       for (let i = 0; i < selectedFiles.length; i++) {
         // A disowned run posts nothing further: files already sent may finish
         // server-side under the claim, the rest never leave the browser. The
@@ -872,8 +874,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     try {
       const apiUrl = getApiUrl()
-      await reserveTeamName(collectionName, teamClaimed, live)
+      // Same order as the file path: probe capability first, claim second.
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
+      await reserveTeamName(collectionName, teamClaimed, live)
       const formData = new FormData()
 
       formData.append("collection", collectionName)
