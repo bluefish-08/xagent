@@ -729,6 +729,61 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     expect((container.querySelector("#collection_name") as HTMLInputElement)?.value).toBe("")
   })
 
+  it("does not paint an abandoned run's result into a reopened dialog", async () => {
+    // The result card is what the user reads as belonging to the run on screen,
+    // so a crawl disowned minutes ago must not write into it.
+    let finishWeb: (value: unknown) => void = () => {}
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest-web/jobs",
+      () => new Promise((resolve) => {
+        finishWeb = resolve
+      })
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "docs-v1" },
+    })
+    await goToStep3(container, "web")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(screen.getByText("kb.dialog.fileUpload.processing")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+
+    // Reopened and walked back to step 3 for a different knowledge base: this
+    // is where a late write would be read as belonging to the run on screen.
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "reports-2026" },
+    })
+    await goToStep3(container, "web")
+
+    finishWeb(
+      createJsonResponse({
+        status: "partial",
+        collection: "docs-v1",
+        message: "docs-v1 crawl stats",
+        total_urls_found: 9,
+        pages_crawled: 9,
+        pages_failed: 0,
+        documents_created: 9,
+        chunks_created: 9,
+        embeddings_created: 9,
+        crawled_urls: [],
+        failed_urls: {},
+        warnings: [],
+        elapsed_time_ms: 0,
+      })
+    )
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest-web/jobs")).toHaveLength(1)
+    })
+    expect(screen.queryByText("docs-v1 crawl stats")).toBeNull()
+  })
+
   it("still closes when the ingest never reaches a terminal state", async () => {
     // A job stuck in "running" used to poll forever with every exit blocked,
     // leaving a page reload as the only way out.

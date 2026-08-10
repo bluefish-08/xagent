@@ -332,9 +332,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   })
 
   // Bumped whenever a submission is abandoned (the dialog closed) or a new one
-  // starts. A handler compares the value it captured before every state write
-  // and every onSuccess, so a request outliving the dialog cannot touch the UI
-  // or hand a knowledge base to a consumer the user already walked away from.
+  // starts. A handler compares the value it captured before anything the user
+  // would read as belonging to the current run -- the result cards, the
+  // in-flight flags, and onSuccess. Progress numbers are left unguarded on
+  // purpose: they are overwritten by the next submission and cleared by
+  // resetState, so a stale one cannot outlive the run it came from.
   const submission = useRef(0)
 
   // Names the team already holds, claim or built alike. Read once per open so a
@@ -764,7 +766,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           ingestionResult,
           { collection: collectionName, fileName: file.name }
         )
-        setIngestionResults(prev => [...prev, normalizedResult])
+        if (submission.current === mySubmission) {
+          setIngestionResults(prev => [...prev, normalizedResult])
+        }
 
         if (normalizedResult.status === "partial" && normalizedResult.failed_step) {
           throw new Error(normalizedResult.message || t("kb.errors.failedAtStep", { step: normalizedResult.failed_step }))
@@ -873,14 +877,18 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         failedStatus = response.status
         const errorData = isJsonRecord(parsed.data) ? parsed.data : {}
         if (errorData.status === 'error') {
-          setWebIngestionResult(errorData as unknown as WebIngestionResult)
+          if (submission.current === mySubmission) {
+            setWebIngestionResult(errorData as unknown as WebIngestionResult)
+          }
           throw new Error((typeof errorData.message === 'string' && errorData.message) || t("kb.errors.webIngestFailed"))
         }
         const errorMessage = getUploadErrorMessage(response, parsed, {
           generic: t("kb.errors.webIngestFailed") || "Website import failed",
           ...UPLOAD_ERROR_MESSAGES,
         })
-        setWebIngestionResult(buildWebIngestionErrorResult(collectionName, errorMessage))
+        if (submission.current === mySubmission) {
+          setWebIngestionResult(buildWebIngestionErrorResult(collectionName, errorMessage))
+        }
         throw new Error(errorMessage)
       }
 
@@ -902,7 +910,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           job,
           t("kb.errors.webIngestFailed")
         )
-        setWebIngestionResult(
+        if (submission.current === mySubmission) setWebIngestionResult(
           isJsonRecord(resultData)
             ? resultData as unknown as WebIngestionResult
             : buildWebIngestionErrorResult(collectionName, errorMessage)
@@ -915,7 +923,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       if (!result) {
         throw new Error(t("kb.errors.webIngestFailed"))
       }
-      setWebIngestionResult(result)
+      if (submission.current === mySubmission) setWebIngestionResult(result)
       setWebIngestionProgress(100)
       if (result.status !== "success") {
         throw new Error(result.message || t("kb.errors.webIngestFailed"))
