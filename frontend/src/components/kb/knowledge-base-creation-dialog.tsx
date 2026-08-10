@@ -362,6 +362,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     }
   }, [open])
 
+  // Bumped when a release fails while the dialog is still open: the claim just
+  // leaked, and a step-1 notice reflecting it beats a 12s toast as the record.
+  const [claimsRefresh, setClaimsRefresh] = useState(0)
+
   // Advisory only, and only inside a team: standalone builds have no such route,
   // so a failure here costs the collision warning and nothing else.
   useEffect(() => {
@@ -384,7 +388,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     return () => {
       cancelled = true
     }
-  }, [open, inTeam])
+  }, [open, inTeam, claimsRefresh])
 
   useEffect(() => {
     if (!isUploading || !currentUploadFileName || !currentUploadCollection) return
@@ -646,6 +650,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     toast.warning(t("kb.ownership.releaseFailed", { name: collection }), {
       duration: LEAKED_CLAIM_TOAST_DURATION,
     })
+    // Refresh the held-name list so a same-session retry of this name sees the
+    // leaked claim on step 1 instead of trusting a list fetched before it.
+    setClaimsRefresh((n) => n + 1)
   }
 
   const resetState = () => {
