@@ -557,14 +557,23 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // proceeding: proceeding would reopen the very race above, silently, while
     // this is a visible error the user can retry once the release settles.
     if (pendingRelease.current) {
+      const pending = pendingRelease.current
       let settleTimer: number | undefined
       const settled = await Promise.race([
-        pendingRelease.current.then(() => true),
+        pending.then(() => true),
         new Promise<boolean>((resolve) => {
           settleTimer = window.setTimeout(() => resolve(false), RELEASE_SETTLE_TIMEOUT_MS)
         }),
       ]).finally(() => window.clearTimeout(settleTimer))
-      if (!settled) throw new Error(t("kb.ownership.releaseStillPending"))
+      if (!settled) {
+        // A release that has hung this long is treated as lost, not left
+        // wedging every later submission behind the same 10s wait: forget it
+        // and fail this attempt. Should it still land afterwards, its own
+        // finally() finds the ref already cleared and releaseTeamNameOnce
+        // still reports the outcome.
+        if (pendingRelease.current === pending) pendingRelease.current = null
+        throw new Error(t("kb.ownership.releaseStillPending"))
+      }
     }
     // Set before awaiting, because a retried POST can commit server-side and
     // still throw here — and a claim nobody knows about has no TTL and no UI to

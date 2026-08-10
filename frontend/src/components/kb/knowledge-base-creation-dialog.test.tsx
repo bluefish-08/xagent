@@ -1456,6 +1456,15 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       })
       expect(callsTo(RESERVE_URL)).toHaveLength(1)
       expect(ingestAttempts).toBe(1)
+
+      // The timed-out release is written off, so the next attempt does not
+      // sit through the same 10s wait again -- the wedge has one exit, not
+      // one exit per submission.
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await vi.waitFor(() => {
+        expect(callsTo(RESERVE_URL)).toHaveLength(2)
+        expect(ingestAttempts).toBe(2)
+      })
     } finally {
       vi.useRealTimers()
     }
