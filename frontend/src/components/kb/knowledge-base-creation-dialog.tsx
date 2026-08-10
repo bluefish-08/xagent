@@ -170,7 +170,7 @@ type ClaimState = "none" | "unconfirmed" | "held"
 
 const LEAKED_CLAIM_TOAST_DURATION = 12000
 
-/** How long a retry waits for the previous release before going ahead anyway. */
+/** How long a retry waits for the previous release before failing visibly. */
 const RELEASE_SETTLE_TIMEOUT_MS = 10_000
 
 const SELECTABLE_CARD_SIZES = {
@@ -540,7 +540,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
    *  Deliberately not gated on `inTeam`: a token refresh drops it for the length
    *  of one request, and skipping the claim there would silently create a
    *  personal KB after the user asked for a team one. The server decides. */
-  const reserveTeamName = async (collection: string, claimed: { current: ClaimState }) => {
+  const reserveTeamName = async (
+    collection: string,
+    claimed: { current: ClaimState },
+    live: () => boolean,
+  ) => {
     if (ownership !== "team") return
     // A release from the previous attempt may still be in flight. Re-reserving
     // our own claim answers 204, so without this the late release would drop the
@@ -579,8 +583,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // pick another name.
     if (response.status === 409) {
       // Both channels carry the same sentence: the field error is for a user
-      // already back on step 1, the toast for one still on step 3.
-      rejectName("kb.errors.nameUnavailableHint")
+      // already back on step 1, the toast for one still on step 3. Guarded like
+      // every other post-await write: a 409 landing after the run was disowned
+      // would otherwise paint the old name's error into a reopened dialog.
+      if (live()) rejectName("kb.errors.nameUnavailableHint")
       throw new RequestFailure(t("kb.errors.nameUnavailable"), response.status)
     }
     if (!response.ok) {
@@ -680,9 +686,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     try {
       const apiUrl = getApiUrl()
       // Once, before the loop: every file shares one collection.
-      await reserveTeamName(collectionName, teamClaimed)
+      await reserveTeamName(collectionName, teamClaimed, live)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       for (let i = 0; i < selectedFiles.length; i++) {
+        // A disowned run posts nothing further: files already sent may finish
+        // server-side under the claim, the rest never leave the browser. The
+        // partial collection is the accepted cost of walking away mid-upload --
+        // the claim it sits under resurfaces as the step-1 notice on reopen.
+        if (!live()) return
         const file = selectedFiles[i]
         const formData = new FormData()
 
@@ -851,7 +862,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
     try {
       const apiUrl = getApiUrl()
-      await reserveTeamName(collectionName, teamClaimed)
+      await reserveTeamName(collectionName, teamClaimed, live)
       const useBackgroundJobs = await shouldUseBackgroundJobs(apiUrl)
       const formData = new FormData()
 
@@ -997,7 +1008,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         files.map(file => ({ provider, fileId: file.id, fileName: file.name }))
       )
 
-      await reserveTeamName(collectionName, teamClaimed)
+      await reserveTeamName(collectionName, teamClaimed, live)
 
       // Prepare separators
       let separators: string[] | undefined = undefined

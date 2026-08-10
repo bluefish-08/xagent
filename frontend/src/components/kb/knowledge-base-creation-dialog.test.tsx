@@ -871,6 +871,50 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     }
   })
 
+  it("posts no further files once a multi-file upload is disowned", async () => {
+    // Files already sent may finish server-side; the rest must never leave the
+    // browser on behalf of a run the user walked away from.
+    let finishFirst: (value: unknown) => void = () => {}
+    let ingestCalls = 0
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => {
+        ingestCalls += 1
+        return new Promise((resolve) => {
+          finishFirst = resolve
+        })
+      }
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "docs-v1" },
+    })
+    await goToStep3(container, "file", 2)
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(ingestCalls).toBe(1)
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+    finishFirst(
+      createJsonResponse(
+        createSucceededJob({
+          status: "success",
+          collection: "docs-v1",
+          document_count: 1,
+          chunks_count: 1,
+          message: "ok",
+        })
+      )
+    )
+
+    // Give the handler every chance to (wrongly) move on to the second file.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(ingestCalls).toBe(1)
+  })
+
   it("still closes when the ingest never reaches a terminal state", async () => {
     // A job stuck in "running" used to poll forever with every exit blocked,
     // leaving a page reload as the only way out.
@@ -1415,6 +1459,38 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it("does not paint a late 409 from a disowned reserve into a reopened dialog", async () => {
+    // The reserve is the first await of every submit, so its 409 can land
+    // after the user has closed, reopened and typed a different name -- the
+    // rename advice would then be about a name no longer on screen.
+    let finishReserve: (value: unknown) => void = () => {}
+    mockRoute(
+      (url) => url === RESERVE_URL,
+      () => new Promise((resolve) => {
+        finishReserve = resolve
+      })
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(callsTo(RESERVE_URL)).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+    toastErrorMock.mockReset()
+    finishReserve(createJsonResponse({ detail: "name taken" }, 409))
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest/jobs")).toHaveLength(0)
+    })
+    expect(screen.queryByText("kb.errors.nameUnavailableHint")).toBeNull()
+    expect(toastErrorMock).not.toHaveBeenCalled()
   })
 
   it("keeps a way back to personal after team membership is lost for good", async () => {
