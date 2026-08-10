@@ -332,11 +332,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   })
 
   // Bumped whenever a submission is abandoned (the dialog closed) or a new one
-  // starts. A handler compares the value it captured before anything the user
-  // would read as belonging to the current run -- the result cards, the
-  // in-flight flags, and onSuccess. Progress numbers are left unguarded on
-  // purpose: they are overwritten by the next submission and cleared by
-  // resetState, so a stale one cannot outlive the run it came from.
+  // starts. Each handler captures the value as `live()` and checks it before
+  // every write that lands after an await -- result cards, progress, flags,
+  // onSuccess -- and at the top of its catch, so a disowned run neither paints
+  // into the dialog that replaced it nor toasts or releases on its way out.
   const submission = useRef(0)
 
   // Names the team already holds, claim or built alike. Read once per open so a
@@ -655,6 +654,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     }
 
     const mySubmission = ++submission.current
+    const live = () => submission.current === mySubmission
     setIsUploading(true)
     // Classify on the status code, not on the backend's English wording.
     let failedStatus: number | undefined
@@ -676,9 +676,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         const file = selectedFiles[i]
         const formData = new FormData()
 
-        setCurrentUploadFileName(file.name)
-        setCurrentUploadCollection(collectionName)
-        setUploadProgressDetail(null)
+        if (live()) {
+          setCurrentUploadFileName(file.name)
+          setCurrentUploadCollection(collectionName)
+          setUploadProgressDetail(null)
+        }
 
         formData.append("file", file)
         formData.append("collection", collectionName)
@@ -701,7 +703,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           failedStatus = response.status
           const errorData = isJsonRecord(parsed.data) ? parsed.data : {}
           if (errorData.status === 'error') {
-            setIngestionResults(prev => [
+            if (live()) setIngestionResults(prev => [
               ...prev,
               normalizeKnowledgeBaseIngestionResult(
                 errorData as unknown as KnowledgeBaseIngestionResultLike,
@@ -714,7 +716,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
             generic: t("kb.errors.uploadFailedFile", { name: file.name }) || `Failed to upload file: ${file.name}`,
             ...UPLOAD_ERROR_MESSAGES,
           })
-          setIngestionResults(prev => [
+          if (live()) setIngestionResults(prev => [
             ...prev,
             normalizeKnowledgeBaseIngestionResult(
               buildKnowledgeBaseErrorResult(collectionName, errorMessage, undefined, file.name),
@@ -726,6 +728,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
         const job = useBackgroundJobs && isBackgroundJobResponse(parsed.data)
           ? await waitForBackgroundJob(apiUrl, parsed.data, (updatedJob) => {
+              if (!live()) return
               const detail = getBackgroundJobProgressMessage(updatedJob)
               const taskPercent = getBackgroundJobProgressPercent(updatedJob)
               if (detail) setUploadProgressDetail(detail)
@@ -733,7 +736,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
                 const overall = ((i + taskPercent / 100) / Math.max(selectedFiles.length, 1)) * 100
                 setUploadProgress(Math.max(0, Math.min(100, overall)))
               }
-            })
+            }, live)
           : null
         const result = job
           ? getBackgroundJobResult(job)
@@ -745,7 +748,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
             job,
             t("kb.errors.uploadFailedFile", { name: file.name })
           )
-          setIngestionResults(prev => [
+          if (live()) setIngestionResults(prev => [
             ...prev,
             normalizeKnowledgeBaseIngestionResult(
               isJsonRecord(result)
@@ -766,7 +769,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           ingestionResult,
           { collection: collectionName, fileName: file.name }
         )
-        if (submission.current === mySubmission) {
+        if (live()) {
           setIngestionResults(prev => [...prev, normalizedResult])
         }
 
@@ -775,16 +778,22 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         }
 
         successfulCollections.push(collectionName)
-        setCompletedUploadCount(i + 1)
-        setUploadProgress(((i + 1) / selectedFiles.length) * 100)
+        if (live()) {
+          setCompletedUploadCount(i + 1)
+          setUploadProgress(((i + 1) / selectedFiles.length) * 100)
+        }
       }
 
-      if (submission.current !== mySubmission) return
+      if (!live()) return
       resetState()
       onOpenChange(false)
       onSuccess?.(successfulCollections)
 
     } catch (err) {
+      // A disowned run exits silently: its toast would land on a dialog showing
+      // some other run, and releasing its claim could drop the name while the
+      // server-side ingest is still on its way to creating the collection.
+      if (!live()) return
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.uploadFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -799,13 +808,13 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       // Not awaited: releasing has no timeout, and the button should not read
       // "Processing" over a slow network after the failure is already on screen.
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
-      if (successfulCollections.length > 0 && submission.current === mySubmission) {
+      if (successfulCollections.length > 0) {
         onSuccess?.(successfulCollections)
       }
     } finally {
       // Only the current submission owns these flags: an abandoned handler
       // finishing later must not clear the state of the one that replaced it.
-      if (submission.current === mySubmission) {
+      if (live()) {
         setIsUploading(false)
         setCurrentUploadFileName(null)
         setCurrentUploadCollection(null)
@@ -821,6 +830,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     }
 
     const mySubmission = ++submission.current
+    const live = () => submission.current === mySubmission
     setIsWebIngesting(true)
     let failedStatus: number | undefined
     setWebIngestionProgress(0)
@@ -859,7 +869,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       appendIngestionConfigToFormData(formData, ingestionConfig)
 
-      setWebIngestionProgress(10)
+      if (live()) setWebIngestionProgress(10)
 
       const response = await apiRequest(
         `${apiUrl}/api/kb/ingest-web${useBackgroundJobs ? "/jobs" : ""}`,
@@ -871,13 +881,13 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       const parsed = await parseApiResponse(response)
 
-      setWebIngestionProgress(50)
+      if (live()) setWebIngestionProgress(50)
 
       if (!response.ok) {
         failedStatus = response.status
         const errorData = isJsonRecord(parsed.data) ? parsed.data : {}
         if (errorData.status === 'error') {
-          if (submission.current === mySubmission) {
+          if (live()) {
             setWebIngestionResult(errorData as unknown as WebIngestionResult)
           }
           throw new Error((typeof errorData.message === 'string' && errorData.message) || t("kb.errors.webIngestFailed"))
@@ -886,7 +896,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           generic: t("kb.errors.webIngestFailed") || "Website import failed",
           ...UPLOAD_ERROR_MESSAGES,
         })
-        if (submission.current === mySubmission) {
+        if (live()) {
           setWebIngestionResult(buildWebIngestionErrorResult(collectionName, errorMessage))
         }
         throw new Error(errorMessage)
@@ -894,11 +904,12 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       const job = useBackgroundJobs && isBackgroundJobResponse(parsed.data)
         ? await waitForBackgroundJob(apiUrl, parsed.data, (updatedJob) => {
+            if (!live()) return
             const taskPercent = getBackgroundJobProgressPercent(updatedJob)
             if (typeof taskPercent === "number") {
               setWebIngestionProgress(Math.max(10, Math.min(100, taskPercent)))
             }
-          })
+          }, live)
         : null
       const resultData = job
         ? getBackgroundJobResult(job)
@@ -910,7 +921,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           job,
           t("kb.errors.webIngestFailed")
         )
-        if (submission.current === mySubmission) setWebIngestionResult(
+        if (live()) setWebIngestionResult(
           isJsonRecord(resultData)
             ? resultData as unknown as WebIngestionResult
             : buildWebIngestionErrorResult(collectionName, errorMessage)
@@ -923,18 +934,23 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       if (!result) {
         throw new Error(t("kb.errors.webIngestFailed"))
       }
-      if (submission.current === mySubmission) setWebIngestionResult(result)
-      setWebIngestionProgress(100)
+      if (live()) {
+        setWebIngestionResult(result)
+        setWebIngestionProgress(100)
+      }
       if (result.status !== "success") {
         throw new Error(result.message || t("kb.errors.webIngestFailed"))
       }
 
-      if (submission.current !== mySubmission) return
+      if (!live()) return
       resetState()
       onOpenChange(false)
       onSuccess?.([collectionName])
 
     } catch (err) {
+      // Same as the file path: a disowned run must not toast over the run that
+      // replaced it, nor release a claim its server-side ingest may still need.
+      if (!live()) return
       const rawMessage = err instanceof Error ? err.message : t("kb.errors.webIngestFailed")
       const toastContent = getKnowledgeBaseErrorToastContent(
         rawMessage,
@@ -946,8 +962,10 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       })
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
-      if (submission.current === mySubmission) setIsWebIngesting(false)
-      setWebIngestionProgress(0)
+      if (live()) {
+        setIsWebIngesting(false)
+        setWebIngestionProgress(0)
+      }
     }
   }
 
@@ -955,6 +973,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     if (totalCloudFiles === 0) return
 
     const mySubmission = ++submission.current
+    const live = () => submission.current === mySubmission
     setIsCloudConnecting(true)
     let failedStatus: number | undefined
     setIngestionResults([])
@@ -1013,7 +1032,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
           generic: t("kb.errors.cloudIngestFailed") || "Cloud ingest failed",
           ...UPLOAD_ERROR_MESSAGES,
         })
-        setIngestionResults([
+        if (live()) setIngestionResults([
           normalizeKnowledgeBaseIngestionResult(
             buildKnowledgeBaseErrorResult(
               collectionName,
@@ -1038,20 +1057,23 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
             })
           )
         : []
-      setIngestionResults(results)
+      if (live()) setIngestionResults(results)
 
       const failedResults = results.filter(result => result.status !== "success")
       if (failedResults.length > 0) {
         throw new Error(failedResults[0].message || t("kb.errors.cloudIngestFailed"))
       }
 
-      if (submission.current !== mySubmission) return
+      if (!live()) return
       toast.success(t("kb.dialog.fileUpload.processSuccess"))
       // Reset and close
       resetState()
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
+      // Same as the file path: a disowned run must not toast over the run that
+      // replaced it, nor release a claim its server-side ingest may still need.
+      if (!live()) return
       console.error("Cloud ingest error:", error)
       const rawMessage = error instanceof Error
         ? error.message
@@ -1069,7 +1091,7 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
       })
       if (teamClaimed.current !== "none") void releaseTeamName(collectionName, teamClaimed.current)
     } finally {
-      if (submission.current === mySubmission) setIsCloudConnecting(false)
+      if (live()) setIsCloudConnecting(false)
     }
   }
 

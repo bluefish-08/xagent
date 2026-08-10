@@ -82,12 +82,17 @@ export function getBackgroundJobFailureMessage(
 export async function waitForBackgroundJob(
   apiUrl: string,
   initialJob: BackgroundJobResponse,
-  onUpdate?: (job: BackgroundJobResponse) => void
+  onUpdate?: (job: BackgroundJobResponse) => void,
+  keepWaiting?: () => boolean
 ): Promise<BackgroundJobResponse> {
   let job = initialJob
   onUpdate?.(job)
 
   while (!isBackgroundJobTerminal(job)) {
+    // A caller that has disowned the run (dialog closed, submission replaced)
+    // gets the job back as-is instead of polling on its behalf forever. The
+    // job itself keeps running server-side.
+    if (keepWaiting && !keepWaiting()) return job
     await new Promise(resolve => window.setTimeout(resolve, 1000))
     const response = await apiRequest(`${apiUrl}/api/jobs/${job.id}`)
     if (!response.ok) {

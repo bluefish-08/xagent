@@ -784,6 +784,93 @@ describe("KnowledgeBaseCreationDialog collection naming", () => {
     expect(screen.queryByText("docs-v1 crawl stats")).toBeNull()
   })
 
+  it("does not paint an abandoned cloud run's result into a reopened dialog", async () => {
+    // Same trap as the web path above, through the cloud endpoint: the result
+    // cards and the success toast belong to the run on screen, not to one the
+    // user walked away from.
+    let finishCloud: (value: unknown) => void = () => {}
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest-cloud",
+      () => new Promise((resolve) => {
+        finishCloud = resolve
+      })
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "docs-v1" },
+    })
+    await goToStep3(container, "cloud")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest-cloud")).toHaveLength(1)
+    })
+
+    fireEvent.click(screen.getByTestId("dismiss-dialog"))
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "reports-2026" },
+    })
+    await goToStep3(container, "cloud")
+
+    toastSuccessMock.mockReset()
+    finishCloud(
+      createJsonResponse([
+        {
+          status: "success",
+          collection: "docs-v1",
+          message: "docs-v1 cloud stats",
+          document_count: 1,
+          chunks_count: 1,
+        },
+      ])
+    )
+
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/kb/ingest-cloud")).toHaveLength(1)
+    })
+    expect(screen.queryByText("docs-v1 cloud stats")).toBeNull()
+    expect(toastSuccessMock).not.toHaveBeenCalled()
+  })
+
+  it("stops polling a background job once the run is disowned", async () => {
+    // Closing the dialog cannot cancel the server-side job, but it must stop
+    // this tab polling it once a second until the next page reload.
+    vi.useFakeTimers()
+    try {
+      const runningJob = { ...createSucceededJob({}), status: "running", result: null }
+      mockRoute(
+        (url) => url === "http://api.local/api/kb/ingest/jobs",
+        () => createJsonResponse(runningJob)
+      )
+      mockRoute(
+        (url) => url === "http://api.local/api/jobs/job-1",
+        () => createJsonResponse(runningJob)
+      )
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+      fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+        target: { value: "stuck-docs" },
+      })
+      await goToStep3(container, "file")
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await vi.advanceTimersByTimeAsync(3000)
+      await vi.waitFor(() => {
+        expect(callsTo("http://api.local/api/jobs/job-1").length).toBeGreaterThan(0)
+      })
+
+      fireEvent.click(screen.getByTestId("dismiss-dialog"))
+      // One in-flight poll may still settle; after that the loop must be dead.
+      await vi.advanceTimersByTimeAsync(1000)
+      const polled = callsTo("http://api.local/api/jobs/job-1").length
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(callsTo("http://api.local/api/jobs/job-1")).toHaveLength(polled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("still closes when the ingest never reaches a terminal state", async () => {
     // A job stuck in "running" used to poll forever with every exit blocked,
     // leaving a page reload as the only way out.
