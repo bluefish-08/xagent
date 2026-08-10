@@ -1164,7 +1164,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
   }
 
   const isIngestInFlight = isUploading || isWebIngesting || isCloudConnecting
-  const nameNotice = teamNameNotice(teamClaims, trimmedCollectionName, user?.id, ownership)
+  // The notice is a live region, so it waits for typing to settle: recomputing
+  // on the raw input would have a screen reader announce on every keystroke.
+  const [settledName, setSettledName] = useState("")
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledName(trimmedCollectionName), 300)
+    return () => window.clearTimeout(timer)
+  }, [trimmedCollectionName])
+  const nameNotice = teamNameNotice(teamClaims, settledName, user?.id, ownership)
 
   const cloudProviders = [
     {
