@@ -557,9 +557,14 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     //
     // Bounded, because `apiRequest` has no timeout of its own: a black-holed
     // release would otherwise wedge every later submission on this dialog with
-    // no way out but a page reload. Timing out fails the attempt rather than
-    // proceeding: proceeding would reopen the very race above, silently, while
-    // this is a visible error the user can retry once the release settles.
+    // no way out but a page reload. On timeout this attempt fails visibly and
+    // the hung release is written off, so the wedge has one exit rather than a
+    // 10s toll on every submission. The write-off is a deliberate residue: a
+    // retry after it proceeds even though the zombie release may still land
+    // and drop the fresh claim before the first write. That window -- a
+    // release that hangs past 10s and then completes at exactly the wrong
+    // moment -- is accepted over wedging the dialog for good; a release
+    // answering 409 (data behind the name) keeps the claim regardless.
     if (pendingRelease.current) {
       const pending = pendingRelease.current
       let settleTimer: number | undefined
@@ -570,11 +575,8 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         }),
       ]).finally(() => window.clearTimeout(settleTimer))
       if (!settled) {
-        // A release that has hung this long is treated as lost, not left
-        // wedging every later submission behind the same 10s wait: forget it
-        // and fail this attempt. Should it still land afterwards, its own
-        // finally() finds the ref already cleared and releaseTeamNameOnce
-        // still reports the outcome.
+        // Should the lost release still land, its own finally() finds the ref
+        // already cleared and releaseTeamNameOnce still reports the outcome.
         if (pendingRelease.current === pending) pendingRelease.current = null
         throw new Error(t("kb.ownership.releaseStillPending"))
       }

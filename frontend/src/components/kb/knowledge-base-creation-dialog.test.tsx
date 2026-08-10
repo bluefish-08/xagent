@@ -1273,6 +1273,64 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(await screen.findByText("kb.ownership.nameJoinsTeamKnowledgeBase")).toBeInTheDocument()
   })
 
+  it("holds the notice until typing settles", async () => {
+    // The notice is a live region: without the debounce every keystroke would
+    // be announced. The old value must survive the debounce window and the new
+    // one appear only after it.
+    mockRoute(
+      (url) => url === "http://api.local/api/knowledge-bases/team-status",
+      () =>
+        createJsonResponse([
+          { name: "team-docs", created_by_user_id: 99, is_empty: true },
+        ])
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+    expect(await screen.findByText("kb.ownership.nameBelongsToTeam")).toBeInTheDocument()
+
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs-two" },
+    })
+    // Immediately after the keystroke the settled value is still the old one.
+    expect(screen.getByText("kb.ownership.nameBelongsToTeam")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText("kb.ownership.nameBelongsToTeam")).toBeNull()
+    })
+  })
+
+  it("refreshes the held-name list after a release fails", async () => {
+    // A leaked claim must show up as the step-1 notice on a same-session
+    // retry, not only as a 12s toast that is easy to miss.
+    mockRoute(
+      (url) => url === "http://api.local/api/kb/ingest/jobs",
+      () => createJsonResponse({ detail: "ingest exploded" }, 500)
+    )
+    mockRoute(
+      (url) => url === RELEASE_URL,
+      () => createJsonResponse({ detail: "cannot release" }, 500)
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    nameAndChooseTeam(container)
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
+    })
+    await goToStep3(container, "file")
+    fireEvent.click(screen.getByText("kb.dialog.createButton"))
+
+    await waitFor(() => {
+      expect(toastWarningMock).toHaveBeenCalled()
+    })
+    await waitFor(() => {
+      expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(2)
+    })
+  })
+
   it("says nothing when the backend predates the claim fields", async () => {
     // Shipping the dialog ahead of the endpoint would otherwise make every
     // match read as a built knowledge base, since `!undefined` is true.
@@ -1290,6 +1348,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
     })
+    // Past the notice debounce, so silence here means the guard fired -- not
+    // that the name simply had not settled yet.
+    await new Promise((resolve) => setTimeout(resolve, 350))
     expect(screen.queryByText("kb.ownership.nameIsTeamKnowledgeBase")).toBeNull()
   })
 
@@ -1304,6 +1365,8 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     await waitFor(() => {
       expect(callsTo("http://api.local/api/knowledge-bases/team-status")).toHaveLength(1)
     })
+    // Past the notice debounce, same reason as the backend-skew test above.
+    await new Promise((resolve) => setTimeout(resolve, 350))
     expect(screen.queryByText("kb.ownership.nameHeldInTeam")).toBeNull()
     expect(screen.queryByText("kb.ownership.nameHeldByYou")).toBeNull()
   })
@@ -1483,9 +1546,8 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       fireEvent.click(screen.getByText("kb.dialog.createButton"))
       await vi.advanceTimersByTimeAsync(10_000)
 
-      // The release never answered; the retry failed visibly instead of either
-      // hanging forever or reserving underneath a release that may still land
-      // and drop the fresh claim mid-ingest.
+      // The release never answered; the retry failed visibly instead of
+      // hanging forever, and the hung release was written off.
       await vi.waitFor(() => {
         expect(JSON.stringify(toastErrorMock.mock.calls)).toContain(
           "kb.ownership.releaseStillPending"
@@ -1494,9 +1556,10 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
       expect(callsTo(RESERVE_URL)).toHaveLength(1)
       expect(ingestAttempts).toBe(1)
 
-      // The timed-out release is written off, so the next attempt does not
-      // sit through the same 10s wait again -- the wedge has one exit, not
-      // one exit per submission.
+      // The next attempt proceeds without the 10s wait -- the wedge has one
+      // exit, not one per submission. This knowingly reserves while the zombie
+      // release is still unanswered; see reserveTeamName for the accepted
+      // residual window that trades against a permanently wedged dialog.
       fireEvent.click(screen.getByText("kb.dialog.createButton"))
       await vi.waitFor(() => {
         expect(callsTo(RESERVE_URL)).toHaveLength(2)
@@ -1572,9 +1635,9 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
   })
 
   it("does not paint a late 409 from a disowned reserve into a reopened dialog", async () => {
-    // The reserve is the first await of every submit, so its 409 can land
-    // after the user has closed, reopened and typed a different name -- the
-    // rename advice would then be about a name no longer on screen.
+    // The reserve is a network round trip inside every submit, so its 409 can
+    // land after the user has closed, reopened and typed a different name --
+    // the rename advice would then be about a name no longer on screen.
     let finishReserve: (value: unknown) => void = () => {}
     mockRoute(
       (url) => url === RESERVE_URL,
