@@ -272,8 +272,10 @@ def test_coordinator_accepts_injected_tool_facade() -> None:
 class _CountingVectorStore:
     def __init__(self, records: list[object]) -> None:
         self.records = records
+        self.read_calls: list[dict[str, object]] = []
 
     def list_document_records(self, **kwargs: object) -> list[object]:
+        self.read_calls.append(kwargs)
         return self.records
 
 
@@ -303,8 +305,9 @@ async def test_cleanup_failed_agent_collection_keeps_a_populated_collection():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_failed_agent_collection_deletes_as_the_owner():
-    """An admin-scoped or non-orphan delete would drop another tenant's row."""
+async def test_cleanup_failed_agent_collection_reads_and_deletes_as_the_owner():
+    """Admin scoping on either side is wrong: the read would see another tenant's
+    documents and abort a safe cleanup, the delete would drop their metadata row."""
     metadata_store = _FakeMetadataStore(CollectionInfo(name="agent_kb"))
     calls: list[dict[str, object]] = []
 
@@ -317,8 +320,16 @@ async def test_cleanup_failed_agent_collection_deletes_as_the_owner():
     shim.vector_store = _CountingVectorStore([])
     facade = KBToolCompatibilityFacade(storage_shim=shim)
 
-    await facade.cleanup_failed_agent_collection("agent_kb", user_id=7, is_admin=True)
+    await facade.cleanup_failed_agent_collection("agent_kb", user_id=7)
 
+    assert shim.vector_store.read_calls == [
+        {
+            "collection_name": "agent_kb",
+            "user_id": 7,
+            "is_admin": False,
+            "max_results": 1,
+        }
+    ]
     assert calls == [
         {
             "collection_name": "agent_kb",

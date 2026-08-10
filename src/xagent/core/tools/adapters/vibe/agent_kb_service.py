@@ -43,7 +43,6 @@ class AgentKnowledgeBaseService:
         await _get_tool_compatibility_facade().cleanup_failed_agent_collection(
             collection_name,
             user_id=self.user_id,
-            is_admin=self.is_admin,
         )
 
     async def publish_collection(

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..core.schemas import CollectionInfo, IngestionConfig
-from .api_compatibility import _maybe_await
+from .async_utils import maybe_await
 from .models import KBStorageBackend
 from .pipeline_compatibility import KB_STORAGE_METADATA_KEY
 
@@ -255,7 +255,6 @@ class KBToolCompatibilityFacade:
         collection: str,
         *,
         user_id: int,
-        is_admin: bool = False,
     ) -> None:
         """Drop the metadata row the ingest pipeline wrote for a failed import.
 
@@ -266,10 +265,13 @@ class KBToolCompatibilityFacade:
 
         with self._storage_context():
             try:
+                # Owner-scoped on both sides: an admin-wide read would see
+                # another tenant's documents and abort a cleanup that is safe,
+                # leaving this import's orphaned row to block the name forever.
                 records = get_vector_index_store().list_document_records(
                     collection_name=collection,
                     user_id=user_id,
-                    is_admin=is_admin,
+                    is_admin=False,
                     max_results=1,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -288,7 +290,7 @@ class KBToolCompatibilityFacade:
             )
             if not callable(delete_metadata):
                 return
-            deleted = await _maybe_await(
+            deleted = await maybe_await(
                 delete_metadata(
                     collection_name=collection,
                     user_id=user_id,
