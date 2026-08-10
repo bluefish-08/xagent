@@ -1276,15 +1276,9 @@ class IngestionResult(BaseModel):
         """
         if self.status == "error":
             return 0
-        for step in self.completed_steps:
-            name = (
-                step.get("name")
-                if isinstance(step, dict)
-                else getattr(step, "name", None)
-            )
-            if name == "register_document":
-                return 1
-        return 0
+        return int(
+            any(step.name == "register_document" for step in self.completed_steps)
+        )
 
 
 # ------------------------- Management -------------------------

@@ -1119,6 +1119,13 @@ async def _rollback_may_delete_collection(
     sibling that commits inside the window is still exposed. Closing it needs a
     per-collection lock, which the codebase does not have anywhere yet — tracked
     in https://github.com/xorbitsai/xagent/issues/1242 rather than invented here.
+
+    Caveat: when the config read itself fails, this fails safe and a brand-new
+    zero-document collection keeps its metadata row with no config — invisible
+    to its owner and still answering 409 for the name. That row is deliberately
+    not cleaned up on this branch: the cleanup deletes this owner's config row
+    first, so on the other reading of an unreadable state — a sibling published
+    it — it would drop settings that sibling just saved.
     """
     if collection_existed_before or other_document_present:
         return False
