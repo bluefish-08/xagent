@@ -1257,24 +1257,30 @@ class IngestionResult(BaseModel):
 
     @property
     def produced_documents(self) -> int:
-        """How many documents this run left searchable in the collection.
+        """How many documents this run left in the collection.
 
-        ``status == "success"`` alone is not enough: a file that parses into zero
-        non-blank chunks succeeds while adding nothing, and publishing a
-        collection for it recreates the visible-but-empty knowledge base at the
-        document level. A re-ingest with nothing new to embed does count — its
-        chunks are already in the collection, so ``chunk_count`` stays positive
-        while ``embedding_count`` is zero. ``partial`` counts for the same
-        reason: whatever landed is real.
+        Keyed on the ``register_document`` step rather than on chunk counts: a
+        registered document is listed in the knowledge base and can be opened and
+        deleted, so it must be published even when it produced no chunks (an
+        empty file, a re-ingest with nothing new to embed). Counting chunks here
+        would leave those runs with documents and no config row — invisible to
+        their owner and blocking the name, which is the failure this PR removes.
 
         This describes the run, not the collection. A caller that rolls its own
         document back must either ask before the rollback or exclude the states
-        it rolled back — after a rollback the document is gone but the counts on
-        this result still describe what the run had produced.
+        it rolled back.
         """
         if self.status == "error":
             return 0
-        return 1 if int(self.chunk_count or 0) > 0 else 0
+        for step in self.completed_steps:
+            name = (
+                step.get("name")
+                if isinstance(step, dict)
+                else getattr(step, "name", None)
+            )
+            if name == "register_document":
+                return 1
+        return 0
 
 
 # ------------------------- Management -------------------------

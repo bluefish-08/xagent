@@ -8,6 +8,7 @@ import pytest
 
 from xagent.core.tools.core.RAG_tools.core.schemas import (
     IngestionResult,
+    IngestionStepResult,
     WebIngestionResult,
 )
 from xagent.core.tools.core.RAG_tools.kb import KBApiOperationResult
@@ -723,21 +724,26 @@ def test_missing_flag_defaults_to_pre_existing(
 
 
 @pytest.mark.parametrize(
-    ("status", "chunk_count", "expected"),
+    ("status", "registered", "expected"),
     [
-        # A parse that yields no non-blank chunks adds nothing searchable.
-        ("success", 0, 0),
-        # A re-ingest with nothing new to embed still has its chunks in place.
-        ("success", 3, 1),
-        # Partial runs leave real content behind.
-        ("partial", 2, 1),
-        ("error", 5, 0),
+        # A registered document is listed and deletable even with no chunks.
+        ("success", True, 1),
+        ("partial", True, 1),
+        # Nothing was registered, so nothing landed.
+        ("success", False, 0),
+        ("error", True, 0),
     ],
 )
 def test_produced_documents_is_the_shared_publish_predicate(
-    status: str, chunk_count: int, expected: int
+    status: str, registered: bool, expected: int
 ) -> None:
-    result = IngestionResult(status=status, message="m", chunk_count=chunk_count)
+    result = IngestionResult(
+        status=status,
+        message="m",
+        completed_steps=[IngestionStepResult(name="register_document", metadata={})]
+        if registered
+        else [],
+    )
 
     assert result.produced_documents == expected
 

@@ -4231,27 +4231,6 @@ async def ingest(
             except OSError:
                 logger.warning("Failed to remove ingest backup %s", file_backup_path)
 
-        # A file can parse successfully into zero non-blank chunks. Nothing is
-        # searchable then, so publishing would recreate the empty-but-visible
-        # knowledge base one level down, and staying silent would burn the name.
-        if not result.produced_documents:
-            if not collection_existed_before:
-                await _cleanup_failed_new_collection_metadata(
-                    collection_name=safe_collection,
-                    user=_user,
-                )
-            return JSONResponse(
-                status_code=422,
-                content={
-                    **result.model_dump(),
-                    "status": "error",
-                    "message": (
-                        f"{result.message}. No indexable content was found in "
-                        f"{safe_filename}, so nothing was added."
-                    ),
-                },
-            )
-
         await _save_collection_config_after_ingest(
             collection=safe_collection,
             config_json=config.model_dump_json(exclude_unset=True),
