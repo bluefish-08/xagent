@@ -1781,11 +1781,12 @@ class _ExplodingEmbeddingAdapter(_StubEmbeddingAdapter):
 def test_kb_document_job_failed_new_collection_publishes_nothing_end_to_end(
     tmp_path, monkeypatch
 ):
-    """The real publish/cleanup path, not a stub: a failed new collection leaves no row.
+    """A failed new collection ends up with no config row and a reusable name.
 
-    Every other job test patches ``_save_job_collection_config_after_ingest`` out,
-    so the config write and the metadata cleanup are never exercised together for
-    the scenario this PR targets.
+    The end state is what is pinned here, not which cleanup produced it: the
+    rollback of a run that fails this early removes the collection outright.
+    ``test_kb_document_job_publishes_the_config_end_to_end`` is the one that runs
+    the real ``_save_job_collection_config_after_ingest``.
     """
     import asyncio
 
@@ -1868,5 +1869,93 @@ def test_kb_document_job_failed_new_collection_publishes_nothing_end_to_end(
         # rather than returning None when the row is gone.
         with pytest.raises(ValueError):
             asyncio.run(store.get_collection("failed_kb"))
+    finally:
+        db.close()
+
+
+def test_kb_document_job_publishes_the_config_end_to_end(tmp_path, monkeypatch):
+    """The real ``_save_job_collection_config_after_ingest``, not a stub.
+
+    Every other job test patches that function out, so the job path's own config
+    write — the write this PR moved to after the ingest — is never exercised.
+    """
+    import asyncio
+
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+    monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
+    monkeypatch.setenv("LANCEDB_DIR", str((tmp_path / "lancedb").resolve()))
+
+    from xagent.core.model.model import EmbeddingModelConfig
+    from xagent.core.storage.manager import initialize_storage_manager
+    from xagent.core.tools.core.RAG_tools.pipelines import document_ingestion
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+    from xagent.web.jobs.kb_tasks import handle_kb_ingest_document
+
+    storage_root = tmp_path / "storage"
+    uploads_dir = storage_root / "uploads"
+    uploads_dir.mkdir(parents=True)
+    initialize_storage_manager(str(storage_root), str(uploads_dir))
+
+    stub_config = EmbeddingModelConfig(
+        id="embedding-default",
+        model_name="stub",
+        model_provider="stub",
+        dimension=2,
+    )
+    monkeypatch.setattr(
+        document_ingestion,
+        "_resolve_embedding_adapter",
+        lambda _cfg: (stub_config, _StubEmbeddingAdapter()),
+    )
+    monkeypatch.setattr(
+        "xagent.core.tools.core.RAG_tools.management.collection_manager.resolve_embedding_adapter",
+        lambda *args, **kwargs: (stub_config, _StubEmbeddingAdapter()),
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "kb-real-publish.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="kb-real-publish-test")
+        staged_file = tmp_path / "stage" / "doc.txt"
+        target_file = tmp_path / "canonical" / "doc.txt"
+        staged_file.parent.mkdir(parents=True)
+        staged_file.write_text("published content", encoding="utf-8")
+        ingestion_config = IngestionConfig(
+            embedding_model_id="embedding-default",
+            chunk_size=1234,
+        )
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_DOCUMENT,
+            payload={
+                "collection": "published_kb",
+                "source_path": str(staged_file),
+                "target_path": str(target_file),
+                "file_id": "77777777-7777-4777-8777-777777777777",
+                "filename": "doc.txt",
+                "mime_type": "text/plain",
+                "file_size": staged_file.stat().st_size,
+                "user_id": int(user.id),
+                "is_admin": False,
+                "ingestion_config": ingestion_config.model_dump(mode="json"),
+                "collection_existed_before": False,
+            },
+        )
+
+        result = handle_kb_ingest_document(db, job)
+
+        assert result["status"] == "success"
+        saved_config = asyncio.run(
+            get_metadata_store().get_collection_config(
+                collection="published_kb",
+                user_id=int(user.id),
+                is_admin=False,
+            )
+        )
+        # Listing visibility comes from this row, so the settings the job carried
+        # have to be in it once the documents landed.
+        assert saved_config is not None
+        assert '"chunk_size":1234' in saved_config
     finally:
         db.close()
