@@ -247,6 +247,7 @@ def test_kb_ingest_creates_collection_dir(test_env, temp_uploads):
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -839,6 +840,7 @@ def test_kb_ingest_accepts_unicode_collection_name(test_env, temp_uploads):
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -869,6 +871,7 @@ def test_kb_ingest_accepts_space_collection_name(test_env, temp_uploads):
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -901,6 +904,7 @@ def test_kb_ingest_normalizes_padded_collection_name(test_env, temp_uploads):
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -934,6 +938,7 @@ def test_kb_ingest_falls_back_from_pdf_only_parser_for_xlsx(test_env, temp_uploa
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -1020,6 +1025,7 @@ def test_kb_ingest_accepts_derived_collection_name_with_spaces(test_env, temp_up
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -2364,6 +2370,7 @@ def test_kb_ingest_passes_file_id_to_pipeline(test_env, temp_uploads):
             doc_id="test_doc_id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -2507,6 +2514,7 @@ def test_kb_ingest_success_publishes_collection_config(test_env, temp_uploads) -
                 status="success",
                 doc_id="doc-1",
                 parse_hash="hash",
+                chunk_count=1,
                 message="ok",
             ),
         ),
@@ -2839,6 +2847,7 @@ def test_kb_ingest_cloud_mixed_failure_still_publishes_config(
                 status="success",
                 doc_id="cloud-doc-id",
                 parse_hash="hash",
+                chunk_count=1,
                 message="success",
             ),
         ),
@@ -2944,6 +2953,7 @@ def test_kb_ingest_cloud_passes_file_id_to_pipeline(test_env, temp_uploads):
             doc_id="cloud-doc-id",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 
@@ -3358,6 +3368,7 @@ def test_kb_ingest_cloud_uses_unique_storage_paths_for_duplicate_filenames(
             doc_id=f"doc-{len(captured_paths)}",
             parse_hash="hash",
             failed_step="",
+            chunk_count=1,
             message="success",
         )
 

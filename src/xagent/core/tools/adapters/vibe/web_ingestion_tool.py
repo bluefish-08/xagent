@@ -124,10 +124,10 @@ async def _create_knowledge_base_from_url_impl(
             user_id=user_id,
             is_admin=is_admin,
         )
-        collection_name = await kb_service.prepare_collection(
-            collection_name=collection_name,
-            ingestion_config=ingest_config,
-        )
+        collection_name = await kb_service.prepare_collection(collection_name)
+        # The ingest pipeline writes a metadata row of its own; remember whether
+        # the collection is ours to clean up if the import produces nothing.
+        collection_existed_before = await kb_service.collection_exists(collection_name)
 
         logger.info(
             "Starting background web ingestion for %s into %s",
@@ -144,6 +144,8 @@ async def _create_knowledge_base_from_url_impl(
         )
 
         if result.status == "error":
+            if not collection_existed_before:
+                await kb_service.cleanup_failed_collection(collection_name)
             return CreateKnowledgeBaseFromUrlResult(
                 success=False,
                 collection_name=collection_name,
@@ -155,6 +157,8 @@ async def _create_knowledge_base_from_url_impl(
         # nothing (robots.txt, an empty site). Publishing then would leave a
         # visible, empty knowledge base.
         if int(result.documents_created or 0) <= 0:
+            if not collection_existed_before:
+                await kb_service.cleanup_failed_collection(collection_name)
             return CreateKnowledgeBaseFromUrlResult(
                 success=False,
                 collection_name=collection_name,

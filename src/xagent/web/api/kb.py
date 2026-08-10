@@ -73,6 +73,9 @@ from ...core.tools.core.RAG_tools.kb import (
     KBApiOperationResult,
     get_kb_coordinator,
 )
+from ...core.tools.core.RAG_tools.kb.config_merge import (
+    merge_collection_config_json,
+)
 from ...core.tools.core.RAG_tools.management.status import clear_ingestion_status
 from ...core.tools.core.RAG_tools.pipelines.web_ingestion import FileHandlerResult
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
@@ -1035,13 +1038,14 @@ async def _cleanup_failed_new_collection_metadata(
     documents check is the last guard before a row a sibling ingest owns is
     deleted by name.
     """
-    # Read as the owner: the row is deleted by name, so an admin-wide read would
-    # let another tenant's documents block a cleanup that is legitimately ours.
+    # Read as the owner, and delete as the owner too: an admin-scoped delete
+    # bypasses owner scoping entirely and would wipe a metadata row another
+    # tenant owns under the same name, which the owner-scoped read never saw.
     if _collection_holds_documents(
         collection_name=collection_name,
         user_id=int(user.id),
-        is_admin=False,
         context="failed-ingest metadata cleanup",
+        on_error=True,
     ):
         logger.info(
             "Skipping failed-ingest collection metadata cleanup for %s/user_%s "
@@ -1054,7 +1058,7 @@ async def _cleanup_failed_new_collection_metadata(
     cleanup_result = await _get_api_compatibility_facade().delete_collection_metadata(
         collection_name=collection_name,
         user_id=int(user.id),
-        is_admin=bool(user.is_admin),
+        is_admin=False,
         delete_orphaned_metadata=True,
     )
     logger.info(
@@ -1062,16 +1066,6 @@ async def _cleanup_failed_new_collection_metadata(
         collection_name,
         cleanup_result,
     )
-
-
-def _get_document_record_doc_id(record: Any) -> Optional[str]:
-    """Read a document record's ``doc_id``, dict-shaped or dataclass-shaped."""
-    value = (
-        record.get("doc_id")
-        if isinstance(record, dict)
-        else getattr(record, "doc_id", None)
-    )
-    return str(value) if value else None
 
 
 async def _collection_config_exists(
@@ -1100,12 +1094,60 @@ async def _collection_config_exists(
     return config is not None
 
 
+async def _rollback_may_delete_collection(
+    *,
+    collection_name: str,
+    user_id: int,
+    collection_existed_before: bool,
+    other_document_present: bool,
+    context: str,
+) -> bool:
+    """Whether a failed ingest may delete the whole collection.
+
+    `collection_existed_before` is stamped when the request or job is submitted,
+    so a sibling ingest into the same new collection may have landed a document
+    or published the config since. Either one makes the delete destructive, and
+    both are re-read here rather than inferred from the stamp.
+
+    ponytail: these reads are not atomic with the delete that follows, so a
+    sibling that commits inside the window is still exposed. Closing it needs a
+    per-collection lock, which the codebase does not have anywhere yet — tracked
+    separately rather than invented in a bugfix.
+    """
+    if other_document_present:
+        return False
+    if collection_existed_before or _collection_exists_now(collection_name):
+        return False
+    return not await _collection_config_exists(
+        collection_name=collection_name,
+        user_id=user_id,
+        context=context,
+    )
+
+
+def _collection_exists_now(collection_name: str) -> bool:
+    """Re-read the stamped `collection_existed_before` at decision time."""
+    try:
+        get_collection_sync(collection_name)
+    except ValueError:
+        return False
+    except Exception as exc:  # noqa: BLE001
+        # Unknown state must not authorize a destructive delete.
+        logger.warning(
+            "Could not re-read collection %s during rollback: %s",
+            collection_name,
+            exc,
+        )
+        return True
+    return True
+
+
 def _collection_holds_documents(
     *,
     collection_name: str,
     user_id: int,
-    is_admin: bool,
     context: str,
+    on_error: bool,
 ) -> bool:
     """Whether the collection currently holds any document.
 
@@ -1115,25 +1157,33 @@ def _collection_holds_documents(
     trusting `collection_existed_before`, which is stamped when the request or
     job is submitted and goes stale while a sibling ingest runs.
 
+    The two halves need opposite behaviour when the store cannot be read, so
+    `on_error` is explicit: a cleanup passes `True` (unknown state must not
+    authorize a delete), a publish passes `False` (unknown state must not make
+    a possibly empty knowledge base visible).
+
+    Reads are owner-scoped: every decision it gates acts on the caller's own
+    rows, and an admin-wide read would match rows another tenant owns.
+
     Callers that roll back their own document must do so before asking.
     """
     try:
         records = list_document_records(
             collection_name=collection_name,
             user_id=user_id,
-            is_admin=is_admin,
+            is_admin=False,
             max_results=1,
         )
     except Exception as exc:  # noqa: BLE001
-        # Unreadable state must not authorize destructive cleanup.
         logger.warning(
-            "Failed to list documents of %s/user_%s during %s: %s",
+            "Failed to list documents of %s/user_%s during %s, assuming %s: %s",
             collection_name,
             user_id,
             context,
+            "documents exist" if on_error else "no documents",
             exc,
         )
-        return True
+        return on_error
     return bool(records)
 
 
@@ -1261,28 +1311,22 @@ async def _rollback_failed_ingestion(
             )
             if file_id
         }
-        # `collection_existed_before` is stamped when the request is submitted,
-        # so a sibling ingest into the same new collection may have landed a
-        # document or published the config since. Either one makes deleting the
-        # whole collection destructive; comparing doc_ids (not file_ids, which
-        # two ingests of the same path share) identifies what is ours.
-        holds_other_documents = any(
-            _get_document_record_doc_id(record) != doc_id
-            for record in collection_records
-        )
-        config_published = (
-            not collection_existed_before
-            and await _collection_config_exists(
-                collection_name=collection_name,
-                user_id=user_id,
-                context="failed-ingest rollback",
-            )
-        )
-
-        if (
-            not collection_existed_before
-            and not holds_other_documents
-            and not config_published
+        # Comparing doc_ids, not file_ids: two ingests of the same path share a
+        # file_id, so a file_id match cannot tell a sibling's work from ours.
+        if await _rollback_may_delete_collection(
+            collection_name=collection_name,
+            user_id=user_id,
+            collection_existed_before=collection_existed_before,
+            other_document_present=any(
+                (
+                    record.get("doc_id")
+                    if isinstance(record, dict)
+                    else getattr(record, "doc_id", None)
+                )
+                != doc_id
+                for record in collection_records
+            ),
+            context="failed-ingest rollback",
         ):
             collection_delete_result = delete_collection(
                 collection_name,
@@ -1492,7 +1536,13 @@ async def _rollback_failed_cloud_ingestion(
             max_results=1,
         )
         removed_new_collection = False
-        if not collection_existed_before and not collection_records:
+        if await _rollback_may_delete_collection(
+            collection_name=collection_name,
+            user_id=user_id,
+            collection_existed_before=collection_existed_before,
+            other_document_present=bool(collection_records),
+            context="failed-cloud-ingest rollback",
+        ):
             collection_delete_result = delete_collection(
                 collection_name,
                 user_id,
@@ -3329,7 +3379,15 @@ class RollbackFailureError(RuntimeError):
 
 
 class CollectionConfigSaveError(RuntimeError):
-    """Raised when a successful ingest cannot be published as a visible collection."""
+    """Raised when a successful ingest cannot be published as a visible collection.
+
+    Carries the ingested `file_id` when there is one: the caller is told not to
+    re-import, so it needs a handle on the document that did land.
+    """
+
+    def __init__(self, message: str, *, file_id: Optional[str] = None) -> None:
+        super().__init__(message if not file_id else f"{message} (file_id: {file_id})")
+        self.file_id = file_id
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -3377,27 +3435,16 @@ async def _config_json_preserving_extras(
     user_id: int,
     context: str,
 ) -> str:
-    """Carry over settings this ingest did not set, e.g. the rerank binding.
-
-    The config row is replaced wholesale, and this write now lands after the
-    ingest instead of before it, so anything the user saved while the ingest was
-    running would otherwise be silently dropped. `config_json` is serialised with
-    `exclude_unset`, so its keys are exactly what this run chose; every other key
-    belongs to whoever wrote it last.
-    """
+    """Read the current config row and apply the shared merge rule to it."""
     try:
         existing = await _get_api_compatibility_facade().get_collection_config(
             collection=collection,
             user_id=user_id,
             is_admin=False,
         )
-        if not isinstance(existing, str) or not existing:
-            return config_json
-        existing_settings = json.loads(existing)
-        new_settings = json.loads(config_json)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Could not merge the existing collection config of %s/user_%s "
+            "Could not read the existing collection config of %s/user_%s "
             "during %s, saving this ingest's settings alone: %s",
             collection,
             user_id,
@@ -3406,12 +3453,10 @@ async def _config_json_preserving_extras(
         )
         return config_json
 
-    if not isinstance(existing_settings, dict) or not isinstance(new_settings, dict):
-        return config_json
-
-    if not set(existing_settings) - set(new_settings):
-        return config_json
-    return json.dumps({**existing_settings, **new_settings})
+    return merge_collection_config_json(
+        existing if isinstance(existing, str) else None,
+        config_json,
+    )
 
 
 async def _save_collection_config_after_ingest(
@@ -3422,6 +3467,7 @@ async def _save_collection_config_after_ingest(
     context: str,
     documents_created: int,
     collection_existed_before: bool = True,
+    file_id: Optional[str] = None,
 ) -> None:
     """Publish the collection config only once ingest actually produced documents.
 
@@ -3440,8 +3486,8 @@ async def _save_collection_config_after_ingest(
         or not _collection_holds_documents(
             collection_name=collection,
             user_id=int(user.id),
-            is_admin=False,
             context=context,
+            on_error=False,
         )
     ):
         return
@@ -3470,7 +3516,8 @@ async def _save_collection_config_after_ingest(
         raise CollectionConfigSaveError(
             f"The documents were imported into '{collection}', but saving its "
             f"chunking settings failed, so they fall back to the defaults. "
-            f"Do not re-import; set them again in the knowledge base settings: {exc}"
+            f"Do not re-import; set them again in the knowledge base settings: {exc}",
+            file_id=file_id,
         ) from exc
 
 
@@ -4175,8 +4222,9 @@ async def ingest(
             config_json=config.model_dump_json(exclude_unset=True),
             user=_user,
             context="ingest",
-            documents_created=1,
+            documents_created=result.produced_documents,
             collection_existed_before=collection_existed_before,
+            file_id=str(file_record.file_id),
         )
 
         return JSONResponse(
@@ -4814,7 +4862,7 @@ async def ingest_cloud(
     api_results = await asyncio.gather(*[process_file(f) for f in request.files])
     results = [api_result.result for api_result in api_results]
 
-    successful_documents = sum(1 for result in results if result.status == "success")
+    successful_documents = sum(result.produced_documents for result in results)
     has_failure = any(result.status in {"error", "partial"} for result in results)
 
     if has_failure:

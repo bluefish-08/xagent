@@ -1255,6 +1255,23 @@ class IngestionResult(BaseModel):
         description="Uploaded file ID for preview/download via /api/files (when ingest registers the file)",
     )
 
+    @property
+    def produced_documents(self) -> int:
+        """How many documents this run left searchable in the collection.
+
+        ``status == "success"`` alone is not enough: a file that parses into zero
+        non-blank chunks succeeds while adding nothing, and publishing a
+        collection for it recreates the visible-but-empty knowledge base at the
+        document level. A re-ingest with nothing new to embed does count — its
+        chunks are already in the collection, so ``chunk_count`` stays positive
+        while ``embedding_count`` is zero. ``partial`` counts for the same
+        reason: whatever landed is real, and callers that roll their document
+        back simply ask before the rollback, not after.
+        """
+        if self.status == "error":
+            return 0
+        return 1 if int(self.chunk_count or 0) > 0 else 0
+
 
 # ------------------------- Management -------------------------
 

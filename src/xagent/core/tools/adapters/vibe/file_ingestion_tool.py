@@ -173,10 +173,10 @@ async def _create_knowledge_base_from_file_impl(
             user_id=user_id,
             is_admin=is_admin,
         )
-        collection_name = await kb_service.prepare_collection(
-            collection_name=collection_name,
-            ingestion_config=config,
-        )
+        collection_name = await kb_service.prepare_collection(collection_name)
+        # The ingest pipeline writes a metadata row of its own; remember whether
+        # the collection is ours to clean up if every file fails.
+        collection_existed_before = await kb_service.collection_exists(collection_name)
 
         ingested_count = 0
         errors = []
@@ -218,7 +218,7 @@ async def _create_knowledge_base_from_file_impl(
                 )
                 continue
 
-            if result.status == "error":
+            if not result.produced_documents:
                 errors.append(f"Failed to ingest {record.filename}: {result.message}")
             else:
                 ingested_count += 1
@@ -229,6 +229,8 @@ async def _create_knowledge_base_from_file_impl(
                 )
 
         if ingested_count == 0:
+            if not collection_existed_before:
+                await kb_service.cleanup_failed_collection(collection_name)
             return CreateKnowledgeBaseFromFileResult(
                 success=False,
                 collection_name=collection_name,

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..core.schemas import CollectionInfo, IngestionConfig
+from .api_compatibility import _maybe_await
 from .models import KBStorageBackend
 from .pipeline_compatibility import KB_STORAGE_METADATA_KEY
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ......web.tools.config import WebToolConfig
@@ -200,22 +204,14 @@ class KBToolCompatibilityFacade:
         self,
         *,
         collection_name: str,
-        ingestion_config: IngestionConfig,
-        user_id: int,
         is_admin: bool = False,
     ) -> str:
         from ....adapters.vibe import agent_kb_service
 
         with self._storage_context():
-            safe_collection = await agent_kb_service._prepare_collection_impl(
+            return await agent_kb_service._prepare_collection_impl(
                 collection_name=collection_name,
-                ingestion_config=ingestion_config,
-                user_id=user_id,
             )
-            await self.ensure_agent_collection_backend_binding(
-                safe_collection,
-            )
-            return safe_collection
 
     async def publish_agent_collection(
         self,
@@ -223,16 +219,74 @@ class KBToolCompatibilityFacade:
         collection_name: str,
         ingestion_config: IngestionConfig,
         user_id: int,
-        is_admin: bool = False,
     ) -> None:
         from ....adapters.vibe import agent_kb_service
 
         with self._storage_context():
+            # The backend binding lands with the config, not before the ingest:
+            # a metadata row written up front survives a failed import and makes
+            # the name unusable while staying invisible to its owner.
+            await self.ensure_agent_collection_backend_binding(collection_name)
             await agent_kb_service._publish_collection_impl(
                 collection_name=collection_name,
                 ingestion_config=ingestion_config,
                 user_id=user_id,
             )
+
+    async def agent_collection_exists(self, collection: str) -> bool:
+        """Whether the collection already exists before an agent import starts."""
+        from ..storage.factory import get_metadata_store
+
+        with self._storage_context():
+            try:
+                return await get_metadata_store().get_collection(collection) is not None
+            except ValueError:
+                return False
+            except Exception as exc:  # noqa: BLE001
+                # Unknown state must not authorize the cleanup below.
+                logger.warning(
+                    "Could not read collection %s before agent ingest: %s",
+                    collection,
+                    exc,
+                )
+                return True
+
+    async def cleanup_failed_agent_collection(
+        self,
+        collection: str,
+        *,
+        user_id: int,
+        is_admin: bool = False,
+    ) -> None:
+        """Drop the metadata row the ingest pipeline wrote for a failed import.
+
+        The row is invisible to its non-admin owner but still makes every route
+        answer 409 for the name, so leaving it behind burns the name silently.
+        """
+        from ..storage.factory import get_metadata_store, get_vector_index_store
+
+        with self._storage_context():
+            try:
+                records = get_vector_index_store().list_document_records(
+                    collection_name=collection,
+                    user_id=user_id,
+                    is_admin=is_admin,
+                    max_results=1,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skipping failed agent import cleanup for %s: %s", collection, exc
+                )
+                return
+            if records:
+                return
+
+            delete_collection = getattr(get_metadata_store(), "delete_collection", None)
+            if callable(delete_collection):
+                await _maybe_await(delete_collection(collection))
+                logger.info(
+                    "Removed metadata left by a failed agent import: %s", collection
+                )
 
     async def refresh_agent_collection_metadata(
         self,

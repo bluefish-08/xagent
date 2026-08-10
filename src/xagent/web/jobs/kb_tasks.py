@@ -80,12 +80,20 @@ def _save_job_collection_config_after_ingest(
     *,
     context: str,
     documents_created: int,
+    result_payload: dict[str, Any] | None = None,
 ) -> None:
     user = _get_job_user(
         db, payload, context=f"save collection config during {context}"
     )
     if user is None:
-        return
+        # Returning here would mark the job SUCCEEDED with nothing published:
+        # a successful import the user cannot see and has no error to act on.
+        raise BackgroundJobHandlerError(
+            f"Cannot publish the collection config during {context}: "
+            f"user {payload.get('user_id')} no longer exists",
+            result=result_payload,
+            retryable=False,
+        )
 
     from ..api.kb import CollectionConfigSaveError, _save_collection_config_after_ingest
 
@@ -102,8 +110,11 @@ def _save_job_collection_config_after_ingest(
         )
     except CollectionConfigSaveError as exc:
         # The documents already landed; a retry would re-run against consumed
-        # staging state and end up deleting the collection.
-        raise BackgroundJobHandlerError(str(exc), retryable=False) from exc
+        # staging state and end up deleting the collection. The payload has to
+        # ride along, or the job record is indistinguishable from a real failure.
+        raise BackgroundJobHandlerError(
+            str(exc), result=result_payload, retryable=False
+        ) from exc
 
 
 def _cleanup_failed_job_collection_metadata(
@@ -333,7 +344,8 @@ def handle_kb_ingest_document(db: Session, job: BackgroundJob) -> dict[str, Any]
         payload,
         ingestion_config,
         context="background document ingest",
-        documents_created=1,
+        documents_created=result.produced_documents,
+        result_payload=result_payload,
     )
     return result_payload
 
@@ -420,6 +432,7 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
         ingestion_config,
         context="background web ingest",
         documents_created=documents_created,
+        result_payload=result_payload,
     )
     if result.status in {"error", "partial"}:
         _cleanup_failed_web_collection_metadata_if_new(
@@ -586,7 +599,7 @@ def _cleanup_failed_staged_job_collection_metadata_if_current(
 ) -> bool:
     if not _is_staged_document_generation_latest(db, payload):
         logger.info(
-            "Skipping collection config publish for superseded KB ingest generation: "
+            "Skipping collection metadata cleanup for superseded KB ingest generation: "
             "%s/user_%s generation=%s",
             payload.get("collection"),
             payload.get("user_id"),

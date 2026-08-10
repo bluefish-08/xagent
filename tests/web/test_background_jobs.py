@@ -356,6 +356,7 @@ def test_kb_document_job_reads_staged_file_and_publishes_canonical(
             return IngestionResult(
                 status="success",
                 doc_id="doc-1",
+                chunk_count=1,
                 message="ok",
                 completed_steps=[
                     {"name": "register_document", "metadata": {"created": True}}
@@ -592,6 +593,7 @@ def test_kb_document_job_supersedes_older_generation_for_same_target(
             return IngestionResult(
                 status="success",
                 doc_id="doc-1",
+                chunk_count=1,
                 message="ok",
                 completed_steps=[
                     {"name": "register_document", "metadata": {"created": True}}
@@ -1358,6 +1360,7 @@ def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
                 embeddings_created=0,
                 crawled_urls=[],
                 failed_urls={},
+                chunk_count=1,
                 message="crawl completed",
                 warnings=[],
                 elapsed_time_ms=1,

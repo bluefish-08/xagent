@@ -499,7 +499,6 @@ async def test_api_facade_storage_operations_rebind_storage_context() -> None:
             super().__init__(CollectionInfo(name="old"))
             self.loaded_configs: list[dict[str, object]] = []
             self.deleted_metadata: list[dict[str, object]] = []
-            self.deleted_entries: list[str] = []
             self.renamed: list[dict[str, object]] = []
             self.config_owner_ids = {7, 8}
 
@@ -518,9 +517,6 @@ async def test_api_facade_storage_operations_rebind_storage_context() -> None:
         async def delete_collection_metadata(self, **kwargs: object) -> dict[str, int]:
             self.deleted_metadata.append(kwargs)
             return {"collection_config": 1}
-
-        async def delete_collection(self, collection_name: str) -> None:
-            self.deleted_entries.append(collection_name)
 
         def list_collection_config_owner_ids(self, collection_name: str) -> set[int]:
             assert collection_name == "old"

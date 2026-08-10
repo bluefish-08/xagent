@@ -75,16 +75,16 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     facade = _Facade()
-    restore_calls: list[dict[str, Any]] = []
+    cleanup_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
 
-    async def fake_restore(**kwargs: Any) -> None:
-        restore_calls.append(kwargs)
+    async def fake_cleanup(**kwargs: Any) -> None:
+        cleanup_calls.append(kwargs)
 
     monkeypatch.setattr(
         kb_module,
         "_cleanup_collection_metadata_after_failed_ingest",
-        fake_restore,
+        fake_cleanup,
     )
     api_result = KBApiOperationResult(
         result=IngestionResult(status="error", message="failed")
@@ -108,7 +108,7 @@ async def test_api_failed_ingest_config_cleanup_uses_api_outcome_decision(
     decided_on, decided_documents = facade.single_cleanup_inputs[0]
     assert decided_on.rollback_complete is False
     assert decided_documents == 1
-    assert restore_calls == [
+    assert cleanup_calls == [
         {
             "collection_existed_before": True,
             "collection_name": "demo",
@@ -125,16 +125,16 @@ async def test_api_failed_batch_ingest_config_cleanup_uses_api_outcome_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     facade = _Facade()
-    restore_calls: list[dict[str, Any]] = []
+    cleanup_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(kb_module, "_get_api_compatibility_facade", lambda: facade)
 
-    async def fake_restore(**kwargs: Any) -> None:
-        restore_calls.append(kwargs)
+    async def fake_cleanup(**kwargs: Any) -> None:
+        cleanup_calls.append(kwargs)
 
     monkeypatch.setattr(
         kb_module,
         "_cleanup_collection_metadata_after_failed_ingest",
-        fake_restore,
+        fake_cleanup,
     )
     api_results = [
         KBApiOperationResult(result=IngestionResult(status="success", message="ok")),
@@ -153,7 +153,7 @@ async def test_api_failed_batch_ingest_config_cleanup_uses_api_outcome_decision(
     )
 
     assert facade.batch_cleanup_inputs == [(api_results, 1)]
-    assert restore_calls == [
+    assert cleanup_calls == [
         {
             "collection_existed_before": False,
             "collection_name": "demo",
@@ -259,16 +259,20 @@ def _records_lookup(records: Any):
 
 
 @pytest.mark.parametrize(
-    ("records", "expected"),
+    ("records", "on_error", "expected"),
     [
-        ([{"file_id": "sibling"}], True),
-        ([], False),
-        (RuntimeError("vector store down"), True),
+        ([{"file_id": "sibling"}], True, True),
+        ([], True, False),
+        # A store read that fails must not authorize a delete...
+        (RuntimeError("vector store down"), True, True),
+        # ...nor make a possibly empty knowledge base visible.
+        (RuntimeError("vector store down"), False, False),
     ],
 )
 def test_collection_holds_documents_reads_at_decision_time(
     monkeypatch: pytest.MonkeyPatch,
     records: Any,
+    on_error: bool,
     expected: bool,
 ) -> None:
     monkeypatch.setattr(kb_module, "list_document_records", _records_lookup(records))
@@ -277,8 +281,8 @@ def test_collection_holds_documents_reads_at_decision_time(
         kb_module._collection_holds_documents(
             collection_name="shared-kb",
             user_id=3,
-            is_admin=False,
             context="test",
+            on_error=on_error,
         )
         is expected
     )
@@ -715,3 +719,240 @@ def test_missing_flag_defaults_to_pre_existing(
     from xagent.web.jobs import kb_tasks
 
     assert kb_tasks._collection_existed_before(payload) is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "chunk_count", "expected"),
+    [
+        # A parse that yields no non-blank chunks adds nothing searchable.
+        ("success", 0, 0),
+        # A re-ingest with nothing new to embed still has its chunks in place.
+        ("success", 3, 1),
+        # Partial runs leave real content behind.
+        ("partial", 2, 1),
+        ("error", 5, 0),
+    ],
+)
+def test_produced_documents_is_the_shared_publish_predicate(
+    status: str, chunk_count: int, expected: int
+) -> None:
+    result = IngestionResult(status=status, message="m", chunk_count=chunk_count)
+
+    assert result.produced_documents == expected
+
+
+def _facade_with(**attrs: Any) -> Any:
+    return type("F", (), {k: staticmethod(v) for k, v in attrs.items()})()
+
+
+@pytest.mark.asyncio
+async def test_metadata_cleanup_deletes_with_the_scope_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admin-scoped delete would wipe a row another tenant owns by name."""
+    delete_metadata = AsyncMock(return_value={"config_rows": 1})
+    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([]))
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(delete_collection_metadata=delete_metadata),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = True
+
+    await kb_module._cleanup_failed_new_collection_metadata(
+        collection_name="shared-kb",
+        user=user,
+    )
+
+    assert delete_metadata.await_args.kwargs["is_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_publish_does_not_guess_when_the_store_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable store must not make a possibly empty KB visible."""
+    save = AsyncMock()
+    monkeypatch.setattr(
+        kb_module,
+        "list_document_records",
+        _records_lookup(RuntimeError("vector store down")),
+    )
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(save_collection_config=save),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._save_collection_config_after_ingest(
+        collection="kb",
+        config_json="{}",
+        user=user,
+        context="ingest_web",
+        documents_created=0,
+        collection_existed_before=False,
+    )
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_delete_when_the_store_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opposite direction: an unreadable store must not authorize a delete."""
+    delete_metadata = AsyncMock()
+    monkeypatch.setattr(
+        kb_module,
+        "list_document_records",
+        _records_lookup(RuntimeError("vector store down")),
+    )
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(delete_collection_metadata=delete_metadata),
+    )
+
+    user = User()
+    user.id = 5
+    user.is_admin = False
+
+    await kb_module._cleanup_failed_new_collection_metadata(
+        collection_name="kb",
+        user=user,
+    )
+
+    delete_metadata.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("existed_before", "other_document", "exists_now", "config", "may_delete"),
+    [
+        (False, False, False, None, True),
+        # the stamp says new, but the collection is there now
+        (False, False, True, None, False),
+        # a sibling landed a document, or published the config
+        (False, True, False, None, False),
+        (False, False, False, "{}", False),
+        (True, False, False, None, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rollback_may_delete_collection_reads_live_state(
+    monkeypatch: pytest.MonkeyPatch,
+    existed_before: bool,
+    other_document: bool,
+    exists_now: bool,
+    config: Any,
+    may_delete: bool,
+) -> None:
+    def _get_collection_sync(name: str) -> Any:
+        if exists_now:
+            return object()
+        raise ValueError("missing")
+
+    async def _get_collection_config(**kwargs: Any) -> Any:
+        return config
+
+    monkeypatch.setattr(kb_module, "get_collection_sync", _get_collection_sync)
+    monkeypatch.setattr(
+        kb_module,
+        "_get_api_compatibility_facade",
+        lambda: _facade_with(get_collection_config=_get_collection_config),
+    )
+
+    assert (
+        await kb_module._rollback_may_delete_collection(
+            collection_name="kb",
+            user_id=5,
+            collection_existed_before=existed_before,
+            other_document_present=other_document,
+            context="test",
+        )
+        is may_delete
+    )
+
+
+@pytest.mark.asyncio
+async def test_rollback_keeps_the_collection_when_the_re_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown state must not authorize deleting a whole collection."""
+
+    def _get_collection_sync(name: str) -> Any:
+        raise RuntimeError("metadata store down")
+
+    monkeypatch.setattr(kb_module, "get_collection_sync", _get_collection_sync)
+
+    assert (
+        await kb_module._rollback_may_delete_collection(
+            collection_name="kb",
+            user_id=5,
+            collection_existed_before=False,
+            other_document_present=False,
+            context="test",
+        )
+        is False
+    )
+
+
+def test_job_config_save_failure_keeps_the_result_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FAILED job with no payload is indistinguishable from a real failure."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+    from xagent.web.jobs import kb_tasks
+    from xagent.web.jobs.exceptions import BackgroundJobHandlerError
+
+    user = User()
+    user.id = 13
+    monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: user)
+
+    async def fail_save(**kwargs: Any) -> None:
+        raise kb_module.CollectionConfigSaveError("config store down")
+
+    monkeypatch.setattr(kb_module, "_save_collection_config_after_ingest", fail_save)
+
+    with pytest.raises(BackgroundJobHandlerError) as excinfo:
+        kb_tasks._save_job_collection_config_after_ingest(
+            MagicMock(),
+            {"collection": "job-kb", "user_id": 13},
+            IngestionConfig(),
+            context="background document ingest",
+            documents_created=1,
+            result_payload={"file_id": "file-1", "status": "success"},
+        )
+
+    assert excinfo.value.retryable is False
+    assert excinfo.value.result == {"file_id": "file-1", "status": "success"}
+
+
+def test_job_with_a_missing_user_fails_instead_of_succeeding_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returning here would mark the job SUCCEEDED with nothing published."""
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+    from xagent.web.jobs import kb_tasks
+    from xagent.web.jobs.exceptions import BackgroundJobHandlerError
+
+    monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: None)
+
+    with pytest.raises(BackgroundJobHandlerError) as excinfo:
+        kb_tasks._save_job_collection_config_after_ingest(
+            MagicMock(),
+            {"collection": "job-kb", "user_id": 13},
+            IngestionConfig(),
+            context="background document ingest",
+            documents_created=1,
+            result_payload={"file_id": "file-1"},
+        )
+
+    assert excinfo.value.retryable is False
+    assert excinfo.value.result == {"file_id": "file-1"}
