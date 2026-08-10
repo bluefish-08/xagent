@@ -557,12 +557,13 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     // proceeding: proceeding would reopen the very race above, silently, while
     // this is a visible error the user can retry once the release settles.
     if (pendingRelease.current) {
+      let settleTimer: number | undefined
       const settled = await Promise.race([
         pendingRelease.current.then(() => true),
-        new Promise<boolean>((resolve) =>
-          window.setTimeout(() => resolve(false), RELEASE_SETTLE_TIMEOUT_MS),
-        ),
-      ])
+        new Promise<boolean>((resolve) => {
+          settleTimer = window.setTimeout(() => resolve(false), RELEASE_SETTLE_TIMEOUT_MS)
+        }),
+      ]).finally(() => window.clearTimeout(settleTimer))
       if (!settled) throw new Error(t("kb.ownership.releaseStillPending"))
     }
     // Set before awaiting, because a retried POST can commit server-side and
