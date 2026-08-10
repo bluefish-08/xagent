@@ -144,8 +144,13 @@ function teamNameNotice(
   const claim = claims.find((held) => held.name === name)
   if (!claim) return null
   // True regardless of `is_empty`: being listed at all means the team holds the
-  // name, which is what decides where the bytes go.
-  if (ownership !== "team") return "kb.ownership.nameBelongsToTeam"
+  // name, which is what decides where the bytes go. A built knowledge base is
+  // the stronger fact -- the upload would merge into it, not create anything.
+  if (ownership !== "team") {
+    return claim.is_empty === false
+      ? "kb.ownership.nameJoinsTeamKnowledgeBase"
+      : "kb.ownership.nameBelongsToTeam"
+  }
   // A backend predating this field would make every match look built.
   if (typeof claim.is_empty !== "boolean") return null
   if (!claim.is_empty) return "kb.ownership.nameIsTeamKnowledgeBase"

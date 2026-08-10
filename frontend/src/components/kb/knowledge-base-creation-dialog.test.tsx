@@ -1172,6 +1172,26 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     expect(await screen.findByText("kb.ownership.nameHeldByYou")).toBeInTheDocument()
   })
 
+  it("says a personal upload joins the team knowledge base already built under the name", async () => {
+    // Stronger than "would belong to the team": the knowledge base exists, so
+    // the upload merges into something teammates are already using.
+    mockRoute(
+      (url) => url === "http://api.local/api/knowledge-bases/team-status",
+      () =>
+        createJsonResponse([
+          { name: "team-docs", created_by_user_id: 99, is_empty: false },
+        ])
+    )
+    const { container } = render(
+      <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+    )
+    fireEvent.change(container.querySelector("#collection_name") as HTMLInputElement, {
+      target: { value: "team-docs" },
+    })
+
+    expect(await screen.findByText("kb.ownership.nameJoinsTeamKnowledgeBase")).toBeInTheDocument()
+  })
+
   it("says nothing when the backend predates the claim fields", async () => {
     // Shipping the dialog ahead of the endpoint would otherwise make every
     // match read as a built knowledge base, since `!undefined` is true.

@@ -1890,6 +1890,7 @@ const zh = {
       nameHeldInTeam: "团队里已经登记了该名称。请持有者释放，或另取一个。",
       nameBelongsToTeam: "该名称归你的团队所有，用它创建的知识库会属于团队，而不是你个人。",
       nameIsTeamKnowledgeBase: "团队里已经有同名的知识库。",
+      nameJoinsTeamKnowledgeBase: "团队里已经有同名的知识库，你上传的内容会并入该知识库。",
       releaseStillPending: "该名称上一次的释放尚未完成，请稍候重试。",
       releaseFailed: "该名称的团队登记未能释放，可能需要团队管理员清理。",
       personalDesc: "仅你自己可见",
