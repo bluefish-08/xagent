@@ -1461,6 +1461,40 @@ describe("KnowledgeBaseCreationDialog ownership", () => {
     }
   })
 
+  it.each([
+    ["web", "http://api.local/api/kb/ingest-web/jobs"],
+    ["cloud", "http://api.local/api/kb/ingest-cloud"],
+  ] as const)(
+    "fires no %s ingest when the run was disowned during the reserve",
+    async (tab, ingestUrl) => {
+      // The reserve is a network round trip; closing the dialog inside it must
+      // not let the ingest go on to create a knowledge base for a dialog the
+      // user already walked away from.
+      let finishReserve: (value: unknown) => void = () => {}
+      mockRoute(
+        (url) => url === RESERVE_URL,
+        () => new Promise((resolve) => {
+          finishReserve = resolve
+        })
+      )
+      const { container } = render(
+        <KnowledgeBaseCreationDialog open={true} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      )
+      nameAndChooseTeam(container)
+      await goToStep3(container, tab)
+      fireEvent.click(screen.getByText("kb.dialog.createButton"))
+      await waitFor(() => {
+        expect(callsTo(RESERVE_URL)).toHaveLength(1)
+      })
+
+      fireEvent.click(screen.getByTestId("dismiss-dialog"))
+      finishReserve(createJsonResponse(null, 204))
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(callsTo(ingestUrl)).toHaveLength(0)
+    }
+  )
+
   it("does not paint a late 409 from a disowned reserve into a reopened dialog", async () => {
     // The reserve is the first await of every submit, so its 409 can land
     // after the user has closed, reopened and typed a different name -- the

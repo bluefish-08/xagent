@@ -891,7 +891,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
 
       appendIngestionConfigToFormData(formData, ingestionConfig)
 
-      if (live()) setWebIngestionProgress(10)
+      // A run disowned while the reserve was in flight posts nothing: firing
+      // the crawl anyway would create a knowledge base for a dialog the user
+      // already closed. Mirrors the file path's guard before its POST.
+      if (!live()) return
+      setWebIngestionProgress(10)
 
       const response = await apiRequest(
         `${apiUrl}/api/kb/ingest-web${useBackgroundJobs ? "/jobs" : ""}`,
@@ -1038,6 +1042,9 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
         retry_delay: ingestionConfig.retry_delay
       }
 
+      // Same window as the web path: a run disowned during the reserve must
+      // not go on to create the collection.
+      if (!live()) return
       const response = await apiRequest(`${getApiUrl()}/api/kb/ingest-cloud`, {
         method: "POST",
         headers: {
