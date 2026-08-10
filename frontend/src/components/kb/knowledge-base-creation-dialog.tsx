@@ -641,7 +641,11 @@ export function KnowledgeBaseCreationDialog({ open, onOpenChange, onSuccess }: K
     }
     // Outlives the ingest error toast (8s) stacked with it: this is the only
     // signal that a team claim leaked, and no other UI can surface it later.
-    toast.warning(t("kb.ownership.releaseFailed"), { duration: LEAKED_CLAIM_TOAST_DURATION })
+    // Named, because the release is fire-and-forget: by the time it fails the
+    // dialog may be showing a different knowledge base entirely.
+    toast.warning(t("kb.ownership.releaseFailed", { name: collection }), {
+      duration: LEAKED_CLAIM_TOAST_DURATION,
+    })
   }
 
   const resetState = () => {

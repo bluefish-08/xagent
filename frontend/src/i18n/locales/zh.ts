@@ -1892,7 +1892,7 @@ const zh = {
       nameIsTeamKnowledgeBase: "团队里已经有同名的知识库。",
       nameJoinsTeamKnowledgeBase: "团队里已经有同名的知识库，你上传的内容会并入该知识库。",
       releaseStillPending: "该名称上一次的释放尚未完成，请稍候重试。",
-      releaseFailed: "该名称的团队登记未能释放，可能需要团队管理员清理。",
+      releaseFailed: "名称“{name}”的团队登记未能释放，可能需要团队管理员清理。",
       personalDesc: "仅你自己可见",
       teamDesc: "团队成员都可见",
     },
