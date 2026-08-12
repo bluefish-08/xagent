@@ -159,6 +159,73 @@ def test_format_tool_result_for_observation_normalizes_artifact_type_case():
     assert "Markdown/chat image" in observation
 
 
+def test_format_tool_result_for_observation_drops_redundant_image_metadata():
+    observation = format_tool_result_for_observation(
+        "generate_image",
+        {
+            "success": True,
+            "image_path": "/tmp/xagent/output/creative.png",
+            "file_id": "image-file-id",
+            "artifacts": [
+                {
+                    "type": "image",
+                    "file_id": "image-file-id",
+                    "filename": "creative.png",
+                    "mime_type": "image/png",
+                    "display": "inline",
+                }
+            ],
+            "file_ref": {
+                "file_id": "image-file-id",
+                "filename": "creative.png",
+                "relative_path": "creative.png",
+            },
+            "usage": {"prompt_tokens": 12, "total_tokens": 34},
+            "task_metric": {"latency_ms": 8123},
+            "request_id": "req-abc123",
+            "model_used": "gemini-2.5-flash-image",
+            "saved_to_workspace": True,
+        },
+    )
+
+    assert "![creative.png](file:image-file-id)" in observation
+    assert "gemini-2.5-flash-image" in observation
+    assert "relative_path" in observation
+    for dropped in ("prompt_tokens", "latency_ms", "req-abc123", "saved_to_workspace"):
+        assert dropped not in observation
+    assert "inline" not in observation
+
+
+def test_format_tool_result_for_observation_drops_raw_video_provider_payload():
+    observation = format_tool_result_for_observation(
+        "generate_video",
+        {
+            "success": True,
+            "video_url": "https://provider.example/signed/clip.mp4?token=secret",
+            "last_frame_url": "https://provider.example/signed/frame.png?token=secret",
+            "video_path": "/tmp/xagent/output/clip.mp4",
+            "file_id": "video-file-id",
+            "artifacts": [
+                {
+                    "type": "video",
+                    "file_id": "video-file-id",
+                    "filename": "clip.mp4",
+                    "mime_type": "video/mp4",
+                    "display": "inline",
+                }
+            ],
+            "duration": 5,
+            "resolution": "1080p",
+            "raw_response": {"data": {"binary": "x" * 4096}},
+        },
+    )
+
+    assert "[clip.mp4](file:video-file-id)" in observation
+    assert "1080p" in observation
+    assert "xxxx" not in observation
+    assert "provider.example" not in observation
+
+
 def test_snapshot_generated_artifact_files_skips_files_deleted_before_stat(
     tmp_path, monkeypatch
 ):

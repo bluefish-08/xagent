@@ -49,6 +49,21 @@ LOCAL_PATH_KEYS = {
     "output_dir",
     "output_path",
 }
+# Dropped from the model-facing observation only, never from the tool result.
+# The artifact lines already carry file identity; the rest is telemetry, raw
+# provider payloads, or transient URLs the model must not reference.
+OBSERVATION_REDUNDANT_KEYS = {
+    "artifacts",
+    "generated_files",
+    "image_url",
+    "last_frame_url",
+    "raw_response",
+    "request_id",
+    "saved_to_workspace",
+    "task_metric",
+    "usage",
+    "video_url",
+}
 
 GeneratedArtifactSnapshot = dict[Path, tuple[int, int]]
 
@@ -125,8 +140,18 @@ def format_tool_result_for_observation(tool_name: str, result: Any) -> str:
         + "\nUse the Markdown/chat form in assistant messages. "
         + "When writing HTML for Xagent preview, reference the same file_id "
         + "through the file preview service instead of local filesystem paths. "
-        + f"Sanitized result metadata: {sanitized}"
+        + f"Sanitized result metadata: {_observation_metadata(sanitized)}"
     )
+
+
+def _observation_metadata(sanitized: Any) -> Any:
+    if not isinstance(sanitized, dict):
+        return sanitized
+    return {
+        key: value
+        for key, value in sanitized.items()
+        if key not in OBSERVATION_REDUNDANT_KEYS
+    }
 
 
 def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
