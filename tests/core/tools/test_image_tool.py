@@ -2,6 +2,7 @@
 Tests for Image Generation tool
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -912,7 +913,6 @@ class TestImageToolCapabilityGating:
 
         assert result["success"] is False
         assert "retry generate_image without images" in result["error"]
-        assert "instead of retrying edit_image" not in result["error"]
 
     @pytest.mark.asyncio
     async def test_edit_error_stops_retrying_when_nothing_can_generate_either(
@@ -927,6 +927,40 @@ class TestImageToolCapabilityGating:
         assert "stop retrying image tools" in result["error"]
         assert "retry generate_image" not in result["error"]
         assert "model1 (abilities: none)" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_wrong_model_id_points_at_the_models_that_can_serve_it(
+        self, mock_image_models, mock_workspace
+    ):
+        # A model_id that cannot edit must not be reported as "editing is
+        # unavailable" while another configured model can edit.
+        mock_image_models["model1"].abilities = ["generate"]
+        mock_image_models["model1"].has_ability = Mock(
+            side_effect=lambda a: a == "generate"
+        )
+        mock_image_models["model2"].abilities = ["generate", "edit"]
+        mock_image_models["model2"].has_ability = Mock(side_effect=lambda a: True)
+        tool = ImageGenerationTool(mock_image_models, workspace=mock_workspace)
+
+        edit = await tool.edit_image(prompt="x", image_url="file:a", model_id="model1")
+
+        assert "Model model1 cannot edit" in edit["error"]
+        assert "retry edit_image without model_id" in edit["error"]
+        assert "editing is unavailable" not in edit["error"].lower()
+
+    def test_a_model_without_has_ability_is_not_trusted(self, mock_workspace):
+        # fail closed: an object that never declares the ability cannot serve it,
+        # whether it arrives as a default or from the configured mapping.
+        opaque = SimpleNamespace(abilities=["generate", "edit"])
+        tool = ImageGenerationTool(
+            {"opaque": opaque},
+            workspace=mock_workspace,
+            default_generate_model=opaque,
+            default_edit_model=opaque,
+        )
+
+        assert tool._get_model() is None
+        assert tool._get_edit_model() is None
 
     @pytest.mark.asyncio
     async def test_generate_error_lists_abilities(

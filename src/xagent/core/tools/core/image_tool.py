@@ -382,10 +382,17 @@ Images are automatically saved to workspace.
             entries.append(f"{model_id} (abilities: {joined})")
         return "; ".join(entries) or "none configured"
 
-    def _no_edit_model_error(self) -> str:
-        # The realistic trigger is generate_image(images=...) delegating here on a
-        # generate-only deployment, so never answer it with "use generate_image".
-        if self._get_model() is not None:
+    def _no_edit_model_error(self, model_id: Optional[str] = None) -> str:
+        # Each branch has to name a different way out, or the model retries the
+        # exact call it just made — the failure this whole error exists to stop.
+        if model_id and self._get_edit_model() is not None:
+            remedy = (
+                f"Model {model_id} cannot edit: retry edit_image without model_id, "
+                "or pick one listed above that has the edit ability."
+            )
+        elif self._get_model() is not None:
+            # generate_image(images=...) delegates here, so never answer that
+            # call with "use generate_image".
             remedy = (
                 "Image editing is unavailable in this deployment: retry "
                 "generate_image without images and describe the change in the "
@@ -401,12 +408,20 @@ Images are automatically saved to workspace.
             f"Configured image models: {self._available_models_summary()}. {remedy}"
         )
 
-    def _no_generate_model_error(self) -> str:
+    def _no_generate_model_error(self, model_id: Optional[str] = None) -> str:
+        if model_id and self._get_model() is not None:
+            remedy = (
+                f"Model {model_id} cannot generate: retry generate_image without "
+                "model_id, or pick one listed above that has the generate ability."
+            )
+        else:
+            remedy = (
+                "No configured model can generate images: stop retrying image "
+                "tools and report that to the user."
+            )
         return (
             "No available image models with generate capabilities. "
-            f"Configured image models: {self._available_models_summary()}. "
-            "Retry without model_id to use the default, or pick a model listed above "
-            "that has the generate ability."
+            f"Configured image models: {self._available_models_summary()}. {remedy}"
         )
 
     def _resolve_image_path(self, image_input: str) -> str:
@@ -622,7 +637,7 @@ Images are automatically saved to workspace.
             if not image_model:
                 return {
                     "success": False,
-                    "error": self._no_generate_model_error(),
+                    "error": self._no_generate_model_error(model_id),
                     "image_path": None,
                 }
 
@@ -747,7 +762,7 @@ Images are automatically saved to workspace.
             if not image_model:
                 return {
                     "success": False,
-                    "error": self._no_edit_model_error(),
+                    "error": self._no_edit_model_error(model_id),
                     "image_path": None,
                 }
 

@@ -235,8 +235,6 @@ def _withheld_edit_image_row(
     Without it the admin listing just drops the tool, losing the only prompt to
     register an edit-capable model.
     """
-    if not image_models:
-        return None
     if any(item.get("name") == "edit_image" for item in tools):
         return None
     row = _create_tool_info(
