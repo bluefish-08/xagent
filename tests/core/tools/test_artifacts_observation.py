@@ -235,6 +235,63 @@ def test_format_tool_result_for_observation_drops_raw_video_provider_payload():
     assert "https://frames.example/last-frame.png" in observation
 
 
+def test_format_tool_result_for_observation_redacts_the_download_failure_shape():
+    # A failed video download reports artifacts=[], which used to skip redaction
+    # entirely and leak the raw payload plus the signed URL verbatim.
+    observation = format_tool_result_for_observation(
+        "generate_video",
+        {
+            "success": True,
+            "video_url": "https://provider.example/signed/clip.mp4?token=secret",
+            "video_path": None,
+            "file_id": None,
+            "artifacts": [],
+            "file_ref": {
+                "file_id": "vid",
+                "filename": "clip.mp4",
+                "file_path": "/tmp/xagent/output/clip.mp4",
+            },
+            "raw_response": {"data": {"binary": "x" * 4096}},
+        },
+    )
+
+    assert "xxxx" not in observation
+    assert "/tmp/xagent/output/clip.mp4" not in observation
+    # Without artifact lines the URL is the model's only handle on the result.
+    assert "https://provider.example/signed/clip.mp4?token=secret" in observation
+
+
+def test_observation_metadata_drops_exactly_the_excluded_keys():
+    from xagent.core.tools.artifacts import (
+        _OBSERVATION_EXCLUDED_KEYS,
+        _UNBOUNDED_PAYLOAD_KEYS,
+        _observation_metadata,
+    )
+
+    payload = {
+        "success": True,
+        "model_used": "gemini",
+        "usage": {},
+        "task_metric": {},
+        "request_id": "r",
+        "saved_to_workspace": True,
+        "artifacts": [],
+        "generated_files": [],
+        "video_url": "u",
+        "raw_response": {},
+        "last_frame_url": "f",
+    }
+
+    assert set(_observation_metadata(payload, _OBSERVATION_EXCLUDED_KEYS)) == {
+        "success",
+        "model_used",
+        "last_frame_url",
+    }
+    assert set(_observation_metadata(payload, _UNBOUNDED_PAYLOAD_KEYS)) == set(
+        payload
+    ) - {"raw_response"}
+
+
 def test_snapshot_generated_artifact_files_skips_files_deleted_before_stat(
     tmp_path, monkeypatch
 ):

@@ -52,7 +52,7 @@ LOCAL_PATH_KEYS = {
 # Dropped from the model-facing observation only, never from the tool result, and
 # only at the top level. Keep out anything the model still acts on: last_frame_url
 # is an input to the next generate_video call and has no artifact of its own.
-OBSERVATION_REDUNDANT_KEYS = {
+_OBSERVATION_EXCLUDED_KEYS = {
     "artifacts",
     "generated_files",
     "raw_response",
@@ -62,6 +62,9 @@ OBSERVATION_REDUNDANT_KEYS = {
     "usage",
     "video_url",
 }
+# Without artifact lines the URLs and filenames are the model's only handle on the
+# result, so the failure path only sheds the unbounded provider payload.
+_UNBOUNDED_PAYLOAD_KEYS = {"raw_response"}
 
 GeneratedArtifactSnapshot = dict[Path, tuple[int, int]]
 
@@ -122,32 +125,32 @@ def format_tool_result_for_observation(tool_name: str, result: Any) -> str:
     if not isinstance(result, dict):
         return str(result)
 
-    artifacts = result.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
-        return str(result)
-
     sanitized = sanitize_file_refs_for_observation(result)
 
-    artifact_lines = _format_artifact_lines(artifacts)
+    artifacts = result.get("artifacts")
+    artifact_lines = (
+        _format_artifact_lines(artifacts) if isinstance(artifacts, list) else []
+    )
     if not artifact_lines:
-        return str(sanitized)
+        # A failed download still reports through this path, so it has to be
+        # redacted too — it carries the same signed URLs and provider payloads.
+        return str(_observation_metadata(sanitized, _UNBOUNDED_PAYLOAD_KEYS))
 
+    metadata = _observation_metadata(sanitized, _OBSERVATION_EXCLUDED_KEYS)
     return (
         f"Tool '{tool_name}' produced displayable artifact(s):\n"
         + "\n".join(artifact_lines)
         + "\nUse the Markdown/chat form in assistant messages. "
         + "When writing HTML for Xagent preview, reference the same file_id "
-        + "through the file preview service instead of local filesystem paths. "
-        + f"Sanitized result metadata: {_observation_metadata(sanitized)}"
+        + "through the file preview service instead of local filesystem paths."
+        + (f" Sanitized result metadata: {metadata}" if metadata else "")
     )
 
 
-def _observation_metadata(sanitized: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in sanitized.items()
-        if key not in OBSERVATION_REDUNDANT_KEYS
-    }
+def _observation_metadata(
+    sanitized: dict[str, Any], excluded: set[str]
+) -> dict[str, Any]:
+    return {key: value for key, value in sanitized.items() if key not in excluded}
 
 
 def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
