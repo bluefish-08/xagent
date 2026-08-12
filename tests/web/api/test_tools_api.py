@@ -102,6 +102,76 @@ def test_music_tool_requires_music_model() -> None:
     assert available["status"] == "available"
 
 
+@pytest.mark.asyncio
+async def test_available_tools_route_surfaces_the_withheld_edit_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The helper's unit test cannot catch the wiring being dropped, and every
+    # other route test configures zero image models, which short-circuits it.
+    from xagent.web.api.tools import get_available_tools
+
+    class Config:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def get_vision_model(self):
+            return None
+
+        def get_image_models(self):
+            return {"img": SimpleNamespace(abilities=["generate"])}
+
+        def get_video_models(self):
+            return {}
+
+        def get_asr_models(self):
+            return {}
+
+        def get_tts_models(self):
+            return {}
+
+        def get_sound_effect_models(self):
+            return {}
+
+        def get_music_models(self):
+            return {}
+
+        def get_user_tool_overrides(self):
+            return {}
+
+        def close(self) -> None:
+            return None
+
+    async def create_all_tools(_config, apply_user_override_filter: bool = True):
+        # Capability gating already withheld edit_image.
+        return []
+
+    class Query:
+        def all(self) -> list[object]:
+            return []
+
+    class Database:
+        def query(self, _model: object) -> Query:
+            return Query()
+
+    monkeypatch.setattr("xagent.web.api.tools.WebToolConfig", Config)
+    monkeypatch.setattr(
+        "xagent.core.tools.adapters.vibe.factory.ToolFactory.create_all_tools",
+        create_all_tools,
+    )
+    monkeypatch.setattr("xagent.web.sandbox_manager.get_sandbox_manager", lambda: None)
+    monkeypatch.setattr("xagent.web.api.tools.get_default_tool_configs", lambda: [])
+
+    response = await get_available_tools(
+        current_user=SimpleNamespace(id=7, is_admin=False),
+        db=Database(),
+    )
+
+    rows = {item["name"]: item for item in response["tools"]}
+    assert rows["edit_image"]["enabled"] is False
+    assert rows["edit_image"]["status"] == "missing_capability"
+    assert "editing support" in rows["edit_image"]["status_reason"]
+
+
 class _AvailableToolsRouteHarness:
     def __init__(
         self,

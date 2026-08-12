@@ -246,9 +246,9 @@ Images are automatically saved to workspace.
         default_model_lines = []
         other_model_lines = []
         for model_id, model in self._image_models.items():
-            if hasattr(model, "has_ability") and model.has_ability("generate"):
+            if self._has_ability(model, "generate"):
                 description = self._model_descriptions.get(model_id, "")
-                edit_marker = " ✎" if model.has_ability("edit") else ""
+                edit_marker = " ✎" if self._has_ability(model, "edit") else ""
                 is_default = model_id == default_generate_id
                 default_marker = " ⭐[DEFAULT]" if is_default else ""
 
@@ -275,7 +275,7 @@ Images are automatically saved to workspace.
         default_edit_lines = []
         other_edit_lines = []
         for model_id, model in self._image_models.items():
-            if hasattr(model, "has_ability") and model.has_ability("edit"):
+            if self._has_ability(model, "edit"):
                 description = self._model_descriptions.get(model_id, "")
                 is_default = model_id == default_edit_id
                 default_marker = " ⭐[DEFAULT]" if is_default else ""
@@ -872,10 +872,19 @@ Images are automatically saved to workspace.
         """
         try:
             models_info = []
-            for model_id in self._image_models.keys():
+            for model_id, model in self._image_models.items():
+                # When capability gating withholds every image tool this listing
+                # is the only thing left to explain why, so it has to report what
+                # each model can actually serve rather than a flat "available".
+                abilities = [
+                    ability
+                    for ability in ("generate", "edit")
+                    if self._has_ability(model, ability)
+                ]
                 model_info = {
                     "model_id": model_id,
-                    "available": True,
+                    "available": bool(abilities),
+                    "abilities": abilities,
                     "description": self._model_descriptions.get(model_id, ""),
                 }
                 models_info.append(model_info)

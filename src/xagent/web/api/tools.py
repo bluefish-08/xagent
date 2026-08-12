@@ -123,7 +123,8 @@ def _create_tool_info(
         elif tool_name == "edit_image":
             # Special check for image editing capability
             has_edit_capability = any(
-                "edit" in model.abilities for model in image_models.values()
+                "edit" in (getattr(model, "abilities", None) or ())
+                for model in image_models.values()
             )
             if not has_edit_capability:
                 status = "missing_capability"

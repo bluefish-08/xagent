@@ -948,6 +948,33 @@ class TestImageToolCapabilityGating:
         assert "retry edit_image without model_id" in edit["error"]
         assert "editing is unavailable" not in edit["error"].lower()
 
+    def test_listing_reports_what_each_model_can_actually_serve(
+        self, mock_image_models, mock_workspace
+    ):
+        # list_image_models is the only tool left in this state, so it has to
+        # explain the absence rather than claim everything is available.
+        self._set_abilities(mock_image_models, [])
+        tool = ImageGenerationTool(mock_image_models, workspace=mock_workspace)
+
+        listed = tool.list_available_models()["models"]
+
+        assert [m["available"] for m in listed] == [False, False]
+        assert [m["abilities"] for m in listed] == [[], []]
+
+        mock_image_models["model1"].has_ability = Mock(
+            side_effect=lambda a: a == "edit"
+        )
+        edit_only = ImageGenerationTool(
+            mock_image_models, workspace=mock_workspace
+        ).list_available_models()["models"]
+
+        assert edit_only[0] == {
+            "model_id": "model1",
+            "available": True,
+            "abilities": ["edit"],
+            "description": "",
+        }
+
     def test_a_model_without_has_ability_is_not_trusted(self, mock_workspace):
         # fail closed: an object that never declares the ability cannot serve it,
         # whether it arrives as a default or from the configured mapping.
