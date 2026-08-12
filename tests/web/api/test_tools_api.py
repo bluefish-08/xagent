@@ -63,6 +63,27 @@ def test_sound_effect_tool_requires_sound_effect_model() -> None:
     assert available["status"] == "available"
 
 
+def test_withheld_edit_image_keeps_its_admin_row() -> None:
+    from xagent.web.api.tools import _withheld_edit_image_row
+
+    generate_only = {"img": SimpleNamespace(abilities=["generate"])}
+    edit_capable = {"img": SimpleNamespace(abilities=["generate", "edit"])}
+
+    row = _withheld_edit_image_row([], generate_only)
+
+    assert row is not None
+    assert row["name"] == "edit_image"
+    assert row["enabled"] is False
+    assert row["status"] == "missing_capability"
+    assert "editing support" in row["status_reason"]
+
+    # Nothing to explain when the tool is present, or when no model is configured.
+    assert _withheld_edit_image_row([{"name": "edit_image"}], generate_only) is None
+    assert _withheld_edit_image_row([], {}) is None
+    # An edit-capable deployment must never grow a synthetic row.
+    assert _withheld_edit_image_row([], edit_capable) is None
+
+
 def test_music_tool_requires_music_model() -> None:
     class Tool:
         name = "generate_music"

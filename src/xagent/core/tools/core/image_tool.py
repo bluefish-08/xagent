@@ -317,21 +317,19 @@ Images are automatically saved to workspace.
         """Get image model with generate capability by ID or default model."""
         if model_id and model_id in self._image_models:
             model = self._image_models[model_id]
-            if hasattr(model, "has_ability") and model.has_ability("generate"):
+            if self._has_ability(model, "generate"):
                 return model
             else:
                 logger.warning(f"Model {model_id} does not support generation")
                 return None
 
         # Use configured default generate model
-        if self._default_generate_model and not self._denies_ability(
-            self._default_generate_model, "generate"
-        ):
+        if self._has_ability(self._default_generate_model, "generate"):
             return self._default_generate_model
 
         # Fallback: return first available model with generate capability
         for model in self._image_models.values():
-            if hasattr(model, "has_ability") and model.has_ability("generate"):
+            if self._has_ability(model, "generate"):
                 return model
 
         return None
@@ -342,61 +340,70 @@ Images are automatically saved to workspace.
         """Get image model with edit capability by ID or default edit model."""
         if model_id and model_id in self._image_models:
             model = self._image_models[model_id]
-            if hasattr(model, "has_ability") and model.has_ability("edit"):
+            if self._has_ability(model, "edit"):
                 return model
             else:
                 logger.warning(f"Model {model_id} does not support editing")
                 return None
 
-        # A default configured by hand is trusted unless the model itself denies
-        # the ability; otherwise it reaches the provider and raises there instead.
-        if self._default_edit_model and not self._denies_ability(
-            self._default_edit_model, "edit"
-        ):
+        # A hand-configured default still has to declare the ability, or it
+        # reaches the provider and raises there instead of returning our error.
+        if self._has_ability(self._default_edit_model, "edit"):
             return self._default_edit_model
 
         # Fallback: return first available model with edit capability
         for model in self._image_models.values():
-            if hasattr(model, "has_ability") and model.has_ability("edit"):
+            if self._has_ability(model, "edit"):
                 return model
 
         return None
 
     @staticmethod
-    def _denies_ability(model: Any, ability: str) -> bool:
-        """True only when the model explicitly reports it lacks ``ability``."""
+    def _has_ability(model: Any, ability: str) -> bool:
+        """Capable only when the model itself declares the ability."""
         has_ability = getattr(model, "has_ability", None)
-        return callable(has_ability) and not has_ability(ability)
-
-    def has_generate_capable_model(self) -> bool:
-        """Whether any configured model can generate. Gates generate_image."""
-        return self._get_model() is not None
-
-    def has_edit_capable_model(self) -> bool:
-        """Whether any configured model can edit. Gates edit_image registration."""
-        return self._get_edit_model() is not None
+        return callable(has_ability) and bool(has_ability(ability))
 
     def _available_models_summary(self) -> str:
         entries = []
         for model_id, model in self._image_models.items():
             abilities = getattr(model, "abilities", None)
-            if not isinstance(abilities, (list, tuple)):
-                abilities = []
-            joined = ", ".join(str(ability) for ability in abilities) or "unknown"
+            if abilities is None:
+                joined = "unknown"
+            elif not isinstance(abilities, (list, tuple)):
+                logger.warning(
+                    "Model %s reports a non-sequence abilities value of type %s",
+                    model_id,
+                    type(abilities).__name__,
+                )
+                joined = "unknown"
+            else:
+                joined = ", ".join(str(ability) for ability in abilities) or "none"
             entries.append(f"{model_id} (abilities: {joined})")
         return "; ".join(entries) or "none configured"
 
     def _no_edit_model_error(self) -> str:
+        # The realistic trigger is generate_image(images=...) delegating here on a
+        # generate-only deployment, so never answer it with "use generate_image".
+        if self._get_model() is not None:
+            remedy = (
+                "Image editing is unavailable in this deployment: retry "
+                "generate_image without images and describe the change in the "
+                "prompt instead."
+            )
+        else:
+            remedy = (
+                "No configured model can edit or generate images: stop retrying "
+                "image tools and report that to the user."
+            )
         return (
             "No available image models with edit capabilities. "
-            f"Configured image models: {self._available_models_summary()}. "
-            "Image editing is unavailable in this deployment: render what you need "
-            "from a text prompt with generate_image instead of retrying edit_image."
+            f"Configured image models: {self._available_models_summary()}. {remedy}"
         )
 
     def _no_generate_model_error(self) -> str:
         return (
-            "No available image models configured. "
+            "No available image models with generate capabilities. "
             f"Configured image models: {self._available_models_summary()}. "
             "Retry without model_id to use the default, or pick a model listed above "
             "that has the generate ability."

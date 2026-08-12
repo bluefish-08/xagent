@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -226,6 +227,30 @@ def _create_tool_info(
     }
 
 
+def _withheld_edit_image_row(
+    tools: list[dict[str, Any]], image_models: Any
+) -> dict[str, Any] | None:
+    """Row explaining an edit_image that capability gating kept out of the toolset.
+
+    Without it the admin listing just drops the tool, losing the only prompt to
+    register an edit-capable model.
+    """
+    if not image_models:
+        return None
+    if any(item.get("name") == "edit_image" for item in tools):
+        return None
+    row = _create_tool_info(
+        SimpleNamespace(
+            name="edit_image",
+            description="Edit an existing image with a text prompt",
+        ),
+        "image",
+        image_models=image_models,
+    )
+    # Only ever surface the disabled explanation, never invent an available tool.
+    return row if row["status"] == "missing_capability" else None
+
+
 @tools_router.get("/available")
 async def get_available_tools(
     current_user: User = Depends(get_current_user),
@@ -356,6 +381,10 @@ async def get_available_tools(
                     music_models,
                 )
             )
+
+        withheld = _withheld_edit_image_row(tools, image_models)
+        if withheld is not None:
+            tools.append(withheld)
 
         from collections import defaultdict
 

@@ -238,7 +238,8 @@ class TestImageGenerationTool:
         result = await tool.generate_image("A test prompt")
 
         assert result["success"] is False
-        assert "No available image models configured" in result["error"]
+        assert "No available image models with generate capabilities" in result["error"]
+        assert "Configured image models:" in result["error"]
         assert result["image_path"] is None
 
     @pytest.mark.asyncio
@@ -467,8 +468,7 @@ class TestImageGenerationTool:
         """Test that no generate_image tool is offered when no model can generate"""
         image_tool = ImageGenerationTool({}, {}, workspace=mock_workspace)
 
-        assert image_tool.get_tools() == []
-        assert "No image models" in image_tool._model_info_text
+        assert "generate_image" not in {t.metadata.name for t in image_tool.get_tools()}
 
     def test_model_info_text_generation(self, mock_workspace):
         """Test that model info text is generated correctly"""
@@ -702,8 +702,8 @@ class TestCreateImageTool:
         """Test create_image_tool function with empty models"""
         tools = create_image_tool({}, workspace=mock_workspace)
 
-        # Nothing can generate or edit, so no image tool is offered at all.
-        assert tools == []
+        # Nothing can generate or edit, so only the read-only listing remains.
+        assert {t.metadata.name for t in tools} == {"list_image_models"}
 
     def test_create_image_tool_with_descriptions(
         self, mock_image_models, model_descriptions, mock_workspace
@@ -813,11 +813,11 @@ class TestImageToolCapabilityGating:
         tools = ImageGenerationTool(
             mock_image_models, workspace=mock_workspace
         ).get_tools()
-        names = {tool.name for tool in tools}
+        names = {tool.metadata.name for tool in tools}
 
         assert "edit_image" not in names
         assert "generate_image" in names
-        generate = next(tool for tool in tools if tool.name == "generate_image")
+        generate = next(t for t in tools if t.metadata.name == "generate_image")
         assert "IMAGE EDITING IS UNAVAILABLE" in generate.description
 
     def test_edit_image_offered_when_a_model_can_edit(
@@ -828,10 +828,10 @@ class TestImageToolCapabilityGating:
         tools = ImageGenerationTool(
             mock_image_models, workspace=mock_workspace
         ).get_tools()
-        names = {tool.name for tool in tools}
+        names = {tool.metadata.name for tool in tools}
 
         assert "edit_image" in names
-        generate = next(tool for tool in tools if tool.name == "generate_image")
+        generate = next(t for t in tools if t.metadata.name == "generate_image")
         assert "IMAGE EDITING IS UNAVAILABLE" not in generate.description
 
     @pytest.mark.asyncio
@@ -845,7 +845,7 @@ class TestImageToolCapabilityGating:
 
         assert result["success"] is False
         assert "model1 (abilities: generate)" in result["error"]
-        assert "generate_image" in result["error"]
+        assert "retry generate_image without images" in result["error"]
 
     def test_default_edit_model_that_denies_edit_is_not_trusted(
         self, mock_image_models, mock_workspace
@@ -857,8 +857,8 @@ class TestImageToolCapabilityGating:
             default_edit_model=mock_image_models["model1"],
         )
 
-        assert tool.has_edit_capable_model() is False
-        assert "edit_image" not in {t.name for t in tool.get_tools()}
+        assert tool._get_edit_model() is None
+        assert "edit_image" not in {t.metadata.name for t in tool.get_tools()}
 
     def test_generate_image_withheld_when_only_editing_is_available(
         self, mock_image_models, mock_workspace
@@ -868,7 +868,7 @@ class TestImageToolCapabilityGating:
         tools = ImageGenerationTool(
             mock_image_models, workspace=mock_workspace
         ).get_tools()
-        names = {tool.name for tool in tools}
+        names = {tool.metadata.name for tool in tools}
 
         assert "generate_image" not in names
         assert "edit_image" in names
@@ -882,7 +882,51 @@ class TestImageToolCapabilityGating:
             mock_image_models, workspace=mock_workspace
         ).get_tools()
 
-        assert tools == []
+        # list_image_models is read-only and cannot fail, so it stays as the
+        # only way to answer "why is there nothing here".
+        assert {t.metadata.name for t in tools} == {"list_image_models"}
+
+    def test_default_generate_model_that_denies_generate_is_not_trusted(
+        self, mock_image_models, mock_workspace
+    ):
+        self._set_abilities(mock_image_models, ["edit"])
+        tool = ImageGenerationTool(
+            mock_image_models,
+            workspace=mock_workspace,
+            default_generate_model=mock_image_models["model1"],
+        )
+
+        assert tool._get_model() is None
+        assert "generate_image" not in {t.metadata.name for t in tool.get_tools()}
+
+    @pytest.mark.asyncio
+    async def test_delegated_edit_does_not_recommend_the_tool_that_was_called(
+        self, mock_image_models, mock_workspace
+    ):
+        # generate_image(images=...) delegates into the edit path, so answering it
+        # with "use generate_image" would send the model back where it started.
+        self._set_abilities(mock_image_models, ["generate"])
+        tool = ImageGenerationTool(mock_image_models, workspace=mock_workspace)
+
+        result = await tool.generate_image("add a headline", images="file:abc123")
+
+        assert result["success"] is False
+        assert "retry generate_image without images" in result["error"]
+        assert "instead of retrying edit_image" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_edit_error_stops_retrying_when_nothing_can_generate_either(
+        self, mock_image_models, mock_workspace
+    ):
+        self._set_abilities(mock_image_models, [])
+        tool = ImageGenerationTool(mock_image_models, workspace=mock_workspace)
+
+        result = await tool.edit_image(prompt="add a headline", image_url="file:abc")
+
+        assert result["success"] is False
+        assert "stop retrying image tools" in result["error"]
+        assert "retry generate_image" not in result["error"]
+        assert "model1 (abilities: none)" in result["error"]
 
     @pytest.mark.asyncio
     async def test_generate_error_lists_abilities(

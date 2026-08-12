@@ -69,10 +69,10 @@ class ImageGenerationTool(ImageGenerationToolCore):
         """Get all tool instances."""
         # A note inside the description is not enough: models blind-retry a
         # registered-but-doomed tool, so an unusable one has to leave the schema.
-        can_generate = self.has_generate_capable_model()
-        can_edit = self.has_edit_capable_model()
-        if not can_generate and not can_edit:
-            return []
+        # list_image_models stays either way — it is read-only, cannot fail, and
+        # is the only way to answer "why is there nothing here".
+        can_generate = self._get_model() is not None
+        can_edit = self._get_edit_model() is not None
 
         tools = []
 
@@ -110,7 +110,7 @@ class ImageGenerationTool(ImageGenerationToolCore):
             ImageGenerationFunctionTool(
                 self.list_available_models,
                 name="list_image_models",
-                description="List all available image generation models, including model ID, availability status, and detailed description information (Note: model information is already provided in the generate_image tool description)",
+                description="List all available image generation models, including model ID, availability status, and detailed description information",
             )
         )
 
