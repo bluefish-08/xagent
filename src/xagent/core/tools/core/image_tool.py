@@ -324,7 +324,9 @@ Images are automatically saved to workspace.
                 return None
 
         # Use configured default generate model
-        if self._default_generate_model:
+        if self._default_generate_model and not self._denies_ability(
+            self._default_generate_model, "generate"
+        ):
             return self._default_generate_model
 
         # Fallback: return first available model with generate capability
@@ -346,8 +348,11 @@ Images are automatically saved to workspace.
                 logger.warning(f"Model {model_id} does not support editing")
                 return None
 
-        # Use configured default edit model
-        if self._default_edit_model:
+        # A default configured by hand is trusted unless the model itself denies
+        # the ability; otherwise it reaches the provider and raises there instead.
+        if self._default_edit_model and not self._denies_ability(
+            self._default_edit_model, "edit"
+        ):
             return self._default_edit_model
 
         # Fallback: return first available model with edit capability
@@ -356,6 +361,46 @@ Images are automatically saved to workspace.
                 return model
 
         return None
+
+    @staticmethod
+    def _denies_ability(model: Any, ability: str) -> bool:
+        """True only when the model explicitly reports it lacks ``ability``."""
+        has_ability = getattr(model, "has_ability", None)
+        return callable(has_ability) and not has_ability(ability)
+
+    def has_generate_capable_model(self) -> bool:
+        """Whether any configured model can generate. Gates generate_image."""
+        return self._get_model() is not None
+
+    def has_edit_capable_model(self) -> bool:
+        """Whether any configured model can edit. Gates edit_image registration."""
+        return self._get_edit_model() is not None
+
+    def _available_models_summary(self) -> str:
+        entries = []
+        for model_id, model in self._image_models.items():
+            abilities = getattr(model, "abilities", None)
+            if not isinstance(abilities, (list, tuple)):
+                abilities = []
+            joined = ", ".join(str(ability) for ability in abilities) or "unknown"
+            entries.append(f"{model_id} (abilities: {joined})")
+        return "; ".join(entries) or "none configured"
+
+    def _no_edit_model_error(self) -> str:
+        return (
+            "No available image models with edit capabilities. "
+            f"Configured image models: {self._available_models_summary()}. "
+            "Image editing is unavailable in this deployment: render what you need "
+            "from a text prompt with generate_image instead of retrying edit_image."
+        )
+
+    def _no_generate_model_error(self) -> str:
+        return (
+            "No available image models configured. "
+            f"Configured image models: {self._available_models_summary()}. "
+            "Retry without model_id to use the default, or pick a model listed above "
+            "that has the generate ability."
+        )
 
     def _resolve_image_path(self, image_input: str) -> str:
         """
@@ -570,7 +615,7 @@ Images are automatically saved to workspace.
             if not image_model:
                 return {
                     "success": False,
-                    "error": "No available image models configured",
+                    "error": self._no_generate_model_error(),
                     "image_path": None,
                 }
 
@@ -695,7 +740,7 @@ Images are automatically saved to workspace.
             if not image_model:
                 return {
                     "success": False,
-                    "error": "No available image models with edit capabilities",
+                    "error": self._no_edit_model_error(),
                     "image_path": None,
                 }
 

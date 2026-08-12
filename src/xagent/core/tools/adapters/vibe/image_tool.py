@@ -67,31 +67,52 @@ class ImageGenerationTool(ImageGenerationToolCore):
 
     def get_tools(self) -> list:
         """Get all tool instances."""
-        # Format descriptions with model information
-        generate_description = self.GENERATE_IMAGE_DESCRIPTION.format(
-            self._model_info_text
-        )
-        edit_description = self.EDIT_IMAGE_DESCRIPTION.format(
-            self._edit_model_info_text
-        )
+        # A note inside the description is not enough: models blind-retry a
+        # registered-but-doomed tool, so an unusable one has to leave the schema.
+        can_generate = self.has_generate_capable_model()
+        can_edit = self.has_edit_capable_model()
+        if not can_generate and not can_edit:
+            return []
 
-        tools = [
-            ImageGenerationFunctionTool(
-                self.generate_image,
-                name="generate_image",
-                description=generate_description,
-            ),
-            ImageGenerationFunctionTool(
-                self.edit_image,
-                name="edit_image",
-                description=edit_description,
-            ),
+        tools = []
+
+        if can_generate:
+            generate_description = self.GENERATE_IMAGE_DESCRIPTION.format(
+                self._model_info_text
+            )
+            if not can_edit:
+                generate_description = (
+                    "IMAGE EDITING IS UNAVAILABLE here: no configured image model "
+                    "has the edit ability, so edit_image is not offered and passing "
+                    "images fails. Render each deliverable from a text prompt in "
+                    "one call.\n\n" + generate_description
+                )
+            tools.append(
+                ImageGenerationFunctionTool(
+                    self.generate_image,
+                    name="generate_image",
+                    description=generate_description,
+                )
+            )
+
+        if can_edit:
+            tools.append(
+                ImageGenerationFunctionTool(
+                    self.edit_image,
+                    name="edit_image",
+                    description=self.EDIT_IMAGE_DESCRIPTION.format(
+                        self._edit_model_info_text
+                    ),
+                )
+            )
+
+        tools.append(
             ImageGenerationFunctionTool(
                 self.list_available_models,
                 name="list_image_models",
                 description="List all available image generation models, including model ID, availability status, and detailed description information (Note: model information is already provided in the generate_image tool description)",
-            ),
-        ]
+            )
+        )
 
         return tools
 
