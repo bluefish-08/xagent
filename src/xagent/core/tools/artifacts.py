@@ -41,13 +41,19 @@ SAFE_FILE_REF_KEYS = {
     "relative_path",
     "size",
 }
+# Every media tool returns its artifact as <kind>_path alongside file_id/file_ref.
+# Missing keys were redacted only by coincidence: file_ref.file_path registers the
+# same string, which stops holding when building the FileRef fails.
 LOCAL_PATH_KEYS = {
     "absolute_path",
+    "audio_path",
     "file_path",
     "image_path",
     "local_path",
     "output_dir",
     "output_path",
+    "transcription_path",
+    "video_path",
 }
 # Dropped from the model-facing observation only, never from the tool result, and
 # only at the top level. Keep out anything the model still acts on: last_frame_url

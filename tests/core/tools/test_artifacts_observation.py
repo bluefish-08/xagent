@@ -261,6 +261,28 @@ def test_format_tool_result_for_observation_redacts_the_download_failure_shape()
     assert "https://provider.example/signed/clip.mp4?token=secret" in observation
 
 
+def test_media_paths_are_redacted_without_a_file_ref_to_register_them():
+    # build_workspace_file_ref failing leaves file_ref None, so nothing else
+    # carries the path — the media *_path keys have to stand on their own.
+    for key, filename in (
+        ("video_path", "clip.mp4"),
+        ("audio_path", "voice.mp3"),
+        ("transcription_path", "transcript.json"),
+    ):
+        observation = format_tool_result_for_observation(
+            "media_tool",
+            {
+                "success": True,
+                key: f"/Users/someone/.xagent/workspaces/w1/output/{filename}",
+                "file_id": "media-file-id",
+                "file_ref": None,
+            },
+        )
+
+        assert "/Users/someone" not in observation, key
+        assert key not in observation, key
+
+
 def test_observation_metadata_drops_exactly_the_excluded_keys():
     from xagent.core.tools.artifacts import (
         _OBSERVATION_EXCLUDED_KEYS,
