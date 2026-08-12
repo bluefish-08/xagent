@@ -5716,3 +5716,52 @@ async def test_react_discards_the_preamble_with_the_rejected_response() -> None:
         "Let me look into that." not in str(event.get("content") or event.get("delta"))
         for event in outbound.events
     )
+
+
+@pytest.mark.asyncio
+async def test_run_flags_missing_image_editing_for_the_skill_correction() -> None:
+    # Covers the wiring: the helper's own test passes even if the call inside
+    # the tool-calling loop is deleted.
+    from xagent.core.agent.context.execution import (
+        IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
+    )
+
+    from .concurrency_harness import FakeTool as NamedFakeTool
+
+    llm = FakeLLM(responses=[{"content": "done", "done": True}])
+    pattern = ReActPattern(max_iterations=2)
+    context = ExecutionContext(system_prompt="You are helpful.")
+    context.add_user_message("make an ad")
+
+    await pattern.run(context=context, tools=[NamedFakeTool("generate_image")], llm=llm)
+
+    assert context.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] is True
+
+
+@pytest.mark.parametrize(
+    ("tool_names", "unavailable"),
+    [
+        (["generate_image", "list_image_models"], True),
+        (["generate_image", "edit_image"], False),
+        (["web_search"], False),
+    ],
+)
+def test_records_whether_image_editing_is_available(
+    tool_names: list[str], unavailable: bool
+) -> None:
+    from xagent.core.agent.context.execution import (
+        IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
+        ExecutionContext,
+    )
+
+    from .concurrency_harness import FakeTool, make_react
+
+    pattern = make_react()
+    pattern._tool_decision_groups_by_name = pattern._tool_decision_groups_for_tools(
+        [FakeTool(name) for name in tool_names]
+    )
+    context = ExecutionContext(system_prompt="Base prompt.")
+
+    pattern._record_image_edit_availability(context)
+
+    assert context.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] is unavailable

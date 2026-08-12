@@ -53,6 +53,7 @@ from ...context.enrichment import (
     enrich_context_with_memory,
     latest_user_text,
 )
+from ...context.execution import IMAGE_EDIT_UNAVAILABLE_METADATA_KEY
 from ...context.memory_tool import build_memory_tools
 from ...context.skill_tool import build_load_skill_tool
 from ...grounding import grounding_rule
@@ -389,6 +390,7 @@ class ReActPattern(AgentPattern):
     ) -> dict[str, Any]:
         self.status = "thinking"
         self._tool_decision_groups_by_name = self._tool_decision_groups_for_tools(tools)
+        self._record_image_edit_availability(context)
         base_tool_schemas = (
             []
             if self.tool_choice == "none"
@@ -1118,6 +1120,20 @@ class ReActPattern(AgentPattern):
             if isinstance(function, dict) and function.get("name"):
                 names.append(str(function["name"]))
         return names
+
+    def _record_image_edit_availability(self, context: Any) -> None:
+        """Flag a deployment that can generate images but not edit them.
+
+        Injected skill text names edit_image unconditionally; the system context
+        needs this to contradict it.
+        """
+        metadata = getattr(context, "metadata", None)
+        if metadata is None:
+            return
+        names = self._tool_decision_groups_by_name
+        metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = (
+            "generate_image" in names and "edit_image" not in names
+        )
 
     def _tool_decision_groups_for_tools(self, tools: list[Any]) -> dict[str, str]:
         groups: dict[str, str] = {}
