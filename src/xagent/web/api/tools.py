@@ -235,6 +235,11 @@ def _withheld_edit_image_row(
     Without it the admin listing just drops the tool, losing the only prompt to
     register an edit-capable model.
     """
+    # Not dead code despite the status check below also rejecting this case: with
+    # no image model there is nothing to explain, and the route asserts it does no
+    # extra work here.
+    if not image_models:
+        return None
     if any(item.get("name") == "edit_image" for item in tools):
         return None
     row = _create_tool_info(
