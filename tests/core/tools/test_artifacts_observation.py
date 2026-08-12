@@ -180,6 +180,7 @@ def test_format_tool_result_for_observation_drops_redundant_image_metadata():
                 "filename": "creative.png",
                 "relative_path": "creative.png",
             },
+            "generated_files": ["creative.png"],
             "usage": {"prompt_tokens": 12, "total_tokens": 34},
             "task_metric": {"latency_ms": 8123},
             "request_id": "req-abc123",
@@ -191,9 +192,15 @@ def test_format_tool_result_for_observation_drops_redundant_image_metadata():
     assert "![creative.png](file:image-file-id)" in observation
     assert "gemini-2.5-flash-image" in observation
     assert "relative_path" in observation
-    for dropped in ("prompt_tokens", "latency_ms", "req-abc123", "saved_to_workspace"):
+    for dropped in (
+        "'artifacts'",
+        "generated_files",
+        "prompt_tokens",
+        "latency_ms",
+        "req-abc123",
+        "saved_to_workspace",
+    ):
         assert dropped not in observation
-    assert "inline" not in observation
 
 
 def test_format_tool_result_for_observation_drops_raw_video_provider_payload():
@@ -202,7 +209,7 @@ def test_format_tool_result_for_observation_drops_raw_video_provider_payload():
         {
             "success": True,
             "video_url": "https://provider.example/signed/clip.mp4?token=secret",
-            "last_frame_url": "https://provider.example/signed/frame.png?token=secret",
+            "last_frame_url": "https://frames.example/last-frame.png",
             "video_path": "/tmp/xagent/output/clip.mp4",
             "file_id": "video-file-id",
             "artifacts": [
@@ -224,6 +231,8 @@ def test_format_tool_result_for_observation_drops_raw_video_provider_payload():
     assert "1080p" in observation
     assert "xxxx" not in observation
     assert "provider.example" not in observation
+    # last_frame_url is an input to the next generate_video call, not telemetry.
+    assert "https://frames.example/last-frame.png" in observation
 
 
 def test_snapshot_generated_artifact_files_skips_files_deleted_before_stat(

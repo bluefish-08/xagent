@@ -49,14 +49,12 @@ LOCAL_PATH_KEYS = {
     "output_dir",
     "output_path",
 }
-# Dropped from the model-facing observation only, never from the tool result.
-# The artifact lines already carry file identity; the rest is telemetry, raw
-# provider payloads, or transient URLs the model must not reference.
+# Dropped from the model-facing observation only, never from the tool result, and
+# only at the top level. Keep out anything the model still acts on: last_frame_url
+# is an input to the next generate_video call and has no artifact of its own.
 OBSERVATION_REDUNDANT_KEYS = {
     "artifacts",
     "generated_files",
-    "image_url",
-    "last_frame_url",
     "raw_response",
     "request_id",
     "saved_to_workspace",
@@ -144,9 +142,7 @@ def format_tool_result_for_observation(tool_name: str, result: Any) -> str:
     )
 
 
-def _observation_metadata(sanitized: Any) -> Any:
-    if not isinstance(sanitized, dict):
-        return sanitized
+def _observation_metadata(sanitized: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in sanitized.items()
