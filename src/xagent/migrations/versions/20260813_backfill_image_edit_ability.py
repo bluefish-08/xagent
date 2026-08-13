@@ -22,6 +22,12 @@ depends_on: Union[str, Sequence[str], None] = None
 # writes down what the runtime would have concluded from the model name anyway.
 EDIT_CAPABLE_NAME_MARKERS = ("edit", "3-pro", "gpt-image")
 
+# sa.JSON, not json.dumps: a text parameter into Postgres' json column raises
+# "expression is of type text". SQLite hides this -- its JSON is text.
+UPDATE_ABILITIES = sa.text(
+    "UPDATE models SET abilities = :abilities WHERE id = :id"
+).bindparams(sa.bindparam("abilities", type_=sa.JSON))
+
 
 def _declares_edit(model_name: str) -> bool:
     lowered = (model_name or "").lower()
@@ -47,8 +53,7 @@ def upgrade() -> None:
         if "edit" in abilities or not _declares_edit(row.model_name):
             continue
         conn.execute(
-            sa.text("UPDATE models SET abilities = :abilities WHERE id = :id"),
-            {"abilities": json.dumps(abilities + ["edit"]), "id": row.id},
+            UPDATE_ABILITIES, {"abilities": abilities + ["edit"], "id": row.id}
         )
 
 

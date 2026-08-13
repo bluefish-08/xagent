@@ -105,3 +105,22 @@ def test_upgrade_skips_a_database_without_the_models_table(tmp_path: Path) -> No
     config.set_main_option("sqlalchemy.url", db_url)
     config.set_main_option("script_location", "src/xagent/migrations")
     command.upgrade(config, REVISION)
+
+
+def test_update_casts_the_json_parameter() -> None:
+    """Postgres rejects a text parameter into a json column; SQLite accepts it.
+
+    Every other test here runs on SQLite, so nothing else fails if the cast goes.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    from sqlalchemy.dialects.postgresql import psycopg2  # noqa: PLC0415
+
+    path = Path("src/xagent/migrations/versions") / f"{REVISION}.py"
+    spec = importlib.util.spec_from_file_location(REVISION, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    compiled = str(module.UPDATE_ABILITIES.compile(dialect=psycopg2.dialect()))
+    assert "::JSON" in compiled
