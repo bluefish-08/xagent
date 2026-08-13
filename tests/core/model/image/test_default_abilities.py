@@ -13,6 +13,8 @@ BOTH = ["generate", "edit"]
     [
         ("dashscope", "qwen-image-edit", BOTH),
         ("dashscope", "wanx-v1", GENERATE),
+        # "3-pro" is Gemini vocabulary; it must not answer for dashscope.
+        ("dashscope", "wanx-3-pro", GENERATE),
         ("gemini", "gemini-3-pro-image-preview", BOTH),
         ("gemini", "gemini-2.5-flash-image", GENERATE),
         ("  DashScope  ", "qwen-image-edit", BOTH),

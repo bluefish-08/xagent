@@ -43,7 +43,9 @@ def test_adapter_never_overrides_a_declared_list() -> None:
     assert model.abilities == ["generate"]
 
 
-def _service_abilities(provider: str, model_name: str) -> list[str]:
+def _service_abilities(
+    mocker: Any, provider: str, model_name: str, abilities: Any = None
+) -> list[str]:
     from xagent.web.services import model_service
 
     db_model = SimpleNamespace(
@@ -55,52 +57,64 @@ def _service_abilities(provider: str, model_name: str) -> list[str]:
         model_name=model_name,
         api_key="test-key",
         base_url="https://example.invalid",
-        abilities=None,
+        abilities=abilities,
         description=None,
     )
+    session = mocker.Mock()
+    session.query.return_value.filter.return_value.all.return_value = [db_model]
 
-    class _Query:
-        def filter(self, *_args: Any) -> "_Query":
-            return self
-
-        def all(self) -> list[Any]:
-            return [db_model]
-
-    class _Session:
-        def query(self, *_args: Any) -> _Query:
-            return _Query()
-
-    models = model_service.get_image_models(_Session())
+    models = model_service.get_image_models(session)
     return [m.abilities for m in models.values()][0]
 
 
 @pytest.mark.parametrize(
-    ("model_name", "expected"),
-    [("qwen-image-edit", ["generate", "edit"]), ("wanx-v1", ["generate"])],
+    ("provider", "model_name", "expected"),
+    [
+        ("dashscope", "qwen-image-edit", ["generate", "edit"]),
+        ("dashscope", "wanx-v1", ["generate"]),
+        # The gemini branch is a separate call site; without a case here reverting
+        # it to a literal leaves this suite green.
+        ("gemini", "gemini-3-pro-image-preview", ["generate", "edit"]),
+        ("gemini", "gemini-2.5-flash-image", ["generate"]),
+    ],
 )
 def test_model_service_infers_abilities_for_a_null_row(
-    model_name: str, expected: list[str]
+    mocker: Any, provider: str, model_name: str, expected: list[str]
 ) -> None:
-    assert _service_abilities("dashscope", model_name) == expected
+    assert _service_abilities(mocker, provider, model_name) == expected
+
+
+def test_model_service_never_overrides_a_declared_list(mocker: Any) -> None:
+    assert _service_abilities(
+        mocker, "dashscope", "qwen-image-edit", abilities=["generate"]
+    ) == ["generate"]
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_name"),
+    ("provider", "model_name", "expected"),
     [
-        ("openai", "gpt-image-1"),
-        ("xinference", "sd-3.5"),
-        ("dashscope", "qwen-image-edit"),
-        ("dashscope", "wanx-v1"),
+        ("openai", "gpt-image-1", ["generate", "edit"]),
+        ("xinference", "sd-3.5", ["generate", "edit"]),
+        ("gemini", "gemini-3-pro-image-preview", ["generate", "edit"]),
+        ("dashscope", "qwen-image-edit", ["generate", "edit"]),
+        ("dashscope", "wanx-v1", ["generate"]),
     ],
 )
-def test_both_paths_agree_on_a_null_row(provider: str, model_name: str) -> None:
-    """A row disagreeing across the two paths is the bug this helper exists to stop.
+def test_both_paths_agree_on_a_null_row(
+    mocker: Any, provider: str, model_name: str, expected: list[str]
+) -> None:
+    """A row the two paths read differently is the bug this helper exists to stop.
 
-    An openai row read one way as generate-only and the other way as editable makes
-    get_default_image_edit_model hand back a model _get_edit_model then rejects,
-    silently swapping in a different one.
+    Such a row, picked as the default edit model, is built generate-only by one
+    path and editable by the other, so _get_edit_model rejects the operator's
+    choice and silently serves a different model.
+
+    Both sides are pinned to `expected` rather than only compared to each other,
+    so a symmetric regression cannot pass.
     """
     adapter_model = get_image_model_instance(
         _db_model(model_provider=provider, model_name=model_name)
     )
-    assert adapter_model.abilities == _service_abilities(provider, model_name)
+    service_abilities = _service_abilities(mocker, provider, model_name)
+    assert adapter_model.abilities == expected
+    assert service_abilities == expected
