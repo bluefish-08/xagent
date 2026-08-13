@@ -16,6 +16,7 @@ BOTH = ["generate", "edit"]
         ("gemini", "gemini-3-pro-image-preview", GENERATE, BOTH),
         ("gemini", "gemini-2.5-flash-image", GENERATE, GENERATE),
         ("  DashScope  ", "qwen-image-edit", GENERATE, BOTH),
+        ("dashscope", "QWEN-IMAGE-EDIT", GENERATE, BOTH),
         # Providers outside the name-inferred set keep their call site's default,
         # including one whose name would otherwise match.
         ("openai", "gpt-image-1", BOTH, BOTH),

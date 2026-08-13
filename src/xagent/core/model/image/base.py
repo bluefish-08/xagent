@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import Any, List
 
-# The markers gemini.py:174-178 infers from. Its inference never runs in the web
-# layer -- every call site passes an explicit abilities list -- so the same rule
-# is applied here, where the operator has configured nothing at all.
+# Consumed by GeminiImageModel's own name detection too, so the rule has one home.
 EDIT_CAPABLE_NAME_MARKERS = ("edit", "3-pro")
 
 # Only dashscope and gemini ship both edit-capable and generate-only image models
-# under one provider, so only they need the name looked at. Every other provider
-# keeps whatever its call site already defaulted to.
+# under one provider, so only they need the name looked at. Add a provider here to
+# infer its abilities from model names; every other provider keeps whatever its
+# call site already defaulted to.
 _NAME_INFERRED_PROVIDERS = ("dashscope", "gemini")
 
 
@@ -17,9 +16,9 @@ def default_image_abilities(
 ) -> List[str]:
     """Abilities for an image model whose row declares none.
 
-    Only for the unconfigured case: a declared abilities list is authoritative and
-    must never reach this function, or an operator's deliberate generate-only
-    choice gets overridden.
+    Only for the unconfigured case: a declared non-empty abilities list is
+    authoritative and short-circuits before this function, or an operator's
+    deliberate generate-only choice gets overridden.
     """
     if provider.strip().lower() not in _NAME_INFERRED_PROVIDERS:
         return fallback

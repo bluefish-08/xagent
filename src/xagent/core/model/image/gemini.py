@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ...utils.security import redact_sensitive_text, redact_url_credentials_for_logging
-from .base import BaseImageModel
+from .base import EDIT_CAPABLE_NAME_MARKERS, BaseImageModel
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class GeminiImageModel(BaseImageModel):
         else:
             # Auto-detect abilities based on model name
             model_lower = model_name.lower()
-            if "3-pro" in model_lower or "edit" in model_lower:
+            if any(marker in model_lower for marker in EDIT_CAPABLE_NAME_MARKERS):
                 self._abilities = ["generate", "edit"]
             else:
                 self._abilities = ["generate"]
