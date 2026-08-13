@@ -310,6 +310,10 @@ video directly so motion, timing, and audio-capable model inputs are preserved.
 Other vision models use chronologically sampled, timestamped frames.
 
 Never pass a video to detect_objects or encode it as image_url; use this tool.
+
+This tool accepts images and videos only; it is not a way to find out what a
+file is. To identify an unfamiliar file, read its mime_type from get_file_info,
+and read text or code with read_file.
                 """.strip(),
             ),
             VisionFunctionTool(
