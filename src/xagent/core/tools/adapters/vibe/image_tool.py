@@ -78,7 +78,8 @@ class ImageGenerationTool(ImageGenerationToolCore):
 
         # Withholding a tool is silent otherwise: the operator sees "editing
         # stopped working" with nothing in the log pointing at the abilities.
-        if not can_edit or not can_generate:
+        # isEnabledFor guards the summary, which walks every model eagerly.
+        if (not can_edit or not can_generate) and logger.isEnabledFor(logging.INFO):
             logger.info(
                 "Image tools withheld (generate=%s, edit=%s) from models: %s",
                 can_generate,

@@ -32,7 +32,7 @@ def get_image_model_instance(db_model: Any) -> BaseImageModel:
     abilities = (
         list(db_model.abilities)
         if db_model.abilities
-        else default_image_abilities(provider, model_name, ["generate"])
+        else default_image_abilities(provider, model_name)
     )
     timeout = getattr(db_model, "timeout", 300.0) or 300.0
     max_retries = getattr(db_model, "max_retries", 3) or 3

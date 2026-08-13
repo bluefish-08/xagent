@@ -9,23 +9,24 @@ BOTH = ["generate", "edit"]
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_name", "fallback", "expected"),
+    ("provider", "model_name", "expected"),
     [
-        ("dashscope", "qwen-image-edit", GENERATE, BOTH),
-        ("dashscope", "wanx-v1", GENERATE, GENERATE),
-        ("gemini", "gemini-3-pro-image-preview", GENERATE, BOTH),
-        ("gemini", "gemini-2.5-flash-image", GENERATE, GENERATE),
-        ("  DashScope  ", "qwen-image-edit", GENERATE, BOTH),
-        ("dashscope", "QWEN-IMAGE-EDIT", GENERATE, BOTH),
-        # Providers outside the name-inferred set keep their call site's default,
-        # including one whose name would otherwise match.
-        ("openai", "gpt-image-1", BOTH, BOTH),
-        ("xinference", "my-image-edit", BOTH, BOTH),
-        ("xinference", "my-image-edit", GENERATE, GENERATE),
-        ("unknown-provider", "something-edit", GENERATE, GENERATE),
+        ("dashscope", "qwen-image-edit", BOTH),
+        ("dashscope", "wanx-v1", GENERATE),
+        ("gemini", "gemini-3-pro-image-preview", BOTH),
+        ("gemini", "gemini-2.5-flash-image", GENERATE),
+        ("  DashScope  ", "qwen-image-edit", BOTH),
+        ("dashscope", "QWEN-IMAGE-EDIT", BOTH),
+        # Whole-lineup providers answer the same for any name, so one path cannot
+        # hand back a generate-only instance for a row the other calls editable.
+        ("openai", "gpt-image-1", BOTH),
+        ("openai", "some-unknown-name", BOTH),
+        ("xinference", "my-image-edit", BOTH),
+        ("xinference", "sd-3.5", BOTH),
+        ("unknown-provider", "something-edit", GENERATE),
     ],
 )
 def test_default_image_abilities(
-    provider: str, model_name: str, fallback: list[str], expected: list[str]
+    provider: str, model_name: str, expected: list[str]
 ) -> None:
-    assert default_image_abilities(provider, model_name, fallback) == expected
+    assert default_image_abilities(provider, model_name) == expected

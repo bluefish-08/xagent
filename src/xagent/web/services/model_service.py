@@ -567,7 +567,7 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         abilities=list(
                             db_model.abilities
                             or default_image_abilities(
-                                model_provider, str(db_model.model_name), ["generate"]
+                                model_provider, str(db_model.model_name)
                             )
                         ),
                     )
@@ -580,7 +580,7 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         abilities=list(
                             db_model.abilities
                             or default_image_abilities(
-                                model_provider, str(db_model.model_name), ["generate"]
+                                model_provider, str(db_model.model_name)
                             )
                         ),
                     )
@@ -590,7 +590,12 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate", "edit"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider, str(db_model.model_name)
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
                 elif model_provider == "xinference":
@@ -598,7 +603,12 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate", "edit"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider, str(db_model.model_name)
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
             except Exception as e:

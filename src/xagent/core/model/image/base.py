@@ -4,28 +4,31 @@ from typing import Any, List
 # Consumed by GeminiImageModel's own name detection too, so the rule has one home.
 EDIT_CAPABLE_NAME_MARKERS = ("edit", "3-pro")
 
-# Only dashscope and gemini ship both edit-capable and generate-only image models
-# under one provider, so only they need the name looked at. Add a provider here to
-# infer its abilities from model names; every other provider keeps whatever its
-# call site already defaulted to.
+# Providers whose whole image lineup edits. Add one here when that is true of it.
+_EDIT_CAPABLE_PROVIDERS = ("openai", "xinference")
+
+# Providers shipping both edit-capable and generate-only models under one name, so
+# the model name decides. Add a provider here to infer its abilities from names.
 _NAME_INFERRED_PROVIDERS = ("dashscope", "gemini")
 
 
-def default_image_abilities(
-    provider: str, model_name: str, fallback: List[str]
-) -> List[str]:
+def default_image_abilities(provider: str, model_name: str) -> List[str]:
     """Abilities for an image model whose row declares none.
 
-    Only for the unconfigured case: a declared non-empty abilities list is
+    The single answer for an unconfigured row, so that the two paths building a
+    model from one -- get_image_model_instance and model_service.get_image_models
+    -- cannot disagree about what it can do. A declared non-empty abilities list is
     authoritative and short-circuits before this function, or an operator's
     deliberate generate-only choice gets overridden.
     """
-    if provider.strip().lower() not in _NAME_INFERRED_PROVIDERS:
-        return fallback
-    lowered = model_name.lower()
-    if any(marker in lowered for marker in EDIT_CAPABLE_NAME_MARKERS):
+    normalized = provider.strip().lower()
+    if normalized in _EDIT_CAPABLE_PROVIDERS:
         return ["generate", "edit"]
-    return fallback
+    if normalized in _NAME_INFERRED_PROVIDERS:
+        lowered = model_name.lower()
+        if any(marker in lowered for marker in EDIT_CAPABLE_NAME_MARKERS):
+            return ["generate", "edit"]
+    return ["generate"]
 
 
 class BaseImageModel(ABC):

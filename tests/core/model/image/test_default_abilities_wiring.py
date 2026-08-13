@@ -43,13 +43,7 @@ def test_adapter_never_overrides_a_declared_list() -> None:
     assert model.abilities == ["generate"]
 
 
-@pytest.mark.parametrize(
-    ("model_name", "expected"),
-    [("qwen-image-edit", ["generate", "edit"]), ("wanx-v1", ["generate"])],
-)
-def test_model_service_infers_abilities_for_a_null_row(
-    model_name: str, expected: list[str]
-) -> None:
+def _service_abilities(provider: str, model_name: str) -> list[str]:
     from xagent.web.services import model_service
 
     db_model = SimpleNamespace(
@@ -57,7 +51,7 @@ def test_model_service_infers_abilities_for_a_null_row(
         model_id="img-1",
         category="image",
         is_active=True,
-        model_provider="dashscope",
+        model_provider=provider,
         model_name=model_name,
         api_key="test-key",
         base_url="https://example.invalid",
@@ -77,4 +71,36 @@ def test_model_service_infers_abilities_for_a_null_row(
             return _Query()
 
     models = model_service.get_image_models(_Session())
-    assert [m.abilities for m in models.values()] == [expected]
+    return [m.abilities for m in models.values()][0]
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [("qwen-image-edit", ["generate", "edit"]), ("wanx-v1", ["generate"])],
+)
+def test_model_service_infers_abilities_for_a_null_row(
+    model_name: str, expected: list[str]
+) -> None:
+    assert _service_abilities("dashscope", model_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_name"),
+    [
+        ("openai", "gpt-image-1"),
+        ("xinference", "sd-3.5"),
+        ("dashscope", "qwen-image-edit"),
+        ("dashscope", "wanx-v1"),
+    ],
+)
+def test_both_paths_agree_on_a_null_row(provider: str, model_name: str) -> None:
+    """A row disagreeing across the two paths is the bug this helper exists to stop.
+
+    An openai row read one way as generate-only and the other way as editable makes
+    get_default_image_edit_model hand back a model _get_edit_model then rejects,
+    silently swapping in a different one.
+    """
+    adapter_model = get_image_model_instance(
+        _db_model(model_provider=provider, model_name=model_name)
+    )
+    assert adapter_model.abilities == _service_abilities(provider, model_name)
