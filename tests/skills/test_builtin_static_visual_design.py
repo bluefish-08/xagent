@@ -54,6 +54,8 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Do not enter `final_answer`" in content
     assert "Return only final PNG or JPEG files" in content
     assert "Spend at most two regeneration attempts on the same asset" in content
+    assert "budget of four regenerations in total" in content
+    assert "is not a new asset and does not reset either count" in content
     assert "let the user decide whether to regenerate" in content
 
 

@@ -335,6 +335,12 @@ Spend at most two regeneration attempts on the same asset. If the third
 candidate still fails inspection, stop regenerating and deliver the best one
 you have. Do not keep looping in the hope that the next render is clean.
 
+The whole task also has a budget of four regenerations in total, counted across
+every direction, placement, size, and crop. A different placement, size, or crop
+of the same design direction is not a new asset and does not reset either count.
+Once the task budget is spent, stop regenerating everything and deliver what you
+have, whatever the per-asset count says.
+
 ## Handle identity assets without blind post-processing
 
 Use official logos and other brand assets as generation or editing references
