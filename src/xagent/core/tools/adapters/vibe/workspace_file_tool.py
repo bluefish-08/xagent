@@ -241,7 +241,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="Look up the user's files from other tasks and workspaces. Call this only when the user explicitly refers to a file from outside the current task and no file_id for it is available in the conversation. Files attached to the current task are already listed in the context, so do not call this to discover inputs, hunt for reference material, or take inventory before starting work. Supports pagination and filtering. Returns file_id, filename, storage_path, size, mime_type, and whether files are in current workspace.",
+                description="Look up a specific file of the user's that is not in the current context. Attachments are injected per turn, so call this to recover a file the user named that has no file_id anywhere in the context, such as an attachment from an earlier turn. Reach depends on the deployment's file scope and may be limited to the current task. Do not call it to discover the current task's inputs, to hunt for reference material nobody gave you, or to take inventory before starting work; files attached to this turn are already in the context with their file_id. Supports pagination and filtering. Returns file_id, filename, storage_path, size, mime_type, and whether files are in current workspace.",
             ),
             FileTool(
                 self.edit_file,

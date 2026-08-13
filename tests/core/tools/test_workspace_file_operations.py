@@ -517,6 +517,19 @@ class TestWorkspaceFileOperations:
             context.current_record.file_id
         ]
 
+    def test_list_all_user_files_description_forbids_discovery(
+        self, public_file_scope_context
+    ):
+        tools = WorkspaceFileTools(public_file_scope_context.workspace)
+        description = next(
+            tool
+            for tool in tools.get_tools()
+            if tool.metadata.name == "list_all_user_files"
+        ).description
+
+        assert "Attachments are injected per turn" in description
+        assert "Do not call it to discover the current task's inputs" in description
+
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
     ):

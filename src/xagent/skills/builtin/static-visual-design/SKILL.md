@@ -174,14 +174,19 @@ and do not make reading a required reference document its own deliverable step.
 
 ## Use brand and reference assets intentionally
 
-Inspect relevant uploaded or workspace images with `understand_media`. Pass
+Inspect the reference images this task provides with `understand_media`. Pass
 useful product, campaign, style, or layout references to image generation or
 editing so the result belongs to the intended visual world.
 
 For work naming a real brand, resolve the brand identity before rendering final
-candidates. Look in user uploads and the task workspace. If no verified asset is
-available, ask the user for it. A visually plausible search result is not proof
-that a logo is authentic.
+candidates. The only acceptable sources are the assets the user gave you in this
+task — including one attached in an earlier turn, which you may recover by
+file_id — and the current task workspace; if neither has a verified asset, ask
+the user for it. Never go looking through the user's other tasks or outputs for
+brand assets, and never reverse-engineer a brand's identity by reading images you
+found that way — a file that turned up in a listing proves nothing about whose
+brand it shows, and a visually plausible search result is not proof that a logo
+is authentic.
 
 Treat identity-critical assets differently:
 
@@ -331,15 +336,19 @@ inspect again. A successful generation call alone is not proof that the asset
 is finished. Compare the candidates side by side and discard the safest generic
 option even when it is technically clean.
 
-Spend at most two regeneration attempts on the same asset. If the third
-candidate still fails inspection, stop regenerating and deliver the best one
-you have. Do not keep looping in the hope that the next render is clean.
+Spend at most two repair attempts on the same asset, counting every
+regeneration and every `edit_image` call alike. If the asset still fails
+inspection after that, stop and deliver the best candidate you have. Do not keep
+looping in the hope that the next render is clean.
 
-The whole task also has a budget of four regenerations in total, counted across
-every direction, placement, size, and crop. A different placement, size, or crop
-of the same design direction is not a new asset and does not reset either count.
-Once the task budget is spent, stop regenerating everything and deliver what you
-have, whatever the per-asset count says.
+The whole task also has a budget of four repair attempts in total. Only the
+first candidate for each direction the brief actually asks for is free; every
+later `generate_image` or `edit_image` call in the task counts against that
+budget, whether you frame it as a repair, a variant, another placement, or a new
+direction. A different placement, size, or crop of the same design direction is
+not a new asset and does not reset either count. Once the task budget is spent,
+stop repairing everything and deliver the best candidates you have, whatever the
+per-asset count says.
 
 ## Handle identity assets without blind post-processing
 
@@ -360,7 +369,9 @@ layout.
 ## Apply the completion gate
 
 Do not enter `final_answer` until every requested visual exists as a successful
-tool result and the final files pass inspection. A successful `generate_image`
+tool result and the final files pass inspection — or until the repair budget
+above is spent, in which case deliver the best candidate you have and name the
+remaining defects. A successful `generate_image`
 or `edit_image` call is never completion evidence by itself, in any execution
 form: when render work is defined as a plan step, the step's completion
 criteria and termination condition must require that the result passed
@@ -371,15 +382,17 @@ duplicated, misspelled, or visibly distorted identity marks. When the user
 explicitly requires an exact logo, a brand name rendered as ordinary text does
 not satisfy the requirement.
 
-Reject or continue iterating on an output that is merely polished but generic,
-uses two disconnected visual ideas, weakens the supplied fact into awkward
-copy, omits a required brand asset, or provides fewer meaningful directions
-than the open brief calls for. Tool success is evidence that an image was
-created, not that the campaign deliverable is complete.
+While the repair budget lasts, reject or continue iterating on an output that is
+merely polished but generic, uses two disconnected visual ideas, weakens the
+supplied fact into awkward copy, omits a required brand asset, or provides fewer
+meaningful directions than the open brief calls for. Tool success is evidence
+that an image was created, not that the campaign deliverable is complete. None of
+these reasons survives the budget: once it is spent, hand back what you have with
+the shortfall named.
 
 The gate bounds how many attempts you make, not how long you may loop. Once the
-regeneration limit is reached and a candidate still fails inspection, deliver
-that candidate and name the remaining defects concretely in your answer — which
+repair budget is spent and an asset still fails inspection, deliver the best
+candidate you have and name the remaining defects concretely — which
 text is misspelled, which element is clipped, which logo is not authentic — and
 let the user decide whether to regenerate. Handing back a flawed asset with the
 flaws stated is a valid outcome; looping until the task runs out of iterations

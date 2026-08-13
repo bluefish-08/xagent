@@ -53,10 +53,19 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Do not use HTML/CSS plus browser screenshots" in content
     assert "Do not enter `final_answer`" in content
     assert "Return only final PNG or JPEG files" in content
-    assert "Spend at most two regeneration attempts on the same asset" in content
-    assert "budget of four regenerations in total" in content
+    assert "Never go looking through the user's other tasks or outputs" in content
+    assert "including one attached in an earlier turn, which you may recover" in content
+    assert "Spend at most two repair attempts on the same asset" in content
+    assert "counting every regeneration and every `edit_image` call alike" in content
+    assert "budget of four repair attempts in total" in content
     assert "is not a new asset and does not reset either count" in content
+    assert "whether you frame it as a repair, a variant, another placement" in content
     assert "let the user decide whether to regenerate" in content
+    # Every instruction that can drive another round needs the budget attached to
+    # it; an unconditional one outweighs a carve-out stated elsewhere.
+    assert "or until the repair budget" in content
+    assert "While the repair budget lasts, reject or continue iterating" in content
+    assert "None of these reasons survives the budget" in content
 
 
 def test_static_visual_design_includes_art_direction_reference() -> None:

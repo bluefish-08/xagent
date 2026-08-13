@@ -123,6 +123,8 @@ class TestImageGenerationToolCore:
         assert "one exact headline" in description
         assert "one concise CTA" in description
         assert "file_id through the images parameter" in description
+        assert "Use only references the user supplied" in description
+        assert "do not go looking for reference material" in description
 
     def test_init_with_models(self, mock_image_models, mock_workspace):
         """Test ImageGenerationToolCore initialization with models"""
