@@ -5721,8 +5721,6 @@ async def test_react_discards_the_preamble_with_the_rejected_response() -> None:
 @pytest.mark.parametrize(
     ("tool_names", "unavailable"),
     [
-        # A generate-only deployment keeps list_image_models registered; this is
-        # the shape the generate_image precondition exists for.
         (["generate_image", "list_image_models"], True),
         (["generate_image", "edit_image"], False),
         (["list_image_models"], False),
@@ -5733,9 +5731,9 @@ async def test_react_discards_the_preamble_with_the_rejected_response() -> None:
 async def test_run_flags_missing_image_editing_and_renders_the_correction(
     tool_names: list[str], unavailable: bool
 ) -> None:
-    from xagent.core.agent.context.enrichment import SKILL_CONTEXT_METADATA_KEY
-    from xagent.core.agent.context.execution import (
+    from xagent.core.agent.context.enrichment import (
         IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
+        SKILL_CONTEXT_METADATA_KEY,
     )
 
     from .concurrency_harness import FakeTool as NamedFakeTool
@@ -5755,3 +5753,4 @@ async def test_run_flags_missing_image_editing_and_renders_the_correction(
     assert context.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] is unavailable
     rendered = llm.calls[0]["messages"][0]["content"]
     assert ("image editing is unavailable here" in rendered) is unavailable
+    assert ("attach a reference through images" in rendered) is unavailable

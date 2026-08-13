@@ -10,6 +10,7 @@ from json_repair import loads as repair_json_loads
 
 from ....model.chat.exceptions import LLMToolProtocolError
 from ...context.enrichment import (
+    IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
     MEMORY_CONTEXT_METADATA_KEY,
     RETRIEVED_MEMORIES_METADATA_KEY,
     SELECTED_SKILL_METADATA_KEY,
@@ -17,7 +18,6 @@ from ...context.enrichment import (
     enrich_context_with_memory,
     latest_user_text,
 )
-from ...context.execution import IMAGE_EDIT_UNAVAILABLE_METADATA_KEY
 from ...context.skill_tool import (
     LOAD_SKILL_TOOL_NAME,
     LOADED_SKILLS_METADATA_KEY,

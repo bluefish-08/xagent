@@ -620,7 +620,7 @@ def test_get_messages_for_llm_coalesces_system_messages() -> None:
 
 
 def test_skill_guidance_is_corrected_when_image_editing_is_unavailable() -> None:
-    from xagent.core.agent.context.execution import (
+    from xagent.core.agent.context.enrichment import (
         IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
     )
 
@@ -635,15 +635,28 @@ def test_skill_guidance_is_corrected_when_image_editing_is_unavailable() -> None
 
     assert "image editing is unavailable here" in system_content
     # The correction is worthless unless it lands after the text it contradicts.
-    # Anchor on the guidance body, not its header, so splitting the skill block
-    # cannot silently make this pass for the wrong reason.
     assert system_content.index("Use `edit_image` to refine.") < system_content.index(
         "Correction to the skill guidance above"
     )
 
 
+def test_correction_matches_edit_image_case_insensitively() -> None:
+    from xagent.core.agent.context.enrichment import (
+        IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
+    )
+
+    ctx = ExecutionContext(system_prompt="Base prompt.")
+    ctx.metadata[SKILL_CONTEXT_METADATA_KEY] = "Call EDIT_IMAGE to refine."
+    ctx.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = True
+    ctx.add_user_message("x")
+
+    assert (
+        "image editing is unavailable here" in ctx.get_messages_for_llm()[0]["content"]
+    )
+
+
 def test_no_correction_when_editing_works_or_the_skill_never_named_it() -> None:
-    from xagent.core.agent.context.execution import (
+    from xagent.core.agent.context.enrichment import (
         IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
     )
 
@@ -656,7 +669,6 @@ def test_no_correction_when_editing_works_or_the_skill_never_named_it() -> None:
     no_skill.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = True
     no_skill.add_user_message("x")
 
-    # 8 of the 9 builtin skills never mention edit_image; they get no correction.
     unrelated_skill = ExecutionContext(system_prompt="Base prompt.")
     unrelated_skill.metadata[SKILL_CONTEXT_METADATA_KEY] = "Write the report first."
     unrelated_skill.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = True
