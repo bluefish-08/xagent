@@ -126,6 +126,16 @@ class TestImageGenerationToolCore:
         assert "Use only references the user supplied" in description
         assert "do not go looking for reference material" in description
 
+    def test_edit_description_restricts_reference_sources(self):
+        # generate_image routes reference-based work here, so the restriction has
+        # to hold on both descriptions or the model just switches tools.
+        description = ImageGenerationToolCore.EDIT_IMAGE_DESCRIPTION
+
+        assert "Use only images the user supplied or the task already produced" in (
+            description
+        )
+        assert "do not go looking" in description
+
     def test_init_with_models(self, mock_image_models, mock_workspace):
         """Test ImageGenerationToolCore initialization with models"""
         tool = ImageGenerationToolCore(mock_image_models, workspace=mock_workspace)

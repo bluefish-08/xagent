@@ -179,14 +179,17 @@ useful product, campaign, style, or layout references to image generation or
 editing so the result belongs to the intended visual world.
 
 For work naming a real brand, resolve the brand identity before rendering final
-candidates. The only acceptable sources are the assets the user gave you in this
-task — including one attached in an earlier turn, which you may recover by
-file_id — and the current task workspace; if neither has a verified asset, ask
-the user for it. Never go looking through the user's other tasks or outputs for
-brand assets, and never reverse-engineer a brand's identity by reading images you
-found that way — a file that turned up in a listing proves nothing about whose
-brand it shows, and a visually plausible search result is not proof that a logo
-is authentic.
+candidates. Three sources are legitimate: an asset the user gave you in this task
+— including one attached in an earlier turn, whose file_id is no longer in context
+and which you recover by finding it with `list_all_user_files` — the current task
+workspace, and the brand's own official web presence, retrieved with the web
+tools available to you. If none of them yields a verified asset, ask the user for
+it; a visually plausible search result is not proof that a logo is authentic.
+
+The user's other tasks and earlier outputs are not a source. Do not list them
+looking for brand material, and do not reverse-engineer a brand's identity by
+reading images found that way — a file that turned up in a listing proves nothing
+about whose brand it shows.
 
 Treat identity-critical assets differently:
 
@@ -323,16 +326,18 @@ Inspect every candidate with `understand_media`, checking:
 - accidental pseudo-logos, fake QR codes, watermarks, malformed objects, or
   unrelated lettering.
 
-Automatically reject contact sheets, multiple ads in one image, duplicated
-layouts or headlines, fake or duplicated logos, wrong or invented copy,
-unverified claims, unclear hierarchy, and clipped or overlapping essentials.
-Do not rationalize these as stylistic choices.
+While the repair budget below lasts, automatically reject contact sheets,
+multiple ads in one image, duplicated layouts or headlines, fake or duplicated
+logos, wrong or invented copy, unverified claims, unclear hierarchy, and clipped
+or overlapping essentials. Do not rationalize these as stylistic choices — and do
+not treat the budget running out as a rationalization either; that is the point at
+which you name the defect instead of accepting it.
 
 Use `edit_image` only to refine a strong, single-canvas candidate with a
-localized defect. Regenerate from the locked design specification when the
-organizing idea, focal subject, hierarchy, copy load, or canvas structure is
-wrong, or when several text errors appear. Correct permitted copy errors and
-inspect again. A successful generation call alone is not proof that the asset
+localized defect. While the budget lasts, regenerate from the locked design
+specification when the organizing idea, focal subject, hierarchy, copy load, or
+canvas structure is wrong, or when several text errors appear. Correct permitted
+copy errors and inspect again. A successful generation call alone is not proof that the asset
 is finished. Compare the candidates side by side and discard the safest generic
 option even when it is technically clean.
 
@@ -341,21 +346,30 @@ regeneration and every `edit_image` call alike. If the asset still fails
 inspection after that, stop and deliver the best candidate you have. Do not keep
 looping in the hope that the next render is clean.
 
-The whole task also has a budget of four repair attempts in total. Only the
-first candidate for each direction the brief actually asks for is free; every
-later `generate_image` or `edit_image` call in the task counts against that
-budget, whether you frame it as a repair, a variant, another placement, or a new
-direction. A different placement, size, or crop of the same design direction is
-not a new asset and does not reset either count. Once the task budget is spent,
-stop repairing everything and deliver the best candidates you have, whatever the
-per-asset count says.
+The whole task also has a budget of four repair attempts in total. The first
+render of every direction and placement the brief actually calls for is free —
+covering a requested placement is not a repair. What counts is each re-render and
+each `edit_image` call after that first candidate, whether you frame it as a
+repair, a variant, or a fresh direction; directions and placements you invented
+yourself are not free and do not extend the budget either. A different placement,
+size, or crop of the same design direction is not a new asset and does not reset
+either count. Once the task budget is spent, stop repairing everything and
+deliver the best candidates you have, whatever the per-asset count says.
+
+Count within the run you are in; no counter is shared between plan steps. That is
+a limitation, not an allowance. Do not spend a step's fresh budget on an asset an
+earlier step already tried to repair, and do not split one asset's repairs across
+steps to buy more attempts. An asset that failed inspection in an earlier step is
+delivered with its defects named, not retried.
 
 ## Handle identity assets without blind post-processing
 
 Use official logos and other brand assets as generation or editing references
 when the image model supports them. Inspect the result closely. Never add a
 second logo over a generated pseudo-logo, and never treat a generic typed brand
-name as proof of fidelity; remove the artifact or regenerate the creative.
+name as proof of fidelity; while the repair budget lasts, remove the artifact or
+regenerate the creative, and once it is spent, hand the candidate back with the
+unfaithful mark named.
 
 Do not add a deterministic compositing step for ordinary branded visuals.
 Apply the identity-asset rule above whenever exact reproduction is required;
@@ -377,10 +391,10 @@ form: when render work is defined as a plan step, the step's completion
 criteria and termination condition must require that the result passed
 `understand_media` inspection with no automatic rejection — never "the
 generation tool returned success". When no plan is involved, apply the same
-rule to the direct decision to stop. For a brand-specific final, reject fake,
-duplicated, misspelled, or visibly distorted identity marks. When the user
-explicitly requires an exact logo, a brand name rendered as ordinary text does
-not satisfy the requirement.
+rule to the direct decision to stop. While the repair budget lasts, reject fake,
+duplicated, misspelled, or visibly distorted identity marks in a brand-specific
+final. When the user explicitly requires an exact logo, a brand name rendered as
+ordinary text does not satisfy the requirement.
 
 While the repair budget lasts, reject or continue iterating on an output that is
 merely polished but generic, uses two disconnected visual ideas, weakens the

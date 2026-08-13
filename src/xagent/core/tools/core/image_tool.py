@@ -136,6 +136,9 @@ Text handling in edited images:
   exact fidelity is explicitly required, use a deterministic asset-processing
   workflow when one is available or explain the limitation.
 
+Use only images the user supplied or the task already produced; do not go looking
+for source or reference material the user did not give you.
+
 Available models (⭐[DEFAULT] marks the configured default model):
 {}
 

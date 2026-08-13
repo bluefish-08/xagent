@@ -53,18 +53,24 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Do not use HTML/CSS plus browser screenshots" in content
     assert "Do not enter `final_answer`" in content
     assert "Return only final PNG or JPEG files" in content
-    assert "Never go looking through the user's other tasks or outputs" in content
-    assert "including one attached in an earlier turn, which you may recover" in content
+    assert "The user's other tasks and earlier outputs are not a source" in content
+    assert "which you recover by finding it with `list_all_user_files`" in content
     assert "Spend at most two repair attempts on the same asset" in content
     assert "counting every regeneration and every `edit_image` call alike" in content
     assert "budget of four repair attempts in total" in content
     assert "is not a new asset and does not reset either count" in content
-    assert "whether you frame it as a repair, a variant, another placement" in content
+    # A requested placement's first render is coverage, not a repair; charging it
+    # spends the budget before any quality work happens.
+    assert "The first render of every direction and placement" in content
+    assert (
+        "whether you frame it as a repair, a variant, or a fresh direction" in content
+    )
     assert "let the user decide whether to regenerate" in content
     # Every instruction that can drive another round needs the budget attached to
     # it; an unconditional one outweighs a carve-out stated elsewhere.
     assert "or until the repair budget" in content
     assert "While the repair budget lasts, reject or continue iterating" in content
+    assert "While the repair budget lasts, reject fake," in content
     assert "None of these reasons survives the budget" in content
 
 
@@ -87,3 +93,8 @@ def test_static_visual_design_includes_art_direction_reference() -> None:
     assert "Design for a three-pass read" in content
     assert "Follow the main skill's one-canvas generation contract" in content
     assert "Automatic rejection overrides subjective scoring" in content
+    # This reference is mandatory reading and lands in the same context as the
+    # skill, so its rejection rules need the budget too — unconditional ones here
+    # outweigh the carve-outs in SKILL.md.
+    assert "While the main skill's repair budget lasts, reject a candidate" in content
+    assert "subordinate to the repair budget in the main skill" in content

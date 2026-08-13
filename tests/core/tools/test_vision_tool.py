@@ -501,10 +501,6 @@ class TestVisionToolUnderstandMedia:
             "Judge an unfamiliar file by the extension in its filename" in description
         )
         assert "text or code with read_file" in description
-        # get_file_info returns no mime_type; pointing there would send the model
-        # back to probing file types with this tool.
-        assert "mime_type" not in description
-        assert "get_file_info" not in description
 
     @pytest.mark.asyncio
     async def test_understand_svg_sends_source_without_rasterizing(

@@ -527,8 +527,12 @@ class TestWorkspaceFileOperations:
             if tool.metadata.name == "list_all_user_files"
         ).description
 
-        assert "Attachments are injected per turn" in description
-        assert "Do not call it to discover the current task's inputs" in description
+        assert "attachments are injected per turn" in description
+        assert "Do not call this to discover the current task's inputs" in description
+        # There is no search parameter; promising one would have the model expect
+        # a lookup the callable cannot do.
+        assert "there is no search parameter" in description
+        assert "filtering" not in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
