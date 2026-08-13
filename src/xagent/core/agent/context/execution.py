@@ -56,6 +56,9 @@ COMPACT_DROPPED_TOOL_NAME_MAX_CHARS = 64
 # nothing a dropped observation held.
 NON_EVIDENCE_TOOL_NAMES = CONTROL_TOOL_NAMES | {LOAD_SKILL_TOOL_NAME}
 COMPACT_DROPPED_TOOL_NOTICE_MAX_NAMES = 20
+# True only when generate_image is registered and edit_image is not; a deployment
+# with no image tools at all leaves it False. Lives here, not in enrichment.py
+# with the other metadata keys, because react.py already imports from this module.
 IMAGE_EDIT_UNAVAILABLE_METADATA_KEY = "image_edit_unavailable"
 
 
@@ -609,16 +612,18 @@ class ExecutionContext:
             )
             # Skill text is injected verbatim and cannot know which tools were
             # registered, so the correction has to come after it.
-            if self.metadata.get(IMAGE_EDIT_UNAVAILABLE_METADATA_KEY):
+            if self.metadata.get(
+                IMAGE_EDIT_UNAVAILABLE_METADATA_KEY
+            ) and "edit_image" in str(skill_context):
                 parts.append(
                     "Correction to the skill guidance above: image editing is "
-                    "unavailable here. No configured image model has the edit "
-                    "ability, so edit_image is not in your tools and passing "
-                    "images to generate_image fails. Ignore any instruction to "
-                    "edit an existing image or to attach a reference through "
-                    "images; render each deliverable from a text prompt in one "
-                    "call, and describe in the prompt what a reference would "
-                    "have contributed."
+                    "unavailable here. edit_image is not in your tools, and "
+                    "passing images to generate_image routes into the same "
+                    "absent edit path. Ignore any instruction to edit an "
+                    "existing image or to attach a reference through images; "
+                    "render each deliverable from a text prompt in one call, "
+                    "and describe in the prompt what a reference would have "
+                    "contributed."
                 )
         return "\n\n".join(part for part in parts if part.strip())
 

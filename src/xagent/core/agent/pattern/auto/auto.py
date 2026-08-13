@@ -17,6 +17,7 @@ from ...context.enrichment import (
     enrich_context_with_memory,
     latest_user_text,
 )
+from ...context.execution import IMAGE_EDIT_UNAVAILABLE_METADATA_KEY
 from ...context.skill_tool import (
     LOAD_SKILL_TOOL_NAME,
     LOADED_SKILLS_METADATA_KEY,
@@ -1803,6 +1804,7 @@ class AutoPattern(AgentPattern):
             SKILL_CONTEXT_METADATA_KEY,
             SKILL_INDEX_METADATA_KEY,
             LOADED_SKILLS_METADATA_KEY,
+            IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
         ):
             metadata.pop(key, None)
 

@@ -635,18 +635,20 @@ def test_skill_guidance_is_corrected_when_image_editing_is_unavailable() -> None
 
     assert "image editing is unavailable here" in system_content
     # The correction is worthless unless it lands after the text it contradicts.
-    assert system_content.index("Selected skill guidance") < system_content.index(
+    # Anchor on the guidance body, not its header, so splitting the skill block
+    # cannot silently make this pass for the wrong reason.
+    assert system_content.index("Use `edit_image` to refine.") < system_content.index(
         "Correction to the skill guidance above"
     )
 
 
-def test_no_correction_when_editing_works_or_no_skill_is_loaded() -> None:
+def test_no_correction_when_editing_works_or_the_skill_never_named_it() -> None:
     from xagent.core.agent.context.execution import (
         IMAGE_EDIT_UNAVAILABLE_METADATA_KEY,
     )
 
     with_edit = ExecutionContext(system_prompt="Base prompt.")
-    with_edit.metadata[SKILL_CONTEXT_METADATA_KEY] = "## Available Skill: design"
+    with_edit.metadata[SKILL_CONTEXT_METADATA_KEY] = "Use `edit_image` to refine."
     with_edit.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = False
     with_edit.add_user_message("x")
 
@@ -654,7 +656,13 @@ def test_no_correction_when_editing_works_or_no_skill_is_loaded() -> None:
     no_skill.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = True
     no_skill.add_user_message("x")
 
-    for ctx in (with_edit, no_skill):
+    # 8 of the 9 builtin skills never mention edit_image; they get no correction.
+    unrelated_skill = ExecutionContext(system_prompt="Base prompt.")
+    unrelated_skill.metadata[SKILL_CONTEXT_METADATA_KEY] = "Write the report first."
+    unrelated_skill.metadata[IMAGE_EDIT_UNAVAILABLE_METADATA_KEY] = True
+    unrelated_skill.add_user_message("x")
+
+    for ctx in (with_edit, no_skill, unrelated_skill):
         assert (
             "Correction to the skill guidance"
             not in (ctx.get_messages_for_llm()[0]["content"])
