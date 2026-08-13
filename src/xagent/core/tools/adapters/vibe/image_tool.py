@@ -73,6 +73,16 @@ class ImageGenerationTool(ImageGenerationToolCore):
         can_generate = self._get_model() is not None
         can_edit = self._get_edit_model() is not None
 
+        # Withholding a tool is silent otherwise: the operator sees "editing
+        # stopped working" with nothing in the log pointing at the abilities.
+        if not can_edit or not can_generate:
+            logger.info(
+                "Image tools withheld (generate=%s, edit=%s) from models: %s",
+                can_generate,
+                can_edit,
+                self._available_models_summary(),
+            )
+
         tools = []
 
         if can_generate:
