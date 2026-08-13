@@ -241,7 +241,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List all user files across all workspaces and uploaded files. Supports pagination and filtering. Returns file_id, filename, storage_path, size, mime_type, and whether files are in current workspace.",
+                description="Look up the user's files from other tasks and workspaces. Call this only when the user explicitly refers to a file from outside the current task and no file_id for it is available in the conversation. Files attached to the current task are already listed in the context, so do not call this to discover inputs, hunt for reference material, or take inventory before starting work. Supports pagination and filtering. Returns file_id, filename, storage_path, size, mime_type, and whether files are in current workspace.",
             ),
             FileTool(
                 self.edit_file,

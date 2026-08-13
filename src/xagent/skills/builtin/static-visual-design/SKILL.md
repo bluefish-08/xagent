@@ -331,6 +331,10 @@ inspect again. A successful generation call alone is not proof that the asset
 is finished. Compare the candidates side by side and discard the safest generic
 option even when it is technically clean.
 
+Spend at most two regeneration attempts on the same asset. If the third
+candidate still fails inspection, stop regenerating and deliver the best one
+you have. Do not keep looping in the hope that the next render is clean.
+
 ## Handle identity assets without blind post-processing
 
 Use official logos and other brand assets as generation or editing references
@@ -366,6 +370,14 @@ uses two disconnected visual ideas, weakens the supplied fact into awkward
 copy, omits a required brand asset, or provides fewer meaningful directions
 than the open brief calls for. Tool success is evidence that an image was
 created, not that the campaign deliverable is complete.
+
+The gate bounds how many attempts you make, not how long you may loop. Once the
+regeneration limit is reached and a candidate still fails inspection, deliver
+that candidate and name the remaining defects concretely in your answer — which
+text is misspelled, which element is clipped, which logo is not authentic — and
+let the user decide whether to regenerate. Handing back a flawed asset with the
+flaws stated is a valid outcome; looping until the task runs out of iterations
+is not.
 
 ## Deliver
 

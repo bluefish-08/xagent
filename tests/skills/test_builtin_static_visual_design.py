@@ -53,6 +53,8 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Do not use HTML/CSS plus browser screenshots" in content
     assert "Do not enter `final_answer`" in content
     assert "Return only final PNG or JPEG files" in content
+    assert "Spend at most two regeneration attempts on the same asset" in content
+    assert "let the user decide whether to regenerate" in content
 
 
 def test_static_visual_design_includes_art_direction_reference() -> None:
