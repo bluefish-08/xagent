@@ -5,6 +5,7 @@ This module provides image generation capabilities using pre-configured image mo
 passed from the web layer.
 """
 
+import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ....model.image.base import BaseImageModel
@@ -12,6 +13,8 @@ from ....workspace import TaskWorkspace
 from ...core.image_tool import ImageGenerationToolCore
 from .base import ToolCategory
 from .function import FunctionTool
+
+logger = logging.getLogger(__name__)
 
 
 class ImageGenerationFunctionTool(FunctionTool):

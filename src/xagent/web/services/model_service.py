@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, Optional, cast
 
 from sqlalchemy.orm import Session
 
-from xagent.core.model.image.base import BaseImageModel
+from xagent.core.model.image.base import BaseImageModel, default_image_abilities
 from xagent.web.api.model import DBModel
 
 from ...core.model.chat.basic.base import BaseLLM
@@ -564,7 +564,12 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider, str(db_model.model_name), ["generate"]
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
                 elif model_provider == "gemini":
@@ -572,7 +577,12 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider, str(db_model.model_name), ["generate"]
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
                 elif model_provider == "openai":
@@ -580,7 +590,14 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate", "edit"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider,
+                                str(db_model.model_name),
+                                ["generate", "edit"],
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
                 elif model_provider == "xinference":
@@ -588,7 +605,14 @@ def get_image_models(db: Session, user_id: Optional[int] = None) -> Dict[str, An
                         model_name=str(db_model.model_name),
                         api_key=api_key,
                         base_url=base_url,
-                        abilities=list(db_model.abilities or ["generate", "edit"]),  # pyright: ignore[reportArgumentType]
+                        abilities=list(
+                            db_model.abilities
+                            or default_image_abilities(
+                                model_provider,
+                                str(db_model.model_name),
+                                ["generate", "edit"],
+                            )
+                        ),
                     )
                     _add_image_model_with_id(image_models, image_model, db_model)
             except Exception as e:
