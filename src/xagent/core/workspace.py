@@ -2065,7 +2065,7 @@ class TaskWorkspace:
         _exact_task_scope: bool = False,
         openable_only: bool = False,
     ) -> Dict[str, Any]:
-        """List all user files across all workspaces and uploaded files.
+        """List the user's uploaded files, narrowed by scope and by the flags.
 
         Args:
             include_workspace_files: Whether to include current workspace files
@@ -2176,22 +2176,25 @@ class TaskWorkspace:
                         ),
                     )
                 if openable_only and self.owner_user_id is not None:
-                    # Narrow in SQL, before count and the slice, so openable rows
-                    # on later pages stay reachable. A record-level pass over the
-                    # rows would be redundant: within this filter every leg of
-                    # _file_record_allowed_for_workspace either restates the
-                    # predicate below or is already guaranteed by the owner match.
-                    # An ownerless workspace opts out because its reads are
-                    # unrestricted too, so a narrowed listing would hide reachable
-                    # files.
-                    from sqlalchemy import or_ as _or
+                    # Narrow in SQL, before count and the slice, so rows on later
+                    # pages stay reachable. This is task narrowing, not the read
+                    # authority: _file_record_allowed_for_workspace also has a
+                    # scope-subtree leg and a path-in-workspace leg that nothing
+                    # here restates, so a scoped deployment still lists task-less
+                    # rows its reads refuse — see the PR's known limits. The
+                    # mismatch only ever lists too much, never too little. An
+                    # ownerless workspace opts out because its reads are
+                    # unrestricted too, so narrowing would hide reachable files.
+                    from sqlalchemy import or_
 
                     query = query.filter(
-                        _or(
+                        or_(
+                            # Only reachable when unmarked: the exact-scope branch
+                            # above already pins task_id to db_task_id.
                             UploadedFile.task_id.is_(None),
-                            # current_task_id, not the id parsed from the workspace
-                            # name: a delegated workspace carries the parent's
-                            # db_task_id, and reads authorize against that.
+                            # current_task_id rather than the id parsed from the
+                            # workspace name; the two diverge when db_task_id is
+                            # passed in, and reads authorize against db_task_id.
                             UploadedFile.task_id == self.current_task_id,
                         )
                     )

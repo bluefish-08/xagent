@@ -153,7 +153,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
         limit: int = DEFAULT_USER_FILE_LIST_LIMIT,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        """List the user's files this workspace can actually open.
+        """List the user's files within this task's reach.
 
         The core listing's ``openable_only`` switch is deliberately absent from
         this signature: FunctionTool turns every parameter into a field of the
@@ -276,7 +276,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out wherever the deployment records a file owner, and no filesystem path to them is returned here. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
+                description="List the user's files within this task's reach. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out wherever the deployment records a file owner, and no filesystem path to them is returned here. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
             ),
             FileTool(
                 self.edit_file,

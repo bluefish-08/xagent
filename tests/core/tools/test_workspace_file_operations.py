@@ -165,6 +165,21 @@ def public_file_scope_context(tmp_path, monkeypatch):
         engine.dispose()
 
 
+@pytest.fixture
+def memory_db():
+    """An in-memory session for the listing tests, torn down with its engine."""
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+    try:
+        yield db
+    finally:
+        db.close()
+        engine.dispose()
+
+
 class TestWorkspaceFileOperations:
     """Test suite for WorkspaceFileOperations core class."""
 
@@ -551,7 +566,7 @@ class TestWorkspaceFileOperations:
             if tool.metadata.name == "list_all_user_files"
         ).description
 
-        assert "files that this task is allowed to open" in description
+        assert "within this task's reach" in description
         # Rows whose reads always fail must not be offered at all.
         assert "no filesystem path to them is returned here" in description
         # Paging and the two kinds of row the model can receive.
@@ -1258,7 +1273,7 @@ class TestWorkspaceFileOperations:
             db.close()
             engine.dispose()
 
-    def test_vibe_listing_omits_other_tasks(self, tmp_path):
+    def test_vibe_listing_omits_other_tasks(self, tmp_path, memory_db):
         """The model-facing listing shows only what it can actually open.
 
         With an owner set, resolve_file_id refuses another task's record, and
@@ -1268,83 +1283,76 @@ class TestWorkspaceFileOperations:
         the adapter drops it. An ownerless workspace does resolve those
         records, so it keeps seeing them — covered below.
         """
-        engine = create_engine(
-            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        db = memory_db
+        user = User(username="sibling-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        mine = Task(id=791, user_id=user.id, title="Current task")
+        other = Task(id=792, user_id=user.id, title="Sibling task")
+        db.add_all([mine, other])
+        db.flush()
+
+        records = {}
+        for label, task_id in (
+            ("mine", mine.id),
+            ("sibling", other.id),
+            ("unattached", None),
+        ):
+            path = tmp_path / "uploads" / f"{label}.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(label, encoding="utf-8")
+            record = UploadedFile(
+                user_id=user.id,
+                task_id=task_id,
+                filename=path.name,
+                storage_path=str(path),
+                mime_type="text/plain",
+                file_size=path.stat().st_size,
+            )
+            db.add(record)
+            records[label] = record
+        db.commit()
+
+        workspace = TaskWorkspace(
+            id="web_task_791", base_dir=str(tmp_path / "workspaces")
         )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        Base.metadata.create_all(bind=engine)
-        db = SessionLocal()
-        try:
-            user = User(username="sibling-user", password_hash="hash")
-            db.add(user)
-            db.flush()
-            mine = Task(id=791, user_id=user.id, title="Current task")
-            other = Task(id=792, user_id=user.id, title="Sibling task")
-            db.add_all([mine, other])
-            db.flush()
+        workspace.db_session = db
+        workspace.owner_user_id = user.id
+        workspace.current_task_id = mine.id
 
-            records = {}
-            for label, task_id in (
-                ("mine", mine.id),
-                ("sibling", other.id),
-                ("unattached", None),
-            ):
-                path = tmp_path / "uploads" / f"{label}.txt"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(label, encoding="utf-8")
-                record = UploadedFile(
-                    user_id=user.id,
-                    task_id=task_id,
-                    filename=path.name,
-                    storage_path=str(path),
-                    mime_type="text/plain",
-                    file_size=path.stat().st_size,
-                )
-                db.add(record)
-                records[label] = record
-            db.commit()
+        listed = WorkspaceFileTools(workspace).list_all_user_files(
+            include_workspace_files=False
+        )
+        listed_names = {file_info["filename"] for file_info in listed["files"]}
 
-            workspace = TaskWorkspace(
-                id="web_task_791", base_dir=str(tmp_path / "workspaces")
-            )
-            workspace.db_session = db
-            workspace.owner_user_id = user.id
-            workspace.current_task_id = mine.id
-
-            listed = WorkspaceFileTools(workspace).list_all_user_files(
+        assert listed_names == {"mine.txt", "unattached.txt"}
+        assert listed["total_count"] == 2
+        # The omitted row is exactly the one file_id resolution would refuse.
+        assert workspace.resolve_file_id(records["sibling"].file_id) is None
+        assert workspace.resolve_file_id(records["unattached"].file_id) is not None
+        # Core keeps the row: other callers carry their own authority, and
+        # test_unmarked_historical_file_operation_behavior_is_unchanged pins it.
+        core_names = {
+            file_info["filename"]
+            for file_info in WorkspaceFileOperations(workspace).list_all_user_files(
                 include_workspace_files=False
-            )
-            listed_names = {file_info["filename"] for file_info in listed["files"]}
+            )["files"]
+        }
+        assert "sibling.txt" in core_names
 
-            assert listed_names == {"mine.txt", "unattached.txt"}
-            assert listed["total_count"] == 2
-            # The omitted row is exactly the one file_id resolution would refuse.
-            assert workspace.resolve_file_id(records["sibling"].file_id) is None
-            assert workspace.resolve_file_id(records["unattached"].file_id) is not None
-            # Core keeps the row: other callers carry their own authority, and
-            # test_unmarked_historical_file_operation_behavior_is_unchanged pins it.
-            core_names = {
-                file_info["filename"]
-                for file_info in WorkspaceFileOperations(workspace).list_all_user_files(
-                    include_workspace_files=False
-                )["files"]
-            }
-            assert "sibling.txt" in core_names
-
-            ownerless = TaskWorkspace(
-                id="web_task_791", base_dir=str(tmp_path / "workspaces")
-            )
-            ownerless.db_session = db
-            ownerless_listing = WorkspaceFileTools(ownerless).list_all_user_files(
-                include_workspace_files=False
-            )
-            assert {
-                file_info["filename"] for file_info in ownerless_listing["files"]
-            } == {"mine.txt", "sibling.txt", "unattached.txt"}
-            assert ownerless.resolve_file_id(records["sibling"].file_id) is not None
-        finally:
-            db.close()
-            engine.dispose()
+        ownerless = TaskWorkspace(
+            id="web_task_791", base_dir=str(tmp_path / "workspaces")
+        )
+        ownerless.db_session = db
+        ownerless_listing = WorkspaceFileTools(ownerless).list_all_user_files(
+            include_workspace_files=False
+        )
+        assert {file_info["filename"] for file_info in ownerless_listing["files"]} == {
+            "mine.txt",
+            "sibling.txt",
+            "unattached.txt",
+        }
+        assert ownerless.resolve_file_id(records["sibling"].file_id) is not None
 
     @staticmethod
     def _add_upload(db, tmp_path, user_id, task_id, stem):
@@ -1363,128 +1371,109 @@ class TestWorkspaceFileOperations:
         db.flush()
         return record
 
-    def test_vibe_listing_pages_past_unopenable_rows(self, tmp_path):
+    def test_vibe_listing_pages_past_unopenable_rows(self, tmp_path, memory_db):
         """Openable rows on later pages must stay reachable.
 
         Filtering after the core's limit/offset would hand back an empty page
         with total_count 0 while openable uploads sat on page two.
         """
-        engine = create_engine(
-            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        db = memory_db
+        user = User(username="paging-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        mine = Task(id=795, user_id=user.id, title="Current task")
+        other = Task(id=796, user_id=user.id, title="Sibling task")
+        db.add_all([mine, other])
+        db.flush()
+
+        # Mine go in first so that, newest-first, a full page of the sibling's
+        # uploads sits ahead of them: filtering after the DB slice would hand
+        # back an empty page and hide them.
+        for index in range(2):
+            self._add_upload(db, tmp_path, user.id, mine.id, f"mine-{index}")
+        for index in range(DEFAULT_USER_FILE_LIST_LIMIT):
+            self._add_upload(db, tmp_path, user.id, other.id, f"theirs-{index}")
+        db.commit()
+
+        workspace = TaskWorkspace(
+            id="web_task_795", base_dir=str(tmp_path / "workspaces")
         )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        Base.metadata.create_all(bind=engine)
-        db = SessionLocal()
-        try:
-            user = User(username="paging-user", password_hash="hash")
-            db.add(user)
-            db.flush()
-            mine = Task(id=795, user_id=user.id, title="Current task")
-            other = Task(id=796, user_id=user.id, title="Sibling task")
-            db.add_all([mine, other])
-            db.flush()
+        workspace.db_session = db
+        workspace.owner_user_id = user.id
+        workspace.current_task_id = mine.id
 
-            # Mine go in first so that, newest-first, a full page of the sibling's
-            # uploads sits ahead of them: filtering after the DB slice would hand
-            # back an empty page and hide them.
-            for index in range(2):
-                self._add_upload(db, tmp_path, user.id, mine.id, f"mine-{index}")
-            for index in range(DEFAULT_USER_FILE_LIST_LIMIT):
-                self._add_upload(db, tmp_path, user.id, other.id, f"theirs-{index}")
-            db.commit()
+        listing = WorkspaceFileTools(workspace).list_all_user_files(
+            include_workspace_files=False
+        )
 
-            workspace = TaskWorkspace(
-                id="web_task_795", base_dir=str(tmp_path / "workspaces")
-            )
-            workspace.db_session = db
-            workspace.owner_user_id = user.id
-            workspace.current_task_id = mine.id
+        assert {file_info["filename"] for file_info in listing["files"]} == {
+            "mine-0.txt",
+            "mine-1.txt",
+        }
+        assert listing["total_count"] == 2
+        # Paging is over openable rows only, so there is no second page.
+        assert (
+            WorkspaceFileTools(workspace).list_all_user_files(
+                include_workspace_files=False,
+                offset=DEFAULT_USER_FILE_LIST_LIMIT,
+            )["files"]
+            == []
+        )
+        # The core switch must stay off the tool schema, or the model can
+        # simply turn the narrowing off.
+        tool = next(
+            candidate
+            for candidate in WorkspaceFileTools(workspace).get_tools()
+            if candidate.metadata.name == "list_all_user_files"
+        )
+        assert "openable_only" not in tool.args_type().model_json_schema()["properties"]
+        # Core keeps its own default, so callers with their own authority are
+        # unaffected.
+        assert WorkspaceFileOperations(workspace).list_all_user_files(
+            include_workspace_files=False
+        )["total_count"] == (DEFAULT_USER_FILE_LIST_LIMIT + 2)
 
-            listing = WorkspaceFileTools(workspace).list_all_user_files(
-                include_workspace_files=False
-            )
-
-            assert {file_info["filename"] for file_info in listing["files"]} == {
-                "mine-0.txt",
-                "mine-1.txt",
-            }
-            assert listing["total_count"] == 2
-            # Paging is over openable rows only, so there is no second page.
-            assert (
-                WorkspaceFileTools(workspace).list_all_user_files(
-                    include_workspace_files=False,
-                    offset=DEFAULT_USER_FILE_LIST_LIMIT,
-                )["files"]
-                == []
-            )
-            # The core switch must stay off the tool schema, or the model can
-            # simply turn the narrowing off.
-            tool = next(
-                candidate
-                for candidate in WorkspaceFileTools(workspace).get_tools()
-                if candidate.metadata.name == "list_all_user_files"
-            )
-            assert (
-                "openable_only"
-                not in tool.args_type().model_json_schema()["properties"]
-            )
-            # Core keeps its own default, so callers with their own authority are
-            # unaffected.
-            assert WorkspaceFileOperations(workspace).list_all_user_files(
-                include_workspace_files=False
-            )["total_count"] == (DEFAULT_USER_FILE_LIST_LIMIT + 2)
-        finally:
-            db.close()
-            engine.dispose()
-
-    def test_vibe_listing_narrows_by_task_in_scoped_workspaces(self, tmp_path):
+    def test_vibe_listing_narrows_by_task_in_scoped_workspaces(
+        self, tmp_path, memory_db
+    ):
         """A scoped workspace narrows by task like any other.
 
         Narrowing is SQL on task_id, so it never depends on where the bytes
         live — which is what previously made a scoped workspace drop its own
         uploads. Unattached uploads stay listed; a sibling task's do not.
         """
-        engine = create_engine(
-            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        db = memory_db
+        user = User(username="scoped-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        mine = Task(id=797, user_id=user.id, title="Scoped task")
+        db.add(mine)
+        db.flush()
+        unattached = self._add_upload(db, tmp_path, user.id, None, "unattached")
+        sibling_task = Task(id=798, user_id=user.id, title="Sibling")
+        db.add(sibling_task)
+        db.flush()
+        self._add_upload(db, tmp_path, user.id, sibling_task.id, "siblings")
+        db.commit()
+
+        scoped = TaskWorkspace(
+            id="web_task_797",
+            base_dir=str(tmp_path / "workspaces"),
+            scope_segments=("tenant-a",),
         )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        Base.metadata.create_all(bind=engine)
-        db = SessionLocal()
-        try:
-            user = User(username="scoped-user", password_hash="hash")
-            db.add(user)
-            db.flush()
-            mine = Task(id=797, user_id=user.id, title="Scoped task")
-            db.add(mine)
-            db.flush()
-            unattached = self._add_upload(db, tmp_path, user.id, None, "unattached")
-            sibling_task = Task(id=798, user_id=user.id, title="Sibling")
-            db.add(sibling_task)
-            db.flush()
-            self._add_upload(db, tmp_path, user.id, sibling_task.id, "siblings")
-            db.commit()
+        scoped.db_session = db
+        scoped.owner_user_id = user.id
+        scoped.current_task_id = mine.id
 
-            scoped = TaskWorkspace(
-                id="web_task_797",
-                base_dir=str(tmp_path / "workspaces"),
-                scope_segments=("tenant-a",),
-            )
-            scoped.db_session = db
-            scoped.owner_user_id = user.id
-            scoped.current_task_id = mine.id
+        listing = WorkspaceFileTools(scoped).list_all_user_files(
+            include_workspace_files=False
+        )
 
-            listing = WorkspaceFileTools(scoped).list_all_user_files(
-                include_workspace_files=False
-            )
-
-            assert [f["filename"] for f in listing["files"]] == ["unattached.txt"]
-            # file_id resolution still refuses the unattached row in a scoped
-            # workspace; that gap is tracked separately and is not this listing's
-            # to hide by dropping the row.
-            assert scoped.resolve_file_id(unattached.file_id) is None
-        finally:
-            db.close()
-            engine.dispose()
+        assert [f["filename"] for f in listing["files"]] == ["unattached.txt"]
+        # file_id resolution still refuses the unattached row in a scoped
+        # workspace; that gap is tracked separately and is not this listing's
+        # to hide by dropping the row.
+        assert scoped.resolve_file_id(unattached.file_id) is None
 
     def test_vibe_listing_keeps_relative_workspace_paths(self, tmp_path):
         """Workspace rows keep a genuinely relative path; uploads keep none."""
@@ -1519,46 +1508,72 @@ class TestWorkspaceFileOperations:
         assert "relative_path" not in withheld
         assert "storage_path" not in withheld
 
-    def test_vibe_listing_narrows_by_the_authorized_task_id(self, tmp_path):
-        """Narrowing keys on current_task_id, not the workspace name.
+    def test_vibe_listing_narrows_by_the_authorized_task_id(self, tmp_path, memory_db):
+        """Narrowing keys on db_task_id, not the id parsed from the name.
 
-        A delegated workspace is named after the agent run while its db_task_id
-        is the parent task's, and reads authorize against the latter. Keying on
-        the parsed name would list rows no read can reach.
+        Those diverge whenever db_task_id is passed in, and reads authorize
+        against db_task_id, so keying on the parsed name would list rows no read
+        can reach.
         """
-        engine = create_engine(
-            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        db = memory_db
+        user = User(username="authorized-task-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        authorized = Task(id=799, user_id=user.id, title="Authorized task")
+        named = Task(id=800, user_id=user.id, title="Task the name parses to")
+        db.add_all([authorized, named])
+        db.flush()
+        self._add_upload(db, tmp_path, user.id, authorized.id, "authorizeds")
+        self._add_upload(db, tmp_path, user.id, named.id, "named-tasks")
+        db.commit()
+
+        workspace = TaskWorkspace(
+            id="web_task_800",
+            base_dir=str(tmp_path / "workspaces"),
+            db_task_id=authorized.id,
         )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        Base.metadata.create_all(bind=engine)
-        db = SessionLocal()
-        try:
-            user = User(username="delegated-user", password_hash="hash")
-            db.add(user)
-            db.flush()
-            parent = Task(id=799, user_id=user.id, title="Parent task")
-            named = Task(id=800, user_id=user.id, title="Task the name parses to")
-            db.add_all([parent, named])
-            db.flush()
-            self._add_upload(db, tmp_path, user.id, parent.id, "parents")
-            self._add_upload(db, tmp_path, user.id, named.id, "named-tasks")
-            db.commit()
+        workspace.db_session = db
+        workspace.owner_user_id = user.id
+        assert workspace.current_task_id == authorized.id
 
-            workspace = TaskWorkspace(
-                id="web_task_800", base_dir=str(tmp_path / "workspaces")
-            )
-            workspace.db_session = db
-            workspace.owner_user_id = user.id
-            workspace.current_task_id = parent.id
+        listing = WorkspaceFileTools(workspace).list_all_user_files(
+            include_workspace_files=False
+        )
 
-            listing = WorkspaceFileTools(workspace).list_all_user_files(
-                include_workspace_files=False
-            )
+        assert [f["filename"] for f in listing["files"]] == ["authorizeds.txt"]
 
-            assert [f["filename"] for f in listing["files"]] == ["parents.txt"]
-        finally:
-            db.close()
-            engine.dispose()
+    def test_vibe_listing_is_empty_for_a_delegated_workspace(self, tmp_path, memory_db):
+        """A delegated workspace lists no uploads at all, before and after.
+
+        Its id is ``agent_<id>_<hex>``, which parses to no task id, so the
+        listing never reaches the database branch. Pinned because the narrowing
+        above is documented in terms of delegated workspaces and this is what
+        they actually do.
+        """
+        db = memory_db
+        user = User(username="delegating-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        parent = Task(id=801, user_id=user.id, title="Parent task")
+        db.add(parent)
+        db.flush()
+        self._add_upload(db, tmp_path, user.id, parent.id, "parents")
+        db.commit()
+
+        delegated = TaskWorkspace(
+            id="agent_7_9fbc2ad1",
+            base_dir=str(tmp_path / "workspaces"),
+            db_task_id=parent.id,
+        )
+        delegated.db_session = db
+        delegated.owner_user_id = user.id
+
+        listing = WorkspaceFileTools(delegated).list_all_user_files(
+            include_workspace_files=False
+        )
+
+        assert listing["files"] == []
+        assert listing["total_count"] == 0
 
     def test_list_all_user_files_exclude_workspace(self, tmp_path):
         """Test list_all_user_files can exclude workspace files."""
