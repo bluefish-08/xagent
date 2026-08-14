@@ -160,10 +160,55 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             offset: Number of files to skip for pagination (default: 0)
 
         Returns:
-            Dictionary with list of all user files with metadata including file_id,
-            filename, storage_path, size, mime_type, etc.
+            Dictionary with list of all user files the model may open, with
+            metadata including file_id, filename, size, mime_type. See
+            :meth:`_openable_without_paths` for what is withheld.
         """
-        return self.inner.list_all_user_files(include_workspace_files, limit, offset)
+        listing = self.inner.list_all_user_files(include_workspace_files, limit, offset)
+        return self._openable_without_paths(listing)
+
+    def _openable_without_paths(self, listing: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only entries the model can open, and drop absolute paths.
+
+        Paths go first: the user's upload root is whitelisted, so an absolute
+        path here resolves into any sibling task's workspace. That leaves
+        file_id as the way in, and file_id resolution refuses another task's
+        record whenever the workspace has an owner. Listing rows that can only
+        fail wastes turns — the model reads the promising filename, retries it
+        by name, by id, and through the shell before giving up. The core
+        listing keeps those rows for callers that hold their own authority.
+        """
+        files = listing.get("files")
+        if not isinstance(files, list):
+            return listing
+
+        sanitized = []
+        for entry in files:
+            if not isinstance(entry, dict):
+                sanitized.append(entry)
+                continue
+            if not self._entry_is_openable(entry):
+                continue
+            visible = {
+                key: value
+                for key, value in entry.items()
+                if key not in ("storage_path", "relative_path")
+            }
+            if entry.get("in_current_workspace") and entry.get("relative_path"):
+                visible["relative_path"] = entry["relative_path"]
+            sanitized.append(visible)
+        return {**listing, "files": sanitized, "total_count": len(sanitized)}
+
+    def _entry_is_openable(self, entry: Dict[str, Any]) -> bool:
+        """Mirror the task check in TaskWorkspace._file_record_allowed_for_workspace."""
+        if entry.get("in_current_workspace"):
+            return True
+        if getattr(self.workspace, "owner_user_id", None) is None:
+            return True
+        task_id = entry.get("task_id")
+        if task_id is None:
+            return True
+        return bool(task_id == getattr(self.workspace, "current_task_id", None))
 
     def get_tools(self) -> List[FunctionTool]:
         """Get all tool instances"""
@@ -241,7 +286,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List all user files across all workspaces and uploaded files. Supports pagination and filtering. Returns file_id, filename, storage_path, size, mime_type, and whether files are in current workspace.",
+                description="List the user's files that this task can open: the current workspace's files and the user's unattached uploads. Other tasks' files are not listed and cannot be read. Supports pagination and filtering. Returns file_id, filename, size, mime_type, and whether files are in current workspace; open a listed file by passing its file_id to read_file.",
             ),
             FileTool(
                 self.edit_file,

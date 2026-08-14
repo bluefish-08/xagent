@@ -517,6 +517,41 @@ class TestWorkspaceFileOperations:
             context.current_record.file_id
         ]
 
+    def test_vibe_listing_withholds_paths_outside_the_workspace(
+        self, public_file_scope_context
+    ):
+        context = public_file_scope_context
+        tools = WorkspaceFileTools(context.workspace)
+
+        result = tools.list_all_user_files(include_workspace_files=False)
+
+        assert result["files"], "expected the current record in the listing"
+        for entry in result["files"]:
+            assert "storage_path" not in entry
+            assert entry["file_id"]
+            if not entry["in_current_workspace"]:
+                assert "relative_path" not in entry
+        # The core listing still carries paths; only the model-facing adapter drops
+        # them, since its dedup logic reads storage_path.
+        assert all(
+            "storage_path" in entry
+            for entry in context.ops.list_all_user_files(include_workspace_files=False)[
+                "files"
+            ]
+        )
+
+    def test_list_all_user_files_description_states_the_limit(
+        self, public_file_scope_context
+    ):
+        tools = WorkspaceFileTools(public_file_scope_context.workspace)
+        description = next(
+            tool
+            for tool in tools.get_tools()
+            if tool.metadata.name == "list_all_user_files"
+        ).description
+
+        assert "Other tasks' files are not listed and cannot be read" in description
+
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
     ):
@@ -1211,6 +1246,94 @@ class TestWorkspaceFileOperations:
             assert second_page["total_count"] == DEFAULT_USER_FILE_LIST_LIMIT + 5
             assert first_page["limit"] == DEFAULT_USER_FILE_LIST_LIMIT
             assert second_page["offset"] == DEFAULT_USER_FILE_LIST_LIMIT
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_vibe_listing_omits_other_tasks(self, tmp_path):
+        """The model-facing listing shows only what it can actually open.
+
+        With an owner set, resolve_file_id refuses another task's record, and
+        the adapter withholds paths, so such a row can only produce failed
+        reads. The core listing keeps the row (pinned by
+        test_unmarked_historical_file_operation_behavior_is_unchanged); only
+        the adapter drops it. An ownerless workspace does resolve those
+        records, so it keeps seeing them — covered below.
+        """
+        engine = create_engine(
+            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        )
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+        try:
+            user = User(username="sibling-user", password_hash="hash")
+            db.add(user)
+            db.flush()
+            mine = Task(id=791, user_id=user.id, title="Current task")
+            other = Task(id=792, user_id=user.id, title="Sibling task")
+            db.add_all([mine, other])
+            db.flush()
+
+            records = {}
+            for label, task_id in (
+                ("mine", mine.id),
+                ("sibling", other.id),
+                ("unattached", None),
+            ):
+                path = tmp_path / "uploads" / f"{label}.txt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(label, encoding="utf-8")
+                record = UploadedFile(
+                    user_id=user.id,
+                    task_id=task_id,
+                    filename=path.name,
+                    storage_path=str(path),
+                    mime_type="text/plain",
+                    file_size=path.stat().st_size,
+                )
+                db.add(record)
+                records[label] = record
+            db.commit()
+
+            workspace = TaskWorkspace(
+                id="web_task_791", base_dir=str(tmp_path / "workspaces")
+            )
+            workspace.db_session = db
+            workspace.owner_user_id = user.id
+            workspace.current_task_id = mine.id
+
+            listed = WorkspaceFileTools(workspace).list_all_user_files(
+                include_workspace_files=False
+            )
+            listed_names = {file_info["filename"] for file_info in listed["files"]}
+
+            assert listed_names == {"mine.txt", "unattached.txt"}
+            assert listed["total_count"] == 2
+            # The omitted row is exactly the one file_id resolution would refuse.
+            assert workspace.resolve_file_id(records["sibling"].file_id) is None
+            assert workspace.resolve_file_id(records["unattached"].file_id) is not None
+            # Core keeps the row: other callers carry their own authority, and
+            # test_unmarked_historical_file_operation_behavior_is_unchanged pins it.
+            core_names = {
+                file_info["filename"]
+                for file_info in WorkspaceFileOperations(workspace).list_all_user_files(
+                    include_workspace_files=False
+                )["files"]
+            }
+            assert "sibling.txt" in core_names
+
+            ownerless = TaskWorkspace(
+                id="web_task_791", base_dir=str(tmp_path / "workspaces")
+            )
+            ownerless.db_session = db
+            ownerless_listing = WorkspaceFileTools(ownerless).list_all_user_files(
+                include_workspace_files=False
+            )
+            assert {
+                file_info["filename"] for file_info in ownerless_listing["files"]
+            } == {"mine.txt", "sibling.txt", "unattached.txt"}
+            assert ownerless.resolve_file_id(records["sibling"].file_id) is not None
         finally:
             db.close()
             engine.dispose()
