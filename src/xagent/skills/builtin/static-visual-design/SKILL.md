@@ -48,9 +48,10 @@ Identify the minimum useful brief before generating:
 - output channel and target aspect ratio or dimensions;
 - available logo, QR code, product, brand-guide, campaign, and reference assets.
 
-When available, ground creative direction in real brand materials, product
-facts, customer language, prior winning creative, and performance evidence.
-Treat those inputs as evidence, not as permission to invent adjacent claims.
+When available, ground creative direction in real brand materials, product facts,
+customer language, prior winning creative, and performance evidence, each from a
+source this skill sanctions below. Treat those inputs as evidence, not as
+permission to invent adjacent claims.
 
 Distinguish exact supplied copy from facts that still need copywriting. Preserve
 copy the user marks as exact. When the user supplies facts but not final wording,
@@ -326,35 +327,48 @@ Inspect every candidate with `understand_media`, checking:
 - accidental pseudo-logos, fake QR codes, watermarks, malformed objects, or
   unrelated lettering.
 
-While the repair budget below lasts, automatically reject contact sheets,
-multiple ads in one image, duplicated layouts or headlines, fake or duplicated
-logos, wrong or invented copy, unverified claims, unclear hierarchy, and clipped
-or overlapping essentials. Do not rationalize these as stylistic choices — and do
-not treat the budget running out as a rationalization either; that is the point at
-which you name the defect instead of accepting it.
+Some failures are coverage failures: a contact sheet or several ads in one image
+where separate assets were required, a required asset never rendered, or a layer
+the specification called for dropped from the render entirely. These are not
+budgeted — render what is missing.
+
+The rest are quality failures: duplicated layouts or headlines, fake or
+duplicated logos, wrong or invented copy, unverified claims, unclear hierarchy,
+clipped or overlapping essentials. Reject them while the repair budget lasts, and
+never rationalize them as stylistic choices. When the budget runs out, name the
+defect in your answer rather than accepting it silently.
 
 Use `edit_image` only to refine a strong, single-canvas candidate with a
 localized defect. While the budget lasts, regenerate from the locked design
 specification when the organizing idea, focal subject, hierarchy, copy load, or
 canvas structure is wrong, or when several text errors appear. Correct permitted
-copy errors and inspect again. A successful generation call alone is not proof that the asset
-is finished. Compare the candidates side by side and discard the safest generic
-option even when it is technically clean.
+copy errors and inspect again. A successful generation call alone is not proof
+that the asset is finished. Compare the candidates side by side and discard the
+safest generic option even when it is technically clean.
 
-Spend at most two repair attempts on the same asset, counting every
-regeneration and every `edit_image` call alike. If the asset still fails
-inspection after that, stop and deliver the best candidate you have. Do not keep
-looping in the hope that the next render is clean.
+### Required assets, coverage, and repairs
 
-The whole task also has a budget of four repair attempts in total. The first
-render of every direction and placement the brief actually calls for is free —
-covering a requested placement is not a repair. What counts is each re-render and
-each `edit_image` call after that first candidate, whether you frame it as a
-repair, a variant, or a fresh direction; directions and placements you invented
-yourself are not free and do not extend the budget either. A different placement,
-size, or crop of the same design direction is not a new asset and does not reset
-either count. Once the task budget is spent, stop repairing everything and
-deliver the best candidates you have, whatever the per-asset count says.
+Three definitions govern every rule below, so that no rule has to restate them.
+
+A **required asset** is one deliverable this work must produce: one design
+direction rendered at one placement, either named by the brief or required by
+this skill — the two or three directions an open brief calls for, and the
+placements this skill lists for the channel. Anything beyond those you chose to
+add is an **optional asset**.
+
+**Coverage** is rendering a required asset for the first time. Coverage is never
+budgeted; it is what the deliverable is.
+
+A **repair** is any `generate_image` or `edit_image` call on an asset that
+already has a candidate. Repairs are budgeted: at most two on the same asset, and
+four across the run. An optional asset costs a repair for every call it takes,
+including its first — so adding directions nobody asked for spends the budget
+that fixing the required ones would need.
+
+When the per-asset limit is reached, stop repairing that asset and deliver its
+best candidate. When the run budget is spent, stop repairing altogether and
+deliver the best candidates you have, whatever the per-asset counts say. Neither
+limit ever stops you from covering a required asset.
 
 Count within the run you are in; no counter is shared between plan steps. That is
 a limitation, not an allowance. Do not spend a step's fresh budget on an asset an
@@ -368,8 +382,10 @@ Use official logos and other brand assets as generation or editing references
 when the image model supports them. Inspect the result closely. Never add a
 second logo over a generated pseudo-logo, and never treat a generic typed brand
 name as proof of fidelity; while the repair budget lasts, remove the artifact or
-regenerate the creative, and once it is spent, hand the candidate back with the
-unfaithful mark named.
+regenerate the creative. Once it is spent, hand the candidate back with the
+unfaithful mark named — and, because a brand-specific final still requires a
+verified logo, hand it back as a concept draft, not as the finished branded
+asset.
 
 Do not add a deterministic compositing step for ordinary branded visuals.
 Apply the identity-asset rule above whenever exact reproduction is required;
@@ -382,35 +398,48 @@ layout.
 
 ## Apply the completion gate
 
-Do not enter `final_answer` until every requested visual exists as a successful
-tool result and the final files pass inspection — or until the repair budget
-above is spent, in which case deliver the best candidate you have and name the
-remaining defects. A successful `generate_image`
-or `edit_image` call is never completion evidence by itself, in any execution
-form: when render work is defined as a plan step, the step's completion
-criteria and termination condition must require that the result passed
-`understand_media` inspection with no automatic rejection — never "the
-generation tool returned success". When no plan is involved, apply the same
-rule to the direct decision to stop. While the repair budget lasts, reject fake,
-duplicated, misspelled, or visibly distorted identity marks in a brand-specific
-final. When the user explicitly requires an exact logo, a brand name rendered as
+The gate has two halves and the budget touches only one of them.
+
+**Coverage is unconditional.** Do not enter `final_answer` until every required
+asset exists as a successful tool result. A spent budget is never a reason an
+asset is missing, because coverage is not budgeted: if one is missing, render it.
+A brand-specific final also needs its verified logo — when none was ever
+obtained, ask the user rather than shipping a substitute.
+
+**Quality is what the budget releases.** Every asset should pass
+`understand_media` inspection with no automatic rejection; a successful
+`generate_image` or `edit_image` call is never completion evidence by itself.
+When the budget is spent and an asset still fails, deliver its best candidate and
+name the defect concretely — which text is misspelled, which element is clipped,
+which logo is not authentic — and let the user decide whether to spend another
+round. Handing back a flawed asset with its flaws stated is a valid outcome;
+looping until the task runs out of iterations is not. While the budget lasts,
+keep rejecting: identity marks that are fake, duplicated, misspelled or visibly
+distorted; output that is merely polished but generic, that carries two
+disconnected visual ideas, or that weakens the supplied fact into awkward copy.
+When the user explicitly requires an exact logo, a brand name rendered as
 ordinary text does not satisfy the requirement.
 
-While the repair budget lasts, reject or continue iterating on an output that is
-merely polished but generic, uses two disconnected visual ideas, weakens the
-supplied fact into awkward copy, omits a required brand asset, or provides fewer
-meaningful directions than the open brief calls for. Tool success is evidence
-that an image was created, not that the campaign deliverable is complete. None of
-these reasons survives the budget: once it is spent, hand back what you have with
-the shortfall named.
+When render work is a plan step, write both halves into the step's completion
+criteria and termination condition, so that the step completes either on a clean
+pass or on a spent budget with the defects named. A stop rule you were handed
+cannot be edited: when it admits only a clean pass and the budget is spent,
+finish the step and report the condition as unmet with the defects named, rather
+than repairing past the budget to satisfy it. When no plan is involved, apply the
+same rule to the direct decision to stop.
 
-The gate bounds how many attempts you make, not how long you may loop. Once the
-repair budget is spent and an asset still fails inspection, deliver the best
-candidate you have and name the remaining defects concretely — which
-text is misspelled, which element is clipped, which logo is not authentic — and
-let the user decide whether to regenerate. Handing back a flawed asset with the
-flaws stated is a valid outcome; looping until the task runs out of iterations
-is not.
+A completion check may ask whether work remains before you finish. Answer it for
+what the budget settled — repairs are done, coverage is complete — by choosing
+the final answer and leaving the decision's missing-verification field empty:
+defects written there read as outstanding work and reopen the loop the budget just
+closed. The defects belong in the answer text, where the user reads them, with the
+answer's outcome `partial` rather than `completed`.
+
+That check is the one inside your own run. When your run is one step of a plan, a
+separate assessment decides whether the whole task is complete; it cannot see this
+skill, it can send work back for more rounds, and it gives up after a few. Name
+the defects in the step result anyway, but do not rely on that assessment to
+accept them — complete coverage is what carries the task through it.
 
 ## Deliver
 

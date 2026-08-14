@@ -261,8 +261,8 @@ data streams, glowing faces, or orbiting dots.
 
 ## Review like a creative director
 
-Automatic rejection overrides subjective scoring. While the main skill's repair
-budget lasts, reject a candidate when it has any of these failures:
+Automatic rejection overrides subjective scoring. Reject a candidate when it has
+any of these failures, within the limits the main skill sets on repairs:
 
 - more than one ad, a contact sheet, multiple panels, or presentation mockups
   when one asset was requested;
@@ -302,8 +302,10 @@ contact-sheet output, duplicated layout, wrong hierarchy, excessive copy,
 generic concept, wrong focal subject, incoherent visual metaphor, or multiple
 text errors. Editing a structurally wrong image usually compounds the failure.
 
-Every rejection and every edit-or-regenerate decision in this document is
-subordinate to the repair budget in the main skill: edits count against it just
-as regenerations do, and once it is spent, none of the failures listed here
-justifies another render. Deliver the best candidate and name the defects
-instead.
+Sort these rejections the way the main skill does. A failure that leaves a
+required asset missing or merged into another image is a coverage failure: it is
+not budgeted and must be fixed. Every other rejection here, and every
+edit-or-regenerate decision, is a quality failure and is subordinate to the main
+skill's repair budget — edits count against it just as regenerations do, and once
+it is spent, none of them justifies another render. Deliver the best candidate and
+name the defects instead.

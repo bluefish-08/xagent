@@ -528,11 +528,17 @@ class TestWorkspaceFileOperations:
         ).description
 
         assert "attachments are injected per turn" in description
-        assert "Do not call this to discover the current task's inputs" in description
+        # "turn", not "task": an earlier turn's attachment of this task is the one
+        # sanctioned reason to call this.
+        assert "Do not call this to discover the current turn's inputs" in description
         # There is no search parameter; promising one would have the model expect
         # a lookup the callable cannot do.
         assert "there is no search parameter" in description
         assert "filtering" not in description
+        # Workspace rows are appended outside limit/offset, so paging advice that
+        # ignores them sends the model round in circles.
+        assert "raise the offset before concluding" in description
+        assert "appended to every page and are not paginated" in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context

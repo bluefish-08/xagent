@@ -497,10 +497,14 @@ class TestVisionToolUnderstandMedia:
         ).description
 
         assert "accepts images and videos only" in description
-        assert (
-            "Judge an unfamiliar file by the extension in its filename" in description
-        )
+        assert "unfamiliar file by the extension" in description
         assert "text or code with read_file" in description
+        # SVG is text by extension, but this tool is the sanctioned way to inspect
+        # the design it encodes, so the extension rule needs the carve-out.
+        assert "plus SVG" in description
+        # The incident behind this: a bare file_id has no filename to judge.
+        assert "bare file_id carries no" in description
+        assert "skip the id rather than" in description
 
     @pytest.mark.asyncio
     async def test_understand_svg_sends_source_without_rasterizing(

@@ -54,24 +54,33 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Do not enter `final_answer`" in content
     assert "Return only final PNG or JPEG files" in content
     assert "The user's other tasks and earlier outputs are not a source" in content
-    assert "which you recover by finding it with `list_all_user_files`" in content
-    assert "Spend at most two repair attempts on the same asset" in content
-    assert "counting every regeneration and every `edit_image` call alike" in content
-    assert "budget of four repair attempts in total" in content
-    assert "is not a new asset and does not reset either count" in content
-    # A requested placement's first render is coverage, not a repair; charging it
-    # spends the budget before any quality work happens.
-    assert "The first render of every direction and placement" in content
-    assert (
-        "whether you frame it as a repair, a variant, or a fresh direction" in content
-    )
-    assert "let the user decide whether to regenerate" in content
-    # Every instruction that can drive another round needs the budget attached to
-    # it; an unconditional one outweighs a carve-out stated elsewhere.
-    assert "or until the repair budget" in content
-    assert "While the repair budget lasts, reject or continue iterating" in content
-    assert "While the repair budget lasts, reject fake," in content
-    assert "None of these reasons survives the budget" in content
+    assert "recover by finding it with `list_all_user_files`" in content
+    # Three definitions the rules below reference instead of restating. Restating
+    # them is how eight sites drifted into contradicting each other.
+    assert "A **required asset** is one deliverable" in content
+    assert "Coverage is never" in content
+    assert "budgeted; it is what the deliverable is" in content
+    assert "any `generate_image` or `edit_image` call on an asset that" in content
+    assert "at most two on the same asset, and" in content
+    assert "four across the run" in content
+    # Optional assets cost from their first call, or self-invented directions are
+    # neither coverage nor repair and nothing bounds them.
+    assert "An optional asset costs a repair for every call it takes" in content
+    # Two gates. Coverage never yields to the budget; quality does.
+    assert "**Coverage is unconditional.**" in content
+    assert "spent budget is never a reason an asset is missing" in content
+    assert "**Quality is what the budget releases.**" in content
+    # Coverage failures must not sit in the budget-conditional list.
+    assert "Some failures are coverage failures" in content
+    assert "These are not budgeted" in content
+    # The hand-back has to survive the completion check, and the two fields live
+    # on two different tools.
+    assert "leaving the decision's missing-verification field empty" in content
+    assert "outcome `partial`" in content
+    assert "it gives up after a few" in content
+    # A handed-down stop rule cannot be edited, so the step reports it unmet.
+    assert "report the condition as unmet" in content
+    assert "let the user decide whether to spend another round" in content
 
 
 def test_static_visual_design_includes_art_direction_reference() -> None:
@@ -93,8 +102,12 @@ def test_static_visual_design_includes_art_direction_reference() -> None:
     assert "Design for a three-pass read" in content
     assert "Follow the main skill's one-canvas generation contract" in content
     assert "Automatic rejection overrides subjective scoring" in content
-    # This reference is mandatory reading and lands in the same context as the
-    # skill, so its rejection rules need the budget too — unconditional ones here
-    # outweigh the carve-outs in SKILL.md.
-    assert "While the main skill's repair budget lasts, reject a candidate" in content
-    assert "subordinate to the repair budget in the main skill" in content
+    # Mandatory reading that lands in the same context as the skill, so its
+    # rejection rules need the budget too.
+    assert "within the limits the main skill sets on repairs" in content
+    # Coverage failures here must not inherit the budget the quality ones do.
+    assert "A failure that leaves a required asset missing" in content
+    assert "not budgeted and must be fixed" in content
+    assert (
+        "subordinate to the main\nskill's repair budget" in reference_path.read_text()
+    )

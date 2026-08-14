@@ -311,9 +311,13 @@ Other vision models use chronologically sampled, timestamped frames.
 
 Never pass a video to detect_objects or encode it as image_url; use this tool.
 
-This tool accepts images and videos only; it is not a way to find out what a
-file is. Judge an unfamiliar file by the extension in its filename, and read
-text or code with read_file.
+This tool accepts images and videos only — plus SVG, which is listed above and
+belongs here whenever the question is about the design it encodes. It is not a way
+to find out what a file is: judge an unfamiliar file by the extension in its
+filename, and read other text or code with read_file. A bare file_id carries no
+filename: take the name from the same task's get_file_info or from the file
+listing that gave you the id, and if neither resolves it, skip the id rather than
+probing it here.
                 """.strip(),
             ),
             VisionFunctionTool(
