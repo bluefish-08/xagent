@@ -302,10 +302,10 @@ contact-sheet output, duplicated layout, wrong hierarchy, excessive copy,
 generic concept, wrong focal subject, incoherent visual metaphor, or multiple
 text errors. Editing a structurally wrong image usually compounds the failure.
 
-Sort these rejections the way the main skill does. A failure that leaves a
-required asset missing or merged into another image is a coverage failure: it is
-not budgeted and must be fixed. Every other rejection here, and every
-edit-or-regenerate decision, is a quality failure and is subordinate to the main
+Every rejection in this document is a quality failure by the main skill's
+definitions, and so is every edit-or-regenerate decision here: each one describes
+a candidate that exists and is wrong. They are therefore subordinate to that
 skill's repair budget — edits count against it just as regenerations do, and once
 it is spent, none of them justifies another render. Deliver the best candidate and
-name the defects instead.
+name the defects instead. Only a required asset with no candidate at all is
+coverage, and the main skill governs that.

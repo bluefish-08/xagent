@@ -47,7 +47,7 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "two or three genuinely different communication angles" in content
     assert "one finished placement on one continuous canvas" in content
     assert "a brand-specific final requires a verified logo" in content
-    assert "This runtime does not provide deterministic compositing" in content
+    assert "No image tool composites deterministically" in content
     assert "download_web_asset" not in content
     assert "SVG is source text" not in content
     assert "Do not use HTML/CSS plus browser screenshots" in content
@@ -55,31 +55,23 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "Return only final PNG or JPEG files" in content
     assert "The user's other tasks and earlier outputs are not a source" in content
     assert "recover by finding it with `list_all_user_files`" in content
-    # Three definitions the rules below reference instead of restating. Restating
-    # them is how eight sites drifted into contradicting each other.
-    assert "A **required asset** is one deliverable" in content
-    assert "Coverage is never" in content
-    assert "budgeted; it is what the deliverable is" in content
+    # One anchor per behavior an earlier round had to fix and a later rewrite lost.
+    # Coverage means absent, not wrong — otherwise any defect can be relabeled
+    # into an unbudgeted render.
+    assert "producing the first candidate for a required asset that has none" in content
+    assert "Only one failure is a coverage failure" in content
+    assert "do not reclassify a defect as missing coverage" in content
+    # Repairs are what the budget counts, and three relabeling routes stay closed.
     assert "any `generate_image` or `edit_image` call on an asset that" in content
-    assert "at most two on the same asset, and" in content
-    assert "four across the run" in content
-    # Optional assets cost from their first call, or self-invented directions are
-    # neither coverage nor repair and nothing bounds them.
-    assert "An optional asset costs a repair for every call it takes" in content
-    # Two gates. Coverage never yields to the budget; quality does.
+    assert "any call on an optional asset, including its first" in content
+    assert "even at another required placement" in content
+    # The gate's coverage half never yields to the budget.
     assert "**Coverage is unconditional.**" in content
-    assert "spent budget is never a reason an asset is missing" in content
-    assert "**Quality is what the budget releases.**" in content
-    # Coverage failures must not sit in the budget-conditional list.
-    assert "Some failures are coverage failures" in content
-    assert "These are not budgeted" in content
-    # The hand-back has to survive the completion check, and the two fields live
-    # on two different tools.
+    # Two rejection reasons a rewrite dropped, and the brand rule they serve.
+    assert "omits a required brand asset" in content
+    assert "labeled a concept draft" in content
+    # The hand-back has to pass the completion check that precedes it.
     assert "leaving the decision's missing-verification field empty" in content
-    assert "outcome `partial`" in content
-    assert "it gives up after a few" in content
-    # A handed-down stop rule cannot be edited, so the step reports it unmet.
-    assert "report the condition as unmet" in content
     assert "let the user decide whether to spend another round" in content
 
 
@@ -105,9 +97,8 @@ def test_static_visual_design_includes_art_direction_reference() -> None:
     # Mandatory reading that lands in the same context as the skill, so its
     # rejection rules need the budget too.
     assert "within the limits the main skill sets on repairs" in content
-    # Coverage failures here must not inherit the budget the quality ones do.
-    assert "A failure that leaves a required asset missing" in content
-    assert "not budgeted and must be fixed" in content
-    assert (
-        "subordinate to the main\nskill's repair budget" in reference_path.read_text()
-    )
+    # Every rejection here is a quality failure by the skill's definitions, so the
+    # budget governs all of them; only an absent asset is coverage.
+    assert "Every rejection in this document is a quality failure" in content
+    assert "subordinate to that skill's repair budget" in content
+    assert "Only a required asset with no candidate at all is coverage" in content

@@ -202,11 +202,11 @@ Treat identity-critical assets differently:
   prompt does not attach it. Still do not trust a generated or edited recreation
   as the final logo.
 - Treat QR codes, certification marks, sponsor marks, UI screenshots, and other
-  exact assets as non-generative inputs. This runtime does not provide
-  deterministic compositing, and generative rendering cannot preserve these
-  assets pixel-for-pixel. If the final placement requires exact reproduction,
-  explain the limitation and ask the user to arrange deterministic
-  post-processing; never claim the generated candidate is an exact final.
+  exact assets as non-generative inputs: generative rendering cannot preserve them
+  pixel-for-pixel. No image tool composites deterministically. If the final
+  placement requires exact reproduction, say so plainly — composite it yourself
+  only when a code-execution tool is available and the user asked for an exact
+  final, and never claim a generated candidate is one.
 - Unless the user explicitly requests an unbranded or logo-free concept, a
   brand-specific final requires a verified logo. If none is available, ask for
   it and keep any interim output clearly labeled as a concept draft. Do not mark
@@ -327,16 +327,17 @@ Inspect every candidate with `understand_media`, checking:
 - accidental pseudo-logos, fake QR codes, watermarks, malformed objects, or
   unrelated lettering.
 
-Some failures are coverage failures: a contact sheet or several ads in one image
-where separate assets were required, a required asset never rendered, or a layer
-the specification called for dropped from the render entirely. These are not
-budgeted — render what is missing.
+Only one failure is a coverage failure: a required asset with no candidate at all.
+That one is not budgeted — render it.
 
-The rest are quality failures: duplicated layouts or headlines, fake or
-duplicated logos, wrong or invented copy, unverified claims, unclear hierarchy,
-clipped or overlapping essentials. Reject them while the repair budget lasts, and
-never rationalize them as stylistic choices. When the budget runs out, name the
-defect in your answer rather than accepting it silently.
+Everything else is a quality failure, including every structural one: a contact
+sheet or several ads in one image, duplicated layouts or headlines, fake or
+duplicated logos, a missing required brand asset, a specification layer the render
+dropped, wrong or invented copy, unverified claims, unclear hierarchy, clipped or
+overlapping essentials. Reject them while the repair budget lasts, and never
+rationalize them as stylistic choices. When the budget runs out, name the defect
+in your answer rather than accepting it silently — and do not reclassify a defect
+as missing coverage to buy another render.
 
 Use `edit_image` only to refine a strong, single-canvas candidate with a
 localized defect. While the budget lasts, regenerate from the locked design
@@ -351,24 +352,29 @@ safest generic option even when it is technically clean.
 Three definitions govern every rule below, so that no rule has to restate them.
 
 A **required asset** is one deliverable this work must produce: one design
-direction rendered at one placement, either named by the brief or required by
-this skill — the two or three directions an open brief calls for, and the
-placements this skill lists for the channel. Anything beyond those you chose to
-add is an **optional asset**.
+direction at one placement, either named by the brief or required by this skill —
+the two or three directions an open brief calls for, at the placements this skill
+lists for the channel. Anything past that count is an **optional asset**, whether
+you frame it as another direction, another variant, or another crop.
 
-**Coverage** is rendering a required asset for the first time. Coverage is never
-budgeted; it is what the deliverable is.
+**Coverage** is producing the first candidate for a required asset that has none.
+Coverage is never budgeted; it is what the deliverable is. Coverage means an asset
+is *absent* — not that an existing candidate is wrong, however badly. A render
+that merged several required assets into one image leaves the others absent, so
+rendering those is coverage; fixing the merged image itself is not.
 
-A **repair** is any `generate_image` or `edit_image` call on an asset that
-already has a candidate. Repairs are budgeted: at most two on the same asset, and
-four across the run. An optional asset costs a repair for every call it takes,
-including its first — so adding directions nobody asked for spends the budget
-that fixing the required ones would need.
+A **repair** is any `generate_image` or `edit_image` call on an asset that already
+has a candidate. Repairs are budgeted: at most two on the same asset, and four
+across the run. Three things also cost a repair, so that no relabeling buys a free
+render: any call on an optional asset, including its first; re-rendering a
+direction you already delivered in order to get a better version of it, even at
+another required placement; and any call you would otherwise describe as a
+variant, a fresh angle, or a retry.
 
 When the per-asset limit is reached, stop repairing that asset and deliver its
 best candidate. When the run budget is spent, stop repairing altogether and
 deliver the best candidates you have, whatever the per-asset counts say. Neither
-limit ever stops you from covering a required asset.
+limit ever stops you from covering a required asset that has no candidate at all.
 
 Count within the run you are in; no counter is shared between plan steps. That is
 a limitation, not an allowance. Do not spend a step's fresh budget on an asset an
@@ -401,10 +407,12 @@ layout.
 The gate has two halves and the budget touches only one of them.
 
 **Coverage is unconditional.** Do not enter `final_answer` until every required
-asset exists as a successful tool result. A spent budget is never a reason an
-asset is missing, because coverage is not budgeted: if one is missing, render it.
-A brand-specific final also needs its verified logo — when none was ever
-obtained, ask the user rather than shipping a substitute.
+asset exists as a successful tool result, including every direction and placement
+the brief or this skill asks for. A spent budget is never a reason an asset is
+absent, because coverage is not budgeted: if one has no candidate, render it. A
+brand-specific final also needs its verified logo — when none was ever obtained,
+ask the user rather than shipping a substitute, and keep the interim output
+labeled a concept draft rather than marking the branded asset complete.
 
 **Quality is what the budget releases.** Every asset should pass
 `understand_media` inspection with no automatic rejection; a successful
@@ -415,10 +423,10 @@ which logo is not authentic — and let the user decide whether to spend another
 round. Handing back a flawed asset with its flaws stated is a valid outcome;
 looping until the task runs out of iterations is not. While the budget lasts,
 keep rejecting: identity marks that are fake, duplicated, misspelled or visibly
-distorted; output that is merely polished but generic, that carries two
-disconnected visual ideas, or that weakens the supplied fact into awkward copy.
-When the user explicitly requires an exact logo, a brand name rendered as
-ordinary text does not satisfy the requirement.
+distorted; a render that omits a required brand asset; output that is merely
+polished but generic, that carries two disconnected visual ideas, or that weakens
+the supplied fact into awkward copy. When the user explicitly requires an exact
+logo, a brand name rendered as ordinary text does not satisfy the requirement.
 
 When render work is a plan step, write both halves into the step's completion
 criteria and termination condition, so that the step completes either on a clean
