@@ -531,16 +531,22 @@ class TestWorkspaceFileOperations:
         # "turn", not "task": an earlier turn's attachment of this task is the one
         # sanctioned reason to call this.
         assert "Do not call this to discover the current turn's inputs" in description
+        assert "to hunt for reference material nobody gave you" in description
+        assert "to take inventory before starting work" in description
         # There is no search parameter; promising one would have the model expect
         # a lookup the callable cannot do.
         assert "there is no search parameter" in description
         assert "filtering" not in description
         # Workspace rows are appended outside limit/offset, so paging advice that
         # ignores them sends the model round in circles.
+        assert "newest-first in slices of limit (50 by default)" in description
         assert "raise the offset before concluding" in description
+        # Without a terminal condition the model pages forever on an absent file.
+        assert "stop once offset reaches total_count" in description
         assert "appended to every page outside that slicing" in description
         # total_count 0 means the DB branch never ran, so paging cannot help.
         assert "paging further returns the same rows" in description
+        assert "Returns file_id, filename, storage_path, size, mime_type" in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
