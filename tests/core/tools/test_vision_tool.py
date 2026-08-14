@@ -504,6 +504,9 @@ class TestVisionToolUnderstandMedia:
         assert "plus SVG" in description
         # The incident behind this: a bare file_id has no filename to judge.
         assert "bare file_id carries no" in description
+        flat = " ".join(description.split())
+        assert "take the name from the same task's get_file_info" in flat
+        assert "from the file listing that gave you the id" in flat
         assert "skip the id rather than" in description
 
     @pytest.mark.asyncio

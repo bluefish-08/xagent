@@ -349,7 +349,8 @@ safest generic option even when it is technically clean.
 
 ### Required assets, coverage, and repairs
 
-Three definitions govern every rule below, so that no rule has to restate them.
+Three definitions govern every rule in this skill, so that no rule has to restate
+them.
 
 A **required asset** is one deliverable this work must produce: one design
 direction at one placement, either named by the brief or required by this skill —
