@@ -538,7 +538,9 @@ class TestWorkspaceFileOperations:
         # Workspace rows are appended outside limit/offset, so paging advice that
         # ignores them sends the model round in circles.
         assert "raise the offset before concluding" in description
-        assert "appended to every page and are not paginated" in description
+        assert "appended to every page outside that slicing" in description
+        # total_count 0 means the DB branch never ran, so paging cannot help.
+        assert "paging further returns the same rows" in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
