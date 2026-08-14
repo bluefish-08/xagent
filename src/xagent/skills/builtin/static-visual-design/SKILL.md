@@ -204,9 +204,8 @@ Treat identity-critical assets differently:
 - Treat QR codes, certification marks, sponsor marks, UI screenshots, and other
   exact assets as non-generative inputs: generative rendering cannot preserve them
   pixel-for-pixel. No image tool composites deterministically. If the final
-  placement requires exact reproduction, say so plainly — composite it yourself
-  only when a code-execution tool is available and the user asked for an exact
-  final, and never claim a generated candidate is one.
+  placement requires exact reproduction, say so plainly and ask the user to
+  arrange deterministic post-processing; never claim a generated candidate is one.
 - Unless the user explicitly requests an unbranded or logo-free concept, a
   brand-specific final requires a verified logo. If none is available, ask for
   it and keep any interim output clearly labeled as a concept draft. Do not mark
