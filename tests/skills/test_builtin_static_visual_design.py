@@ -48,6 +48,8 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "one finished placement on one continuous canvas" in content
     assert "a brand-specific final requires a verified logo" in content
     assert "No image tool composites deterministically" in content
+    # #942 removed logo_overlay as brittle; hand-rolled compositing is the same work.
+    assert "composite it yourself" not in content
     assert "download_web_asset" not in content
     assert "SVG is source text" not in content
     assert "Do not use HTML/CSS plus browser screenshots" in content
@@ -73,6 +75,10 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     # The hand-back has to pass the completion check that precedes it.
     assert "leaving the decision's missing-verification field empty" in content
     assert "let the user decide whether to spend another round" in content
+    assert "Reject them while the repair budget lasts" in content
+    assert "While the budget lasts, regenerate from the locked design" in content
+    assert "while the repair budget lasts, remove the artifact or" in content
+    assert "iterations is not. While the budget lasts," in content
 
 
 def test_static_visual_design_includes_art_direction_reference() -> None:
