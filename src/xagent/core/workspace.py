@@ -2071,9 +2071,9 @@ class TaskWorkspace:
             include_workspace_files: Whether to include current workspace files
             limit: Maximum number of files to return (default: 50)
             offset: Number of files to skip for pagination (default: 0)
-            openable_only: Drop records ``resolve_file_id`` would refuse, using the
-                same authority check, before counting and slicing. Callers that
-                cannot open a record gain nothing from paging past it.
+            openable_only: Narrow to this task's own uploads plus the unattached
+                ones, before counting and slicing. Off by default so callers that
+                carry their own authority keep the full listing.
 
         Returns:
             Dictionary with list of all user files with metadata including file_id,
