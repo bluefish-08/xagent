@@ -1325,9 +1325,9 @@ class TestWorkspaceFileOperations:
         )
         listed_names = {file_info["filename"] for file_info in listed["files"]}
 
-        assert listed_names == {"mine.txt", "unattached.txt"}
-        assert listed["total_count"] == 2
-        # The omitted row is exactly the one file_id resolution would refuse.
+        assert listed_names == {"mine.txt"}
+        assert listed["total_count"] == 1
+        # Both omitted rows stay readable by file_id; only the listing narrows.
         assert workspace.resolve_file_id(records["sibling"].file_id) is None
         assert workspace.resolve_file_id(records["unattached"].file_id) is not None
         # Core keeps the row: other callers carry their own authority, and
@@ -1370,6 +1370,49 @@ class TestWorkspaceFileOperations:
         db.add(record)
         db.flush()
         return record
+
+    def test_vibe_listing_omits_files_of_deleted_tasks(self, tmp_path, memory_db):
+        """Deleting a task detaches its files, and those must not resurface.
+
+        Task deletion nulls uploaded_files.task_id rather than removing the
+        rows, so a task-less row is either a draft attachment (bound before the
+        agent runs) or the leftovers of a deleted task. Listing them put another
+        task's outputs in front of the model, which is what this listing exists
+        to stop.
+        """
+        db = memory_db
+        user = User(username="deleting-user", password_hash="hash")
+        db.add(user)
+        db.flush()
+        mine = Task(id=805, user_id=user.id, title="Current task")
+        doomed = Task(id=806, user_id=user.id, title="Task about to be deleted")
+        db.add_all([mine, doomed])
+        db.flush()
+        self._add_upload(db, tmp_path, user.id, mine.id, "mine")
+        detached = self._add_upload(db, tmp_path, user.id, doomed.id, "leftovers")
+        db.commit()
+
+        # What deletion does to the rows: detach, not delete.
+        db.query(UploadedFile).filter(UploadedFile.task_id == doomed.id).update(
+            {UploadedFile.task_id: None}, synchronize_session=False
+        )
+        db.query(Task).filter(Task.id == doomed.id).delete(synchronize_session=False)
+        db.commit()
+
+        workspace = TaskWorkspace(
+            id="web_task_805", base_dir=str(tmp_path / "workspaces")
+        )
+        workspace.db_session = db
+        workspace.owner_user_id = user.id
+        workspace.current_task_id = mine.id
+
+        listing = WorkspaceFileTools(workspace).list_all_user_files(
+            include_workspace_files=False
+        )
+
+        assert [f["filename"] for f in listing["files"]] == ["mine.txt"]
+        # The row is still readable by file_id; only the listing narrows.
+        assert workspace.resolve_file_id(detached.file_id) is not None
 
     def test_vibe_listing_pages_past_unopenable_rows(self, tmp_path, memory_db):
         """Openable rows on later pages must stay reachable.
@@ -1440,7 +1483,7 @@ class TestWorkspaceFileOperations:
 
         Narrowing is SQL on task_id, so it never depends on where the bytes
         live — which is what previously made a scoped workspace drop its own
-        uploads. Unattached uploads stay listed; a sibling task's do not.
+        uploads.
         """
         db = memory_db
         user = User(username="scoped-user", password_hash="hash")
@@ -1469,10 +1512,7 @@ class TestWorkspaceFileOperations:
             include_workspace_files=False
         )
 
-        assert [f["filename"] for f in listing["files"]] == ["unattached.txt"]
-        # file_id resolution still refuses the unattached row in a scoped
-        # workspace; that gap is tracked separately and is not this listing's
-        # to hide by dropping the row.
+        assert listing["files"] == []
         assert scoped.resolve_file_id(unattached.file_id) is None
 
     def test_vibe_listing_keeps_relative_workspace_paths(self, tmp_path):

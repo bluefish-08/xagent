@@ -2071,9 +2071,10 @@ class TaskWorkspace:
             include_workspace_files: Whether to include current workspace files
             limit: Maximum number of files to return (default: 50)
             offset: Number of files to skip for pagination (default: 0)
-            openable_only: Narrow to this task's own uploads plus the unattached
-                ones, before counting and slicing. Off by default so callers that
-                carry their own authority keep the full listing.
+            openable_only: Narrow to this task's own uploads before counting and
+                slicing. Narrower than the read authority, which also grants
+                task-less records; off by default so callers that carry their own
+                authority keep the full listing.
 
         Returns:
             Dictionary with list of all user files with metadata including file_id,
@@ -2176,28 +2177,9 @@ class TaskWorkspace:
                         ),
                     )
                 if openable_only and self.owner_user_id is not None:
-                    # Narrow in SQL, before count and the slice, so rows on later
-                    # pages stay reachable. This is task narrowing, not the read
-                    # authority: _file_record_allowed_for_workspace also has a
-                    # scope-subtree leg and a path-in-workspace leg that nothing
-                    # here restates, so a scoped deployment still lists task-less
-                    # rows its reads refuse — see the PR's known limits. The
-                    # mismatch only ever lists too much, never too little. An
-                    # ownerless workspace opts out because its reads are
-                    # unrestricted too, so narrowing would hide reachable files.
-                    from sqlalchemy import or_
-
-                    query = query.filter(
-                        or_(
-                            # Only reachable when unmarked: the exact-scope branch
-                            # above already pins task_id to db_task_id.
-                            UploadedFile.task_id.is_(None),
-                            # current_task_id rather than the id parsed from the
-                            # workspace name; the two diverge when db_task_id is
-                            # passed in, and reads authorize against db_task_id.
-                            UploadedFile.task_id == self.current_task_id,
-                        )
-                    )
+                    # Before count and the slice, or later pages become unreachable.
+                    # Task-bound only: deleting a task detaches its files, not drops them.
+                    query = query.filter(UploadedFile.task_id == self.current_task_id)
                 total_count = query.count()
                 files = (
                     query.order_by(UploadedFile.id.desc())
