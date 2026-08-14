@@ -553,7 +553,7 @@ class TestWorkspaceFileOperations:
 
         assert "files that this task is allowed to open" in description
         # Rows whose reads always fail must not be offered at all.
-        assert "left out because reads on them fail" in description
+        assert "their paths are not given here" in description
         # Paging and the two kinds of row the model can receive.
         assert "raise the offset to see older ones" in description
         assert "appended outside that slicing" in description
@@ -1426,12 +1426,13 @@ class TestWorkspaceFileOperations:
             db.close()
             engine.dispose()
 
-    def test_vibe_listing_applies_scope_subtree_check(self, tmp_path):
-        """A scoped workspace drops out-of-scope uploads, task_id or not.
+    def test_vibe_listing_keeps_scoped_workspaces_unfiltered(self, tmp_path):
+        """A scoped workspace is not filtered, so its own uploads still list.
 
-        Scoped-but-unmarked workspaces exist (execution scopes, workforce
-        tasks), and resolve_file_id refuses their out-of-scope records, so
-        mirroring only the task_id branch would still list doomed rows.
+        Upload bytes never carry scope segments while a scoped base_dir does,
+        so the record check refuses even this task's own uploads — a
+        pre-existing gap in file_id resolution. Filtering here would turn that
+        into an empty listing for work the model can still read by path.
         """
         engine = create_engine(
             "sqlite:///:memory:", connect_args={"check_same_thread": False}
@@ -1462,7 +1463,9 @@ class TestWorkspaceFileOperations:
                 include_workspace_files=False
             )
 
-            assert listing["files"] == []
+            assert [f["filename"] for f in listing["files"]] == ["outside-scope.txt"]
+            # The row is listed even though file_id resolution refuses it; that gap
+            # is tracked separately and is not this listing's to hide.
             assert scoped.resolve_file_id(outside.file_id) is None
         finally:
             db.close()

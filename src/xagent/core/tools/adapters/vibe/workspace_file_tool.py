@@ -179,11 +179,11 @@ class WorkspaceFileTools(WorkspaceFileOperations):
     def _without_foreign_paths(listing: Dict[str, Any]) -> Dict[str, Any]:
         """Withhold absolute paths, keeping genuine workspace-relative ones.
 
-        The user's upload root is whitelisted for file access, so an absolute
-        path handed to the model resolves into any sibling task's workspace —
-        a read that file_id resolution refuses. Uploads carry an absolute path
-        under ``relative_path`` too, so only rows whose path really is relative
-        to the workspace keep it.
+        This is not a path boundary — ``list_files`` and ``get_file_info`` still
+        return absolute paths, and the whitelisted upload root still resolves
+        them. It removes the filenames a listing would otherwise hand the model
+        to aim at. Uploads carry an absolute path under ``relative_path`` too,
+        so only rows whose path really is relative to the workspace keep it.
         """
         sanitized = []
         for entry in listing["files"]:
@@ -278,7 +278,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out because reads on them fail. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
+                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out; reads on them fail by file_id, and their paths are not given here. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
             ),
             FileTool(
                 self.edit_file,

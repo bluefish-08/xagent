@@ -2178,17 +2178,32 @@ class TaskWorkspace:
                 if (
                     openable_only
                     and not _exact_task_scope
+                    and not self.scope_segments
                     and self.owner_user_id is not None
                 ):
                     # Filter before counting and slicing, so openable rows on later
-                    # pages stay reachable. Two branches opt out: an ownerless
-                    # workspace grants every record anyway, and the marked branch
-                    # reads through resolve_file_operation_path, whose authority is
-                    # the SQL above rather than this record check — reapplying this
-                    # one there drops rows that path would grant.
+                    # pages stay reachable. Three configurations opt out. An
+                    # ownerless workspace grants every record anyway. The marked
+                    # branch reads through resolve_file_operation_path, whose
+                    # authority is the SQL above, not this record check. And a
+                    # scoped workspace would drop its own task's uploads, whose
+                    # bytes never carry scope segments while base_dir does — a
+                    # pre-existing gap in file_id resolution that this filter must
+                    # not turn into an empty listing.
+                    from sqlalchemy import or_ as _or
+
+                    query = query.filter(
+                        _or(
+                            UploadedFile.task_id.is_(None),
+                            UploadedFile.task_id == self.current_task_id,
+                        )
+                    )
                     granted = [
                         record
                         for record in query.order_by(UploadedFile.id.desc()).all()
+                        # Passing the path is safe here: the scope-subtree leg it
+                        # would select is unreachable in this branch, which skips
+                        # scoped workspaces.
                         if self._file_record_allowed_for_workspace(
                             record,
                             Path(record.storage_path) if record.storage_path else None,
