@@ -6,6 +6,7 @@ Each tool instance operates within its designated workspace only.
 """
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from .....core.workspace import DEFAULT_USER_FILE_LIST_LIMIT, TaskWorkspace
@@ -151,64 +152,55 @@ class WorkspaceFileTools(WorkspaceFileOperations):
         include_workspace_files: bool = True,
         limit: int = DEFAULT_USER_FILE_LIST_LIMIT,
         offset: int = 0,
+        *,
+        openable_only: bool = True,
     ) -> Dict[str, Any]:
-        """List all user files across all workspaces and uploaded files.
+        """List the user's files this workspace can actually open.
 
         Args:
             include_workspace_files: Whether to include current workspace files
-            limit: Maximum number of files to return (default: 50)
-            offset: Number of files to skip for pagination (default: 0)
+            limit: Maximum number of registered uploads to return (default: 50)
+            offset: Number of registered uploads to skip for pagination
+            openable_only: Defaults to True here — the model is the caller, and a
+                row it cannot open only costs it turns. Pass False for the core
+                listing's own semantics.
 
         Returns:
-            Dictionary with list of all user files the model may open, with
-            metadata including file_id, filename, size, mime_type. See
-            :meth:`_openable_without_paths` for what is withheld.
+            Dictionary of files with file_id, filename, size and mime_type. Rows
+            the workspace could not open are excluded by the core listing, and
+            absolute paths are withheld; see :meth:`_without_foreign_paths`.
         """
-        listing = self.inner.list_all_user_files(include_workspace_files, limit, offset)
-        return self._openable_without_paths(listing)
+        listing = self.inner.list_all_user_files(
+            include_workspace_files, limit, offset, openable_only=openable_only
+        )
+        return self._without_foreign_paths(listing)
 
-    def _openable_without_paths(self, listing: Dict[str, Any]) -> Dict[str, Any]:
-        """Keep only entries the model can open, and drop absolute paths.
+    @staticmethod
+    def _without_foreign_paths(listing: Dict[str, Any]) -> Dict[str, Any]:
+        """Withhold absolute paths, keeping genuine workspace-relative ones.
 
-        Paths go first: the user's upload root is whitelisted, so an absolute
-        path here resolves into any sibling task's workspace. That leaves
-        file_id as the way in, and file_id resolution refuses another task's
-        record whenever the workspace has an owner. Listing rows that can only
-        fail wastes turns — the model reads the promising filename, retries it
-        by name, by id, and through the shell before giving up. The core
-        listing keeps those rows for callers that hold their own authority.
+        The user's upload root is whitelisted for file access, so an absolute
+        path handed to the model resolves into any sibling task's workspace —
+        a read that file_id resolution refuses. Uploads carry an absolute path
+        under ``relative_path`` too, so only rows whose path really is relative
+        to the workspace keep it.
         """
-        files = listing.get("files")
-        if not isinstance(files, list):
-            return listing
-
         sanitized = []
-        for entry in files:
-            if not isinstance(entry, dict):
-                sanitized.append(entry)
-                continue
-            if not self._entry_is_openable(entry):
-                continue
+        for entry in listing["files"]:
             visible = {
                 key: value
                 for key, value in entry.items()
                 if key not in ("storage_path", "relative_path")
             }
-            if entry.get("in_current_workspace") and entry.get("relative_path"):
-                visible["relative_path"] = entry["relative_path"]
+            relative_path = entry.get("relative_path")
+            if (
+                entry.get("in_current_workspace")
+                and relative_path
+                and not os.path.isabs(relative_path)
+            ):
+                visible["relative_path"] = relative_path
             sanitized.append(visible)
-        return {**listing, "files": sanitized, "total_count": len(sanitized)}
-
-    def _entry_is_openable(self, entry: Dict[str, Any]) -> bool:
-        """Mirror the task check in TaskWorkspace._file_record_allowed_for_workspace."""
-        if entry.get("in_current_workspace"):
-            return True
-        if getattr(self.workspace, "owner_user_id", None) is None:
-            return True
-        task_id = entry.get("task_id")
-        if task_id is None:
-            return True
-        return bool(task_id == getattr(self.workspace, "current_task_id", None))
+        return {**listing, "files": sanitized}
 
     def get_tools(self) -> List[FunctionTool]:
         """Get all tool instances"""
@@ -286,7 +278,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List the user's files that this task can open: the current workspace's files and the user's unattached uploads. Other tasks' files are not listed and cannot be read. Supports pagination and filtering. Returns file_id, filename, size, mime_type, and whether files are in current workspace; open a listed file by passing its file_id to read_file.",
+                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out because reads on them fail. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
             ),
             FileTool(
                 self.edit_file,

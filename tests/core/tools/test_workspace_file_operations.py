@@ -6,6 +6,7 @@ focusing on JSON and CSV workspace writes and reads.
 """
 
 import logging
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -550,7 +551,13 @@ class TestWorkspaceFileOperations:
             if tool.metadata.name == "list_all_user_files"
         ).description
 
-        assert "Other tasks' files are not listed and cannot be read" in description
+        assert "files that this task is allowed to open" in description
+        # Rows whose reads always fail must not be offered at all.
+        assert "left out because reads on them fail" in description
+        # Paging and the two kinds of row the model can receive.
+        assert "raise the offset to see older ones" in description
+        assert "appended outside that slicing" in description
+        assert "have no file_id" in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
@@ -1337,6 +1344,130 @@ class TestWorkspaceFileOperations:
         finally:
             db.close()
             engine.dispose()
+
+    @staticmethod
+    def _add_upload(db, tmp_path, user_id, task_id, stem):
+        path = tmp_path / "uploads" / f"{stem}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(stem, encoding="utf-8")
+        record = UploadedFile(
+            user_id=user_id,
+            task_id=task_id,
+            filename=path.name,
+            storage_path=str(path),
+            mime_type="text/plain",
+            file_size=path.stat().st_size,
+        )
+        db.add(record)
+        db.flush()
+        return record
+
+    def test_vibe_listing_pages_past_unopenable_rows(self, tmp_path):
+        """Openable rows on later pages must stay reachable.
+
+        Filtering after the core's limit/offset would hand back an empty page
+        with total_count 0 while openable uploads sat on page two.
+        """
+        engine = create_engine(
+            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        )
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+        try:
+            user = User(username="paging-user", password_hash="hash")
+            db.add(user)
+            db.flush()
+            mine = Task(id=795, user_id=user.id, title="Current task")
+            other = Task(id=796, user_id=user.id, title="Sibling task")
+            db.add_all([mine, other])
+            db.flush()
+
+            # A full first page of the sibling's uploads, then two of mine. Newest
+            # first means mine are the newest rows, but the DB slice is taken
+            # before any authority check.
+            for index in range(DEFAULT_USER_FILE_LIST_LIMIT):
+                self._add_upload(db, tmp_path, user.id, other.id, f"theirs-{index}")
+            for index in range(2):
+                self._add_upload(db, tmp_path, user.id, mine.id, f"mine-{index}")
+            db.commit()
+
+            workspace = TaskWorkspace(
+                id="web_task_795", base_dir=str(tmp_path / "workspaces")
+            )
+            workspace.db_session = db
+            workspace.owner_user_id = user.id
+            workspace.current_task_id = mine.id
+
+            listing = WorkspaceFileTools(workspace).list_all_user_files(
+                include_workspace_files=False
+            )
+
+            assert {file_info["filename"] for file_info in listing["files"]} == {
+                "mine-0.txt",
+                "mine-1.txt",
+            }
+            assert listing["total_count"] == 2
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_vibe_listing_applies_scope_subtree_check(self, tmp_path):
+        """A scoped workspace drops out-of-scope uploads, task_id or not.
+
+        Scoped-but-unmarked workspaces exist (execution scopes, workforce
+        tasks), and resolve_file_id refuses their out-of-scope records, so
+        mirroring only the task_id branch would still list doomed rows.
+        """
+        engine = create_engine(
+            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        )
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+        try:
+            user = User(username="scoped-user", password_hash="hash")
+            db.add(user)
+            db.flush()
+            mine = Task(id=797, user_id=user.id, title="Scoped task")
+            db.add(mine)
+            db.flush()
+            outside = self._add_upload(db, tmp_path, user.id, None, "outside-scope")
+            db.commit()
+
+            scoped = TaskWorkspace(
+                id="web_task_797",
+                base_dir=str(tmp_path / "workspaces"),
+                scope_segments=("tenant-a",),
+            )
+            scoped.db_session = db
+            scoped.owner_user_id = user.id
+            scoped.current_task_id = mine.id
+
+            listing = WorkspaceFileTools(scoped).list_all_user_files(
+                include_workspace_files=False
+            )
+
+            assert listing["files"] == []
+            assert scoped.resolve_file_id(outside.file_id) is None
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_vibe_listing_keeps_relative_workspace_paths(self, tmp_path):
+        """Workspace rows keep a genuinely relative path; uploads keep none."""
+        workspace = TaskWorkspace("test_relative", str(tmp_path))
+        tools = WorkspaceFileTools(workspace)
+        tools.write_file("note.txt", "hi")
+
+        listing = tools.list_all_user_files(include_workspace_files=True)
+        rows = [f for f in listing["files"] if f["filename"] == "note.txt"]
+
+        assert rows, "expected the workspace file in the listing"
+        for row in rows:
+            assert "storage_path" not in row
+            if "relative_path" in row:
+                assert not os.path.isabs(row["relative_path"])
 
     def test_list_all_user_files_exclude_workspace(self, tmp_path):
         """Test list_all_user_files can exclude workspace files."""

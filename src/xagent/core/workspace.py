@@ -2063,6 +2063,7 @@ class TaskWorkspace:
         offset: int = 0,
         *,
         _exact_task_scope: bool = False,
+        openable_only: bool = False,
     ) -> Dict[str, Any]:
         """List all user files across all workspaces and uploaded files.
 
@@ -2070,6 +2071,9 @@ class TaskWorkspace:
             include_workspace_files: Whether to include current workspace files
             limit: Maximum number of files to return (default: 50)
             offset: Number of files to skip for pagination (default: 0)
+            openable_only: Drop records ``resolve_file_id`` would refuse, using the
+                same authority check, before counting and slicing. Callers that
+                cannot open a record gain nothing from paging past it.
 
         Returns:
             Dictionary with list of all user files with metadata including file_id,
@@ -2171,13 +2175,37 @@ class TaskWorkspace:
                             *local_storage_filters,
                         ),
                     )
-                total_count = query.count()
-                files = (
-                    query.order_by(UploadedFile.id.desc())
-                    .offset(offset)
-                    .limit(limit)
-                    .all()
-                )
+                if openable_only and self.owner_user_id is not None:
+                    # Narrow in SQL as far as it goes, then apply the record-level
+                    # authority check, then count and slice — filtering after the
+                    # slice would hide openable rows on later pages. An ownerless
+                    # workspace grants every record, so it keeps the plain path.
+                    from sqlalchemy import or_ as _or
+
+                    query = query.filter(
+                        _or(
+                            UploadedFile.task_id.is_(None),
+                            UploadedFile.task_id == task_id,
+                        )
+                    )
+                    granted = [
+                        record
+                        for record in query.order_by(UploadedFile.id.desc()).all()
+                        if self._file_record_allowed_for_workspace(
+                            record,
+                            Path(record.storage_path) if record.storage_path else None,
+                        )
+                    ]
+                    total_count = len(granted)
+                    files = granted[offset : offset + limit]
+                else:
+                    total_count = query.count()
+                    files = (
+                        query.order_by(UploadedFile.id.desc())
+                        .offset(offset)
+                        .limit(limit)
+                        .all()
+                    )
 
                 # Build file list from database
                 for file_record in files:
