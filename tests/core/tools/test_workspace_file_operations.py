@@ -558,6 +558,7 @@ class TestWorkspaceFileOperations:
         assert "raise the offset to see older ones" in description
         assert "appended outside that slicing" in description
         assert "have no file_id" in description
+        assert "(50 by default)" in description
 
     def test_delegated_marked_workspace_reads_exact_record_under_owner_base(
         self, public_file_scope_context
@@ -1383,13 +1384,13 @@ class TestWorkspaceFileOperations:
             db.add_all([mine, other])
             db.flush()
 
-            # A full first page of the sibling's uploads, then two of mine. Newest
-            # first means mine are the newest rows, but the DB slice is taken
-            # before any authority check.
-            for index in range(DEFAULT_USER_FILE_LIST_LIMIT):
-                self._add_upload(db, tmp_path, user.id, other.id, f"theirs-{index}")
+            # Mine go in first so that, newest-first, a full page of the sibling's
+            # uploads sits ahead of them: filtering after the DB slice would hand
+            # back an empty page and hide them.
             for index in range(2):
                 self._add_upload(db, tmp_path, user.id, mine.id, f"mine-{index}")
+            for index in range(DEFAULT_USER_FILE_LIST_LIMIT):
+                self._add_upload(db, tmp_path, user.id, other.id, f"theirs-{index}")
             db.commit()
 
             workspace = TaskWorkspace(
@@ -1408,6 +1409,19 @@ class TestWorkspaceFileOperations:
                 "mine-1.txt",
             }
             assert listing["total_count"] == 2
+            # Paging is over openable rows only, so there is no second page.
+            assert (
+                WorkspaceFileTools(workspace).list_all_user_files(
+                    include_workspace_files=False,
+                    offset=DEFAULT_USER_FILE_LIST_LIMIT,
+                )["files"]
+                == []
+            )
+            # The flag is an API: opting out returns the unfiltered listing.
+            unfiltered = WorkspaceFileTools(workspace).list_all_user_files(
+                include_workspace_files=False, openable_only=False
+            )
+            assert unfiltered["total_count"] == DEFAULT_USER_FILE_LIST_LIMIT + 2
         finally:
             db.close()
             engine.dispose()
@@ -1466,8 +1480,26 @@ class TestWorkspaceFileOperations:
         assert rows, "expected the workspace file in the listing"
         for row in rows:
             assert "storage_path" not in row
-            if "relative_path" in row:
-                assert not os.path.isabs(row["relative_path"])
+            assert not os.path.isabs(row["relative_path"])
+
+        # A registered upload carries an absolute path under relative_path, so the
+        # keep-branch has to reject it even when it sits in the workspace.
+        absolute = str(workspace.output_dir / "note.txt")
+        withheld = WorkspaceFileTools._without_foreign_paths(
+            {
+                "files": [
+                    {
+                        "file_id": "abc",
+                        "filename": "note.txt",
+                        "in_current_workspace": True,
+                        "relative_path": absolute,
+                        "storage_path": absolute,
+                    }
+                ]
+            }
+        )["files"][0]
+        assert "relative_path" not in withheld
+        assert "storage_path" not in withheld
 
     def test_list_all_user_files_exclude_workspace(self, tmp_path):
         """Test list_all_user_files can exclude workspace files."""

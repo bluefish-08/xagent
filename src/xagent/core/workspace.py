@@ -2175,19 +2175,17 @@ class TaskWorkspace:
                             *local_storage_filters,
                         ),
                     )
-                if openable_only and self.owner_user_id is not None:
-                    # Narrow in SQL as far as it goes, then apply the record-level
-                    # authority check, then count and slice — filtering after the
-                    # slice would hide openable rows on later pages. An ownerless
-                    # workspace grants every record, so it keeps the plain path.
-                    from sqlalchemy import or_ as _or
-
-                    query = query.filter(
-                        _or(
-                            UploadedFile.task_id.is_(None),
-                            UploadedFile.task_id == task_id,
-                        )
-                    )
+                if (
+                    openable_only
+                    and not _exact_task_scope
+                    and self.owner_user_id is not None
+                ):
+                    # Filter before counting and slicing, so openable rows on later
+                    # pages stay reachable. Two branches opt out: an ownerless
+                    # workspace grants every record anyway, and the marked branch
+                    # reads through resolve_file_operation_path, whose authority is
+                    # the SQL above rather than this record check — reapplying this
+                    # one there drops rows that path would grant.
                     granted = [
                         record
                         for record in query.order_by(UploadedFile.id.desc()).all()
