@@ -136,8 +136,8 @@ Text handling in edited images:
 - **Text removal**: Request to remove specific text elements
 - **Brand fidelity**: Use supplied logos, QR codes, or trademarks as references,
   but do not claim that a generative edit preserved them pixel-for-pixel. When
-  exact fidelity is required, composite deterministically if the toolset allows
-  it, or explain the limitation — never present a generative edit as exact.
+  exact fidelity is required, explain the limitation and ask the user to arrange
+  deterministic post-processing — never present a generative edit as exact.
 
 Use only images the user supplied, the task already produced, or an asset
 retrieved from the brand's own official source; do not go looking for source or

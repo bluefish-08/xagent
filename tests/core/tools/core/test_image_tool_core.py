@@ -144,9 +144,11 @@ class TestImageGenerationToolCore:
         assert "brand's own official source" in description
         assert "plausible-looking search result" in description
         assert "never take" in description and "other tasks" in description
-        # A generative edit must never be presented as pixel-exact; whether a
-        # deterministic path exists depends on the toolset, so stay conditional.
         assert "never present a generative edit as exact" in description
+        # Loaded with or without the skill, so it must not offer the weaker gate
+        # the skill closed: #942 deleted logo_overlay as brittle.
+        assert "composite deterministically" not in description
+        assert "ask the user to arrange" in description
 
     def test_init_with_models(self, mock_image_models, mock_workspace):
         """Test ImageGenerationToolCore initialization with models"""
