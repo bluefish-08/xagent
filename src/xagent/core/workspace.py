@@ -2175,50 +2175,33 @@ class TaskWorkspace:
                             *local_storage_filters,
                         ),
                     )
-                if (
-                    openable_only
-                    and not _exact_task_scope
-                    and not self.scope_segments
-                    and self.owner_user_id is not None
-                ):
-                    # Filter before counting and slicing, so openable rows on later
-                    # pages stay reachable. Three configurations opt out. An
-                    # ownerless workspace grants every record anyway. The marked
-                    # branch reads through resolve_file_operation_path, whose
-                    # authority is the SQL above, not this record check. And a
-                    # scoped workspace would drop its own task's uploads, whose
-                    # bytes never carry scope segments while base_dir does — a
-                    # pre-existing gap in file_id resolution that this filter must
-                    # not turn into an empty listing.
+                if openable_only and self.owner_user_id is not None:
+                    # Narrow in SQL, before count and the slice, so openable rows
+                    # on later pages stay reachable. A record-level pass over the
+                    # rows would be redundant: within this filter every leg of
+                    # _file_record_allowed_for_workspace either restates the
+                    # predicate below or is already guaranteed by the owner match.
+                    # An ownerless workspace opts out because its reads are
+                    # unrestricted too, so a narrowed listing would hide reachable
+                    # files.
                     from sqlalchemy import or_ as _or
 
                     query = query.filter(
                         _or(
                             UploadedFile.task_id.is_(None),
+                            # current_task_id, not the id parsed from the workspace
+                            # name: a delegated workspace carries the parent's
+                            # db_task_id, and reads authorize against that.
                             UploadedFile.task_id == self.current_task_id,
                         )
                     )
-                    granted = [
-                        record
-                        for record in query.order_by(UploadedFile.id.desc()).all()
-                        # Passing the path is safe here: the scope-subtree leg it
-                        # would select is unreachable in this branch, which skips
-                        # scoped workspaces.
-                        if self._file_record_allowed_for_workspace(
-                            record,
-                            Path(record.storage_path) if record.storage_path else None,
-                        )
-                    ]
-                    total_count = len(granted)
-                    files = granted[offset : offset + limit]
-                else:
-                    total_count = query.count()
-                    files = (
-                        query.order_by(UploadedFile.id.desc())
-                        .offset(offset)
-                        .limit(limit)
-                        .all()
-                    )
+                total_count = query.count()
+                files = (
+                    query.order_by(UploadedFile.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                    .all()
+                )
 
                 # Build file list from database
                 for file_record in files:

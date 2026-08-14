@@ -147,31 +147,29 @@ class WorkspaceFileTools(WorkspaceFileOperations):
         """Get output file list from current workspace"""
         return self.inner.get_workspace_output_files()
 
-    def list_all_user_files(
+    def list_all_user_files(  # type: ignore[override]
         self,
         include_workspace_files: bool = True,
         limit: int = DEFAULT_USER_FILE_LIST_LIMIT,
         offset: int = 0,
-        *,
-        openable_only: bool = True,
     ) -> Dict[str, Any]:
         """List the user's files this workspace can actually open.
+
+        The core listing's ``openable_only`` switch is deliberately absent from
+        this signature: FunctionTool turns every parameter into a field of the
+        tool schema, so exposing it would let the model turn the narrowing off.
 
         Args:
             include_workspace_files: Whether to include current workspace files
             limit: Maximum number of registered uploads to return (default: 50)
             offset: Number of registered uploads to skip for pagination
-            openable_only: Defaults to True here — the model is the caller, and a
-                row it cannot open only costs it turns. Pass False for the core
-                listing's own semantics.
 
         Returns:
-            Dictionary of files with file_id, filename, size and mime_type. Rows
-            the workspace could not open are excluded by the core listing, and
-            absolute paths are withheld; see :meth:`_without_foreign_paths`.
+            Dictionary of files with file_id, filename, size and mime_type, with
+            absolute paths withheld; see :meth:`_without_foreign_paths`.
         """
         listing = self.inner.list_all_user_files(
-            include_workspace_files, limit, offset, openable_only=openable_only
+            include_workspace_files, limit, offset, openable_only=True
         )
         return self._without_foreign_paths(listing)
 
@@ -278,7 +276,7 @@ class WorkspaceFileTools(WorkspaceFileOperations):
             FileTool(
                 self.list_all_user_files,
                 name="list_all_user_files",
-                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out; reads on them fail by file_id, and their paths are not given here. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
+                description="List the user's files that this task is allowed to open. What that covers depends on the deployment's file scope: always this task's own uploads, plus the user's uploads that are not tied to a task where the scope permits them. Files belonging to the user's other tasks are left out wherever the deployment records a file owner, and no filesystem path to them is returned here. Registered uploads are returned newest-first in slices of limit (50 by default) at offset; raise the offset to see older ones. Current-workspace files are appended outside that slicing when include_workspace_files is on, and the unregistered ones among them have no file_id — read those by their relative path. Returns file_id, filename, size, mime_type, and whether a file is in the current workspace; open a listed upload by passing its file_id to read_file.",
             ),
             FileTool(
                 self.edit_file,

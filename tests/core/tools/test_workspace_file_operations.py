@@ -553,7 +553,7 @@ class TestWorkspaceFileOperations:
 
         assert "files that this task is allowed to open" in description
         # Rows whose reads always fail must not be offered at all.
-        assert "their paths are not given here" in description
+        assert "no filesystem path to them is returned here" in description
         # Paging and the two kinds of row the model can receive.
         assert "raise the offset to see older ones" in description
         assert "appended outside that slicing" in description
@@ -1417,22 +1417,32 @@ class TestWorkspaceFileOperations:
                 )["files"]
                 == []
             )
-            # The flag is an API: opting out returns the unfiltered listing.
-            unfiltered = WorkspaceFileTools(workspace).list_all_user_files(
-                include_workspace_files=False, openable_only=False
+            # The core switch must stay off the tool schema, or the model can
+            # simply turn the narrowing off.
+            tool = next(
+                candidate
+                for candidate in WorkspaceFileTools(workspace).get_tools()
+                if candidate.metadata.name == "list_all_user_files"
             )
-            assert unfiltered["total_count"] == DEFAULT_USER_FILE_LIST_LIMIT + 2
+            assert (
+                "openable_only"
+                not in tool.args_type().model_json_schema()["properties"]
+            )
+            # Core keeps its own default, so callers with their own authority are
+            # unaffected.
+            assert WorkspaceFileOperations(workspace).list_all_user_files(
+                include_workspace_files=False
+            )["total_count"] == (DEFAULT_USER_FILE_LIST_LIMIT + 2)
         finally:
             db.close()
             engine.dispose()
 
-    def test_vibe_listing_keeps_scoped_workspaces_unfiltered(self, tmp_path):
-        """A scoped workspace is not filtered, so its own uploads still list.
+    def test_vibe_listing_narrows_by_task_in_scoped_workspaces(self, tmp_path):
+        """A scoped workspace narrows by task like any other.
 
-        Upload bytes never carry scope segments while a scoped base_dir does,
-        so the record check refuses even this task's own uploads — a
-        pre-existing gap in file_id resolution. Filtering here would turn that
-        into an empty listing for work the model can still read by path.
+        Narrowing is SQL on task_id, so it never depends on where the bytes
+        live — which is what previously made a scoped workspace drop its own
+        uploads. Unattached uploads stay listed; a sibling task's do not.
         """
         engine = create_engine(
             "sqlite:///:memory:", connect_args={"check_same_thread": False}
@@ -1447,7 +1457,11 @@ class TestWorkspaceFileOperations:
             mine = Task(id=797, user_id=user.id, title="Scoped task")
             db.add(mine)
             db.flush()
-            outside = self._add_upload(db, tmp_path, user.id, None, "outside-scope")
+            unattached = self._add_upload(db, tmp_path, user.id, None, "unattached")
+            sibling_task = Task(id=798, user_id=user.id, title="Sibling")
+            db.add(sibling_task)
+            db.flush()
+            self._add_upload(db, tmp_path, user.id, sibling_task.id, "siblings")
             db.commit()
 
             scoped = TaskWorkspace(
@@ -1463,10 +1477,11 @@ class TestWorkspaceFileOperations:
                 include_workspace_files=False
             )
 
-            assert [f["filename"] for f in listing["files"]] == ["outside-scope.txt"]
-            # The row is listed even though file_id resolution refuses it; that gap
-            # is tracked separately and is not this listing's to hide.
-            assert scoped.resolve_file_id(outside.file_id) is None
+            assert [f["filename"] for f in listing["files"]] == ["unattached.txt"]
+            # file_id resolution still refuses the unattached row in a scoped
+            # workspace; that gap is tracked separately and is not this listing's
+            # to hide by dropping the row.
+            assert scoped.resolve_file_id(unattached.file_id) is None
         finally:
             db.close()
             engine.dispose()
@@ -1503,6 +1518,47 @@ class TestWorkspaceFileOperations:
         )["files"][0]
         assert "relative_path" not in withheld
         assert "storage_path" not in withheld
+
+    def test_vibe_listing_narrows_by_the_authorized_task_id(self, tmp_path):
+        """Narrowing keys on current_task_id, not the workspace name.
+
+        A delegated workspace is named after the agent run while its db_task_id
+        is the parent task's, and reads authorize against the latter. Keying on
+        the parsed name would list rows no read can reach.
+        """
+        engine = create_engine(
+            "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        )
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        db = SessionLocal()
+        try:
+            user = User(username="delegated-user", password_hash="hash")
+            db.add(user)
+            db.flush()
+            parent = Task(id=799, user_id=user.id, title="Parent task")
+            named = Task(id=800, user_id=user.id, title="Task the name parses to")
+            db.add_all([parent, named])
+            db.flush()
+            self._add_upload(db, tmp_path, user.id, parent.id, "parents")
+            self._add_upload(db, tmp_path, user.id, named.id, "named-tasks")
+            db.commit()
+
+            workspace = TaskWorkspace(
+                id="web_task_800", base_dir=str(tmp_path / "workspaces")
+            )
+            workspace.db_session = db
+            workspace.owner_user_id = user.id
+            workspace.current_task_id = parent.id
+
+            listing = WorkspaceFileTools(workspace).list_all_user_files(
+                include_workspace_files=False
+            )
+
+            assert [f["filename"] for f in listing["files"]] == ["parents.txt"]
+        finally:
+            db.close()
+            engine.dispose()
 
     def test_list_all_user_files_exclude_workspace(self, tmp_path):
         """Test list_all_user_files can exclude workspace files."""
