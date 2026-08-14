@@ -107,7 +107,8 @@ angle name to a layout. Use generative moves — dramatize the verb in the
 proposition, give the proof number physical form in a real place, literalize
 the offer as an object or event, stage a recognizable cultural moment, shift
 scale, or cast a brand asset as the protagonist — and sketch more device
-candidates than you have direction slots before keeping the strongest. An
+candidates in writing than you have direction slots before keeping the
+strongest. Those sketches are sentences, not renders, so they cost no budget. An
 angle name like "milestone pride" is not a device; "the milestone staged as a
 rally the viewer is invited to join" is. The art-direction reference expands
 these moves.
@@ -370,6 +371,11 @@ direction you already delivered in order to get a better version of it, even at
 another required placement; and any call you would otherwise describe as a
 variant, a fresh angle, or a retry.
 
+Where the two definitions both fit one call, coverage wins: a required placement
+with no candidate is covered free even when the direction it reuses was already
+delivered elsewhere. Charge it as a repair only once that placement has its own
+candidate and you are rendering it again.
+
 When the per-asset limit is reached, stop repairing that asset and deliver its
 best candidate. When the run budget is spent, stop repairing altogether and
 deliver the best candidates you have, whatever the per-asset counts say. Neither
@@ -435,18 +441,21 @@ finish the step and report the condition as unmet with the defects named, rather
 than repairing past the budget to satisfy it. When no plan is involved, apply the
 same rule to the direct decision to stop.
 
-A completion check may ask whether work remains before you finish. Answer it for
-what the budget settled — repairs are done, coverage is complete — by choosing
-the final answer and leaving the decision's missing-verification field empty:
-defects written there read as outstanding work and reopen the loop the budget just
-closed. The defects belong in the answer text, where the user reads them, with the
-answer's outcome `partial` rather than `completed`.
+A completion check may ask whether work remains before you finish, and its own
+instructions treat any named defect as remaining work. Answer it for what the
+budget settled — repairs are done, coverage is complete — and put the defects in
+the answer text, where the user reads them, with the answer's outcome `partial`
+rather than `completed`, not in the check's `missing_verification` field, which
+reopens the loop the budget just closed. This is a workaround, not a supported
+path: nothing in the runtime yet distinguishes a budget-exhausted hand-back from
+an unfinished run, so expect the check to push back and hold the budget anyway.
 
 That check is the one inside your own run. When your run is one step of a plan, a
 separate assessment decides whether the whole task is complete; it cannot see this
 skill, it can send work back for more rounds, and it gives up after a few. Name
-the defects in the step result anyway, but do not rely on that assessment to
-accept them — complete coverage is what carries the task through it.
+the defects in the step result anyway, but expect no better than that: a
+defect-named hand-back may be replanned and the task may still fail on the replan
+limit. Complete coverage is what gives it the best chance, not a guarantee.
 
 ## Deliver
 

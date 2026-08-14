@@ -70,15 +70,23 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     # The gate's coverage half never yields to the budget.
     assert "**Coverage is unconditional.**" in content
     # Two rejection reasons a rewrite dropped, and the brand rule they serve.
-    assert "omits a required brand asset" in content
+    assert "a render that omits a required brand asset" in content
     assert "labeled a concept draft" in content
     # The hand-back has to pass the completion check that precedes it.
-    assert "leaving the decision's missing-verification field empty" in content
+    assert "not in the check's `missing_verification` field" in content
     assert "let the user decide whether to spend another round" in content
     assert "Reject them while the repair budget lasts" in content
     assert "While the budget lasts, regenerate from the locked design" in content
     assert "while the repair budget lasts, remove the artifact or" in content
     assert "iterations is not. While the budget lasts," in content
+    assert "at most two on the same asset, and four across the run" in content
+    assert "a variant, a fresh angle, or a retry" in content
+    assert "When the run budget is spent, stop repairing altogether" in content
+    assert "Where the two definitions both fit one call, coverage wins" in content
+    assert "sketches are sentences, not renders" in content
+    # The hand-back is a workaround around the gate, not a supported path.
+    assert "This is a workaround, not a supported" in content
+    assert "may be replanned and the task may still fail" in content
 
 
 def test_static_visual_design_includes_art_direction_reference() -> None:
@@ -108,3 +116,6 @@ def test_static_visual_design_includes_art_direction_reference() -> None:
     assert "Every rejection in this document is a quality failure" in content
     assert "subordinate to that skill's repair budget" in content
     assert "Only a required asset with no candidate at all is coverage" in content
+    assert "While the repair budget lasts, regenerate from the locked design" in content
+    # `generate ... sketches` read as a render-driving instruction with no budget.
+    assert "one-sentence sketches for a set of three, none of them rendered" in content
