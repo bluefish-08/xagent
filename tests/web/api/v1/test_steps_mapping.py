@@ -101,6 +101,76 @@ def test_dag_step_pair_becomes_thinking_step():
     assert steps[0]["data"]["phase"] == "step"
 
 
+def test_dag_step_end_with_failed_status_projects_failed():
+    events = [
+        _ev("dag_step_start", step_id="s2"),
+        _ev(
+            "dag_step_end",
+            step_id="s2",
+            data={"status": "failed", "error": "boom"},
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    steps = map_trace_events_to_public_steps(events)
+    assert len(steps) == 1
+    assert steps[0]["status"] == "failed"
+
+
+def test_dag_step_end_with_completed_status_projects_completed():
+    events = [
+        _ev("dag_step_start", step_id="s2"),
+        _ev(
+            "dag_step_end",
+            step_id="s2",
+            data={"status": "completed"},
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    steps = map_trace_events_to_public_steps(events)
+    assert len(steps) == 1
+    assert steps[0]["status"] == "completed"
+
+
+def test_dag_step_end_missing_status_key_defaults_to_completed():
+    events = [
+        _ev("dag_step_start", step_id="s2"),
+        _ev(
+            "dag_step_end",
+            step_id="s2",
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    steps = map_trace_events_to_public_steps(events)
+    assert len(steps) == 1
+    assert steps[0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("raw_status", ["interrupted", "cancelled", None])
+def test_dag_step_end_unrecognized_status_falls_back_to_completed(raw_status):
+    """Any ``data['status']`` other than the literal ``"failed"`` must
+    fold to ``"completed"`` -- not pass through verbatim. This pins the
+    fallback against a refactor that swaps the dedicated helper for a
+    direct ``_data_get(event, "status", "completed")`` passthrough:
+    the three existing status tests above (``"failed"``, ``"completed"``,
+    missing key) all coincide with a passthrough's output and would
+    stay green even if an unrecognized value like ``"interrupted"``
+    leaked straight into ``PublicStepStatus``, which does not accept it.
+    """
+    data = {} if raw_status is None else {"status": raw_status}
+    events = [
+        _ev("dag_step_start", step_id="s2"),
+        _ev(
+            "dag_step_end",
+            step_id="s2",
+            data=data,
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    steps = map_trace_events_to_public_steps(events)
+    assert len(steps) == 1
+    assert steps[0]["status"] == "completed"
+
+
 def test_dag_plan_pair_becomes_thinking_planning():
     events = [
         _ev("dag_plan_start", task_id="t1"),
@@ -727,6 +797,15 @@ _PROJECTOR_EQUIVALENCE_CASES: Dict[str, List[SimpleNamespace]] = {
             timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
         ),
     ],
+    "dag_step_failed": [
+        _ev("dag_step_start", step_id="s2f"),
+        _ev(
+            "dag_step_end",
+            step_id="s2f",
+            data={"status": "failed", "error": "boom"},
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ],
     "dag_plan_pair": [
         _ev("dag_plan_start", task_id="t1"),
         _ev(
@@ -1019,6 +1098,19 @@ _PROJECTOR_EQUIVALENCE_CASES: Dict[str, List[SimpleNamespace]] = {
             timestamp=datetime(2026, 1, 1, 12, 0, 2, tzinfo=timezone.utc),
         ),
     ],
+    "dag_execution_planning_failure": [
+        _dag_exec_ev(
+            "planning",
+            task_id="t1",
+            timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+        _ev(
+            "dag_execute_end",
+            task_id="t1",
+            data={"status": "failed"},
+            timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+        ),
+    ],
     "dag_plan_and_dag_execution_coexist": [
         _ev(
             "dag_plan_start",
@@ -1071,10 +1163,10 @@ def test_projector_equivalent_to_batch(events):
     stays a pure driver over the projector, never a second copy of
     the folding logic.
 
-    Literal output shapes per event family are already pinned by this
-    file's 23 direct-call tests above, which now exercise the
-    projector itself. What this test guards instead is that the batch
-    driver never grows a second, independent folding implementation.
+    Literal output shapes per event family are already pinned by the
+    direct-call tests above, which now exercise the projector itself.
+    What this test guards instead is that the batch driver never grows
+    a second, independent folding implementation.
     """
     expected = map_trace_events_to_public_steps(events)
     projected = PublicStepProjector.from_history(events).materialized_steps()
@@ -1432,3 +1524,113 @@ def test_dag_plan_and_dag_execution_coexist_without_id_collision():
     ids = {s["id"] for s in steps}
     assert len(ids) == 2
     assert ids == {"thinking:plan:t1:1", "thinking:planning:t1:1"}
+
+
+# ===== dag_execute_end: planning failure closes an open planning step =====
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["failed", "interrupted", "waiting_for_user", "completed", "__missing__", None],
+)
+def test_dag_execute_end_only_failed_closes_open_planning_step(status):
+    """Only the literal string "failed" closes the open planning step;
+    every other observed value -- interrupted, waiting_for_user,
+    completed, a missing key, or None -- leaves it running. This is
+    the opposite fallback direction from _terminal_status_from_event,
+    which this branch does not reuse."""
+    start = _dag_exec_ev(
+        "planning",
+        task_id="t1",
+        timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    data = {} if status == "__missing__" else {"status": status}
+    end = _ev(
+        "dag_execute_end",
+        task_id="t1",
+        data=data,
+        timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    steps = map_trace_events_to_public_steps([start, end])
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["type"] == "thinking"
+    assert step["data"] == {"phase": "planning"}
+    if status == "failed":
+        assert step["status"] == "failed"
+        assert step["completed_at"] is not None
+    else:
+        assert step["status"] == "running"
+        assert step["completed_at"] is None
+
+
+def test_dag_execute_end_failed_data_is_phase_only():
+    """Anti-leak gate: dag_execute_end's data['result'] carries the
+    full DAG pattern output. The closed step's data must be exactly
+    {"phase": "planning"}, not a superset."""
+    start = _dag_exec_ev(
+        "planning",
+        task_id="t1",
+        timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    end = _ev(
+        "dag_execute_end",
+        task_id="t1",
+        data={
+            "status": "failed",
+            "result": {
+                "success": False,
+                "error": "plan validation failed",
+                "step_results": {"s1": {"output": "secret intermediate output"}},
+                "output": "should never leak",
+            },
+        },
+        timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    steps = map_trace_events_to_public_steps([start, end])
+    assert len(steps) == 1
+    assert set(steps[0]["data"].keys()) == {"phase"}
+
+
+def test_dag_execute_end_without_open_planning_is_noop():
+    """No open planning step to close -- same orphan-end policy as
+    elsewhere in this module."""
+    events = [
+        _ev(
+            "dag_execute_end",
+            task_id="t1",
+            data={"status": "failed"},
+        )
+    ]
+    assert map_trace_events_to_public_steps(events) == []
+
+
+def test_dag_execute_start_clears_stale_open_planning_key():
+    """A fresh dag_execute_start clears any planning key left open by
+    a prior round that never reached a terminal event, so a failure
+    in the new round can't reach back and close the old round's
+    stranded planning step (left as-is, still "running")."""
+    round_one_start = _dag_exec_ev(
+        "planning",
+        task_id="t1",
+        timestamp=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    dag_execute_start_round_two = _ev(
+        "dag_execute_start",
+        task_id="t1",
+        timestamp=datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    round_two_failure = _ev(
+        "dag_execute_end",
+        task_id="t1",
+        data={"status": "failed"},
+        timestamp=datetime(2026, 1, 1, 12, 0, 2, tzinfo=timezone.utc),
+    )
+    steps = map_trace_events_to_public_steps(
+        [round_one_start, dag_execute_start_round_two, round_two_failure]
+    )
+    # Round 1's planning step is still open/running -- the round 2
+    # failure must not have reached back and closed it.
+    assert len(steps) == 1
+    assert steps[0]["status"] == "running"
+    assert steps[0]["completed_at"] is None

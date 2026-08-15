@@ -6,6 +6,7 @@ enabling MCP tools to be used in DAG plan-execute patterns and other agent workf
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from ..... import config as _root_config
 from .....sandbox.base import Sandbox
 from ...core.mcp.sessions import Connection, create_session
 from ...core.mcp.tools import load_mcp_tools
+from .agent_tool_names import MAX_AGENT_TOOL_NAME_LENGTH
 from .base import AbstractBaseTool, ToolVisibility
 from .connector_runtime import (
     ERROR_DELEGATED_AUTHORIZATION_FAILED,
@@ -304,20 +306,38 @@ def _mcp_access_denied_result(user_id: Optional[str], tool_name: str) -> dict[st
 
 
 def _mcp_return_value_as_string(value: Any) -> str:
+    """Renders an MCP result dict for the ``AbstractBaseTool.return_value_as_string``
+    interface, used only by the tool wrappers (e.g. output-filter/sandboxed
+    wrappers). This is NOT the path the LLM's observation text is built from
+    for MCP tool calls in ReAct -- that is
+    ``ExecutionContext._format_tool_result`` (execution.py), which
+    stringifies the whole result dict returned by ``_execute_mcp_call``
+    directly. Keep this renderer lossless anyway, since any future caller
+    of ``return_value_as_string`` should see the same fields.
+    """
     try:
         if isinstance(value, dict):
+            texts = []
             content = value.get("content", [])
             if isinstance(content, list) and content:
-                texts = []
                 for item in content:
                     if isinstance(item, dict) and "text" in item:
                         texts.append(item["text"])
                     else:
                         texts.append(str(item))
-                return "\n".join(texts)
-            if content:
-                return str(content)
-            return "No content returned"
+            elif content:
+                texts.append(str(content))
+
+            structured_content = value.get("structured_content")
+            if structured_content is not None:
+                texts.append(
+                    "Structured result: " + json.dumps(structured_content, default=str)
+                )
+
+            if not texts:
+                texts.append("No content returned")
+
+            return "\n".join(texts)
         return str(value)
     except Exception as e:
         logger.warning(f"Failed to convert return value to string: {e}")
@@ -409,10 +429,40 @@ class MCPToolAdapter(AbstractBaseTool):
     @property
     def name(self) -> str:
         """Get tool name with optional prefix, formatted for LLM requirements."""
-        raw_name = f"{self._name_prefix}{self.mcp_tool.name}"
-        # Replace spaces and dashes with underscores to match LLM tool naming constraints
-        # This matches the frontend/chat.py filtering logic
-        return raw_name.replace(" ", "_").replace("-", "_")
+
+        def _sanitize(value: str) -> str:
+            # Replace spaces and dashes with underscores to match LLM tool
+            # naming constraints, then catch anything else disallowed --
+            # some MCP servers namespace tool names with characters (e.g.
+            # the `.` in `coding.start`) that OpenAI-compatible APIs reject
+            # outright (`^[a-zA-Z0-9_-]+$` is the pattern OpenAI/DeepSeek
+            # enforce on `tools[].function.name`), and a name that fails it
+            # 400s the whole LLM call, not just this one tool.
+            return re.sub(
+                r"[^A-Za-z0-9_-]", "_", value.replace(" ", "_").replace("-", "_")
+            )
+
+        sanitized_prefix = _sanitize(self._name_prefix)
+        sanitized_tool = _sanitize(self.mcp_tool.name)
+        # Same failure mode as the character check above -- an over-long
+        # name is rejected by the same providers, just on length instead of
+        # charset. `MAX_AGENT_TOOL_NAME_LENGTH` is this repo's own record of
+        # that provider limit (agent_tool_names.py), shared here rather than
+        # redeclared so the two adapters can't drift apart on the number.
+        #
+        # The tool name -- not the prefix -- is the only part that tells
+        # two tools on the *same* server apart, so truncating from the end
+        # (i.e. cutting the tool name) can make two distinct tools collide
+        # into one identical name once `prefix + tool_name` exceeds the
+        # limit. `_find_tool` has no duplicate-name detection, so a
+        # collision isn't a loud error like an illegal character is -- it's
+        # a silent wrong-tool dispatch. Squeeze the prefix instead and keep
+        # the tool name whole; `max(0, ...)` covers a tool name alone at or
+        # past the limit, where a negative slice would otherwise wrap
+        # around from the end instead of emptying.
+        budget_for_prefix = max(0, MAX_AGENT_TOOL_NAME_LENGTH - len(sanitized_tool))
+        combined = f"{sanitized_prefix[:budget_for_prefix]}{sanitized_tool}"
+        return combined[:MAX_AGENT_TOOL_NAME_LENGTH]
 
     @property
     def description(self) -> str:
@@ -504,6 +554,13 @@ class MCPToolAdapter(AbstractBaseTool):
         class MCPToolResult(BaseModel):
             content: List[Dict[str, Any]] = Field(
                 default_factory=list, description="Tool execution result content"
+            )
+            structured_content: Any = Field(
+                default=None,
+                description=(
+                    "Structured JSON result of the tool call, if the server "
+                    "returned one."
+                ),
             )
             is_error: bool = Field(
                 default=False,
@@ -754,9 +811,20 @@ class MCPToolAdapter(AbstractBaseTool):
                     else:
                         content.append({"text": str(content_item)})
 
+            # Read by wire name (by_alias=True), not by Python attribute name:
+            # the mcp SDK's CallToolResult field naming has changed across
+            # major versions (1.x uses plain camelCase attributes, 2.x uses
+            # snake_case attributes with a camelCase alias), but the MCP
+            # wire/JSON field names ("structuredContent", "isError") are
+            # spec-fixed and stable across both. `content` is excluded and
+            # handled by the loop above instead, since by_alias=True would
+            # also rename each content item's `meta` field to `_meta`.
+            other_fields = result.model_dump(by_alias=True, exclude={"content"})
+
             return {
                 "content": content,
-                "is_error": result.isError if hasattr(result, "isError") else False,
+                "structured_content": other_fields.get("structuredContent"),
+                "is_error": bool(other_fields.get("isError")),
             }
 
     async def _retry_after_authorization_failure(
@@ -1161,6 +1229,20 @@ async def _load_direct_mcp_tools(
                     error_type,
                 )
                 await asyncio.sleep(1)
+            else:
+                # DEBUG, not WARNING: same secret-leak concern as the
+                # sandboxed-load handler below -- a session-start/initialize
+                # /list-tools failure can carry secrets from the connection
+                # (e.g. an oauth-authenticated request's URL or headers
+                # surfacing in the exception message). Opt-in: set
+                # XAGENT_LOG_LEVEL=DEBUG (or run with --debug) to capture it
+                # when reproducing a failure.
+                logger.debug(
+                    "Exhausted retries loading tools from MCP server %s during %s",
+                    server_name,
+                    current_phase.value,
+                    exc_info=True,
+                )
     else:
         return MCPLoadResult(
             tools=(),
@@ -1454,6 +1536,19 @@ async def load_mcp_tools_as_agent_tools(
                         server_name,
                         error_type,
                     )
+                    # DEBUG, not ERROR: the sandboxed process's raw error
+                    # (e.g. its stderr) can carry secrets that flowed into
+                    # the MCP connection, so the always-on ERROR log above
+                    # deliberately keeps only the exception's class name
+                    # (see test_sandbox_list_failure_is_preserved_without_secret).
+                    # This traceback is opt-in -- set XAGENT_LOG_LEVEL=DEBUG
+                    # (or run with --debug) to capture it when reproducing a
+                    # failure.
+                    logger.debug(
+                        "Sandboxed MCP tool listing failure detail for server %s",
+                        server_name,
+                        exc_info=True,
+                    )
                     failures.append(
                         MCPServerLoadFailure(
                             server_name=server_name,
@@ -1523,6 +1618,19 @@ async def load_mcp_tools_as_agent_tools(
                 "Unexpected failure loading tools from MCP server %s (%s)",
                 server_name,
                 error_type,
+            )
+            # DEBUG, not ERROR, for the same secret-leak reason as the
+            # handlers above. This outer handler mostly catches
+            # _load_server_tools_bounded's wall-clock TimeoutError (a
+            # fixed-format message with no secret) or a genuine bug escaping
+            # the loop -- per-server session/initialize/list-tools failures
+            # for direct transports are handled, and logged, inside
+            # _load_direct_mcp_tools's retry loop instead. Opt-in: set
+            # XAGENT_LOG_LEVEL=DEBUG (or run with --debug) to capture it.
+            logger.debug(
+                "MCP server load failure detail for server %s",
+                server_name,
+                exc_info=True,
             )
             failures.append(
                 MCPServerLoadFailure(

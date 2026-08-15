@@ -1,13 +1,19 @@
 import json
+import re
 from contextlib import asynccontextmanager
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 from xagent.core.tools.adapters.vibe import mcp_adapter as mcp_adapter_module
+from xagent.core.tools.adapters.vibe.agent_tool_names import MAX_AGENT_TOOL_NAME_LENGTH
 from xagent.core.tools.adapters.vibe.mcp_adapter import (
     MCPFailurePhase,
     MCPServerLoadFailure,
@@ -38,6 +44,21 @@ def _mcp_tool(name: str = "echo") -> SimpleNamespace:
         description=f"{name} tool",
         inputSchema={"type": "object", "properties": {}},
     )
+
+
+class _SdkV2CallToolResult(BaseModel):
+    """Mirrors mcp SDK 2.0.0's ``CallToolResult`` field naming (snake_case
+    Python attributes with camelCase wire aliases), unlike the currently
+    locked mcp 1.19.0's plain camelCase attributes. Guards against the
+    adapter silently regressing to dropping structured_content/is_error
+    if the SDK constraint ever allows resolving mcp>=2.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    content: list[Any] = []
+    structured_content: Any = None
+    is_error: bool = False
 
 
 def test_mcp_server_load_failure_is_immutable():
@@ -169,6 +190,34 @@ async def test_mcp_loader_classifies_direct_failure_phase(
 
 
 @pytest.mark.asyncio
+async def test_mcp_loader_direct_retry_exhaustion_logs_debug_traceback(
+    monkeypatch, caplog
+):
+    # Companion to test_mcp_loader_classifies_direct_failure_phase above:
+    # that test pins WARNING and checks no secret leaks into the always-on
+    # log; this one pins DEBUG and checks the opt-in traceback is actually
+    # there once retries are exhausted -- the retry loop's final attempt
+    # falls through to a silent `else` branch otherwise, so this is the only
+    # place that failure detail is ever logged for a direct-transport server.
+    @asynccontextmanager
+    async def fake_create_session(_connection):
+        raise ValueError("boom")
+        yield  # pragma: no cover - unreachable, satisfies asynccontextmanager
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", fake_create_session)
+    monkeypatch.setattr(mcp_adapter_module.asyncio, "sleep", AsyncMock())
+    caplog.set_level("DEBUG")
+
+    result = await load_mcp_tools_as_agent_tools(
+        {"broken": {"transport": "stdio", "command": "python", "args": []}}
+    )
+
+    assert len(result.failures) == 1
+    assert result.failures[0].attempts == 3
+    assert "ValueError: boom" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_mcp_loader_reports_no_tools(monkeypatch):
     class FakeSession:
         async def initialize(self):
@@ -267,6 +316,107 @@ def test_mcp_tool_adapter_source_server_defaults_none():
     )
     assert adapter.source_server is None
     assert adapter.metadata.source_server is None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        # `.` namespacing, the case the fix was written for.
+        ("coding.start", "mcp_Coding_MCP_coding_start"),
+        # Path-like separator.
+        ("list/items", "mcp_Coding_MCP_list_items"),
+        # Parentheses and a space alongside the version marker.
+        ("run (v2)", "mcp_Coding_MCP_run__v2_"),
+        # Non-ASCII names collapse to underscores rather than raising or
+        # being romanized -- `_semantic_slug` (agent_tool_names.py) makes
+        # the opposite, deliberate choice for agent-delegation tool names
+        # (pinyin-transliterate instead of drop) because it can carry a
+        # unique per-agent id in the suffix; MCP tool names have no such
+        # id to fall back on for uniqueness, so this test pins today's
+        # trade-off (two same-length CJK names collide) rather than
+        # leaving it to be discovered later.
+        ("查询", "mcp_Coding_MCP___"),
+    ],
+)
+def test_mcp_tool_adapter_name_strips_disallowed_characters_for_openai_compatible_apis(
+    tool_name, expected
+):
+    """OpenAI-compatible chat-completions APIs (and at least DeepSeek's)
+    validate `tools[].function.name` against `^[a-zA-Z0-9_-]+$` and 400
+    the whole call if any tool name fails it. MCP servers namespace tool
+    names with all sorts of characters (e.g. the `.` in `coding.start`)
+    to avoid collisions between generically-named tools -- none of that
+    must survive into the LLM-visible name."""
+    mcp_tool = SimpleNamespace(
+        name=tool_name,
+        description="Start a coding run",
+        inputSchema={"type": "object", "properties": {}},
+    )
+    adapter = _build_mcp_tool_adapter(
+        "Coding MCP",
+        {"transport": "streamable_http", "url": "http://127.0.0.1:8642/mcp"},
+        mcp_tool,
+    )
+
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", adapter.name)
+    assert adapter.name == expected
+
+
+def test_mcp_tool_adapter_name_is_truncated_to_the_provider_length_limit():
+    """Same failure mode as an illegal character -- an over-long name is
+    rejected by the same providers, just on length. Nothing upstream
+    (MCP server name, MCP tool name) is length-bounded, so this adapter
+    must enforce the limit itself instead of assuming it never comes up.
+    A tool name alone at or past the limit squeezes the prefix down to
+    nothing rather than wrapping around from the end (a negative slice
+    on the *tool* name would otherwise do exactly that).
+    """
+    mcp_tool = SimpleNamespace(
+        name="x" * 200,
+        description="A tool with an absurdly long name",
+        inputSchema={"type": "object", "properties": {}},
+    )
+    adapter = _build_mcp_tool_adapter(
+        "Coding MCP",
+        {"transport": "streamable_http", "url": "http://127.0.0.1:8642/mcp"},
+        mcp_tool,
+    )
+
+    assert len(adapter.name) == MAX_AGENT_TOOL_NAME_LENGTH
+    assert adapter.name == "x" * MAX_AGENT_TOOL_NAME_LENGTH
+
+
+def test_mcp_tool_adapter_truncation_keeps_same_server_tools_distinct():
+    """Regression: truncating the *tool name* end of `prefix + tool_name`
+    can make two distinct tools on one long-named server collapse into
+    one identical LLM-visible name once the combined length passes
+    `MAX_AGENT_TOOL_NAME_LENGTH` -- `_find_tool` (react.py) has no
+    duplicate-name detection, so the model asking for one tool would
+    silently get whichever tool happens to register first instead. MCP
+    server names are bounded at 100 (web/api/mcp.py), so 59 characters
+    -- long enough that `mcp_<server>_` alone already reaches the limit
+    -- is a length a real deployment can produce, not a contrived one.
+    The fix keeps the tool name whole and squeezes the prefix instead.
+    """
+    server = "s" * 59
+
+    def _adapter(tool_name: str) -> MCPToolAdapter:
+        return _build_mcp_tool_adapter(
+            server,
+            {"transport": "streamable_http", "url": "http://127.0.0.1:8642/mcp"},
+            SimpleNamespace(
+                name=tool_name,
+                description=tool_name,
+                inputSchema={"type": "object", "properties": {}},
+            ),
+        )
+
+    read_name = _adapter("read_file").name
+    delete_name = _adapter("delete_all_files").name
+
+    assert read_name != delete_name
+    assert read_name.endswith("read_file")
+    assert delete_name.endswith("delete_all_files")
 
 
 def test_mcp_tool_adapter_defaults_to_not_concurrency_safe():
@@ -392,6 +542,222 @@ def test_resolver_challenge_rejects_non_refreshable_evidence(exc):
 
 def test_mcp_return_value_as_string_keeps_malformed_scalar_content_together():
     assert _mcp_return_value_as_string({"content": "error"}) == "error"
+
+
+def test_mcp_return_value_as_string_surfaces_structured_content():
+    value = {
+        "content": [{"text": "I'll wait for the background agents to complete."}],
+        "structured_content": {"status": "completed", "run_id": "abc"},
+        "is_error": False,
+    }
+
+    rendered = _mcp_return_value_as_string(value)
+
+    assert "I'll wait for the background agents to complete." in rendered
+    assert "completed" in rendered
+    assert "abc" in rendered
+
+
+def test_mcp_return_value_as_string_omits_structured_content_when_absent():
+    value = {"content": [{"text": "ok"}], "is_error": False}
+
+    assert _mcp_return_value_as_string(value) == "ok"
+
+
+def test_mcp_return_value_as_string_omits_no_content_placeholder_when_structured_content_present():
+    value = {
+        "content": [],
+        "structured_content": {"status": "completed"},
+        "is_error": False,
+    }
+
+    rendered = _mcp_return_value_as_string(value)
+
+    assert "No content returned" not in rendered
+    assert "completed" in rendered
+
+
+@pytest.mark.asyncio
+async def test_execute_mcp_call_forwards_structured_content(monkeypatch):
+    mcp_tool = _mcp_tool("status")
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    class _FakeSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments, **kwargs):
+            return CallToolResult(
+                content=[],
+                isError=False,
+                structuredContent={"status": "completed", "run_id": "abc"},
+            )
+
+    @asynccontextmanager
+    async def _fake_create_session(_connection):
+        yield _FakeSession()
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", _fake_create_session)
+
+    result = await adapter._execute_mcp_call(adapter.connection, {}, {})
+
+    assert result["structured_content"] == {"status": "completed", "run_id": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_execute_mcp_call_structured_content_defaults_to_none(monkeypatch):
+    mcp_tool = _mcp_tool("echo")
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    class _FakeSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments, **kwargs):
+            return CallToolResult(content=[], isError=False)
+
+    @asynccontextmanager
+    async def _fake_create_session(_connection):
+        yield _FakeSession()
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", _fake_create_session)
+
+    result = await adapter._execute_mcp_call(adapter.connection, {}, {})
+
+    assert result["structured_content"] is None
+
+
+@pytest.mark.asyncio
+async def test_execute_mcp_call_reads_snake_case_sdk_structured_content(monkeypatch):
+    """Guards against the adapter silently regressing on an mcp SDK version
+    (e.g. 2.0.0) whose CallToolResult exposes structured_content instead of
+    structuredContent as the Python attribute name."""
+    mcp_tool = _mcp_tool("status")
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    class _FakeSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments, **kwargs):
+            return _SdkV2CallToolResult(
+                content=[],
+                structured_content={"status": "completed", "run_id": "abc"},
+                is_error=False,
+            )
+
+    @asynccontextmanager
+    async def _fake_create_session(_connection):
+        yield _FakeSession()
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", _fake_create_session)
+
+    result = await adapter._execute_mcp_call(adapter.connection, {}, {})
+
+    assert result["structured_content"] == {"status": "completed", "run_id": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_execute_mcp_call_reads_snake_case_sdk_error_flag(monkeypatch):
+    """Same regression guard as above, for the error flag: a hasattr-based
+    read on ``isError`` would silently report success on an SDK version
+    whose attribute is ``is_error`` instead."""
+    mcp_tool = _mcp_tool("status")
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    class _FakeSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments, **kwargs):
+            return _SdkV2CallToolResult(content=[], is_error=True)
+
+    @asynccontextmanager
+    async def _fake_create_session(_connection):
+        yield _FakeSession()
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", _fake_create_session)
+
+    result = await adapter._execute_mcp_call(adapter.connection, {}, {})
+
+    assert result["is_error"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_mcp_call_structured_content_reaches_the_model_observation(
+    monkeypatch,
+):
+    """The seam test: proves structured_content actually reaches the string
+    the LLM reads, by running it through the real _execute_mcp_call and then
+    the real ExecutionContext.add_tool_result -- not just that a hand-built
+    dict happens to render correctly."""
+    from xagent.core.agent.context import ExecutionContext
+
+    mcp_tool = _mcp_tool("coding_agent_status")
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    class _FakeSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments, **kwargs):
+            return CallToolResult(
+                content=[],
+                structuredContent={"status": "completed", "run_id": "abc"},
+                isError=False,
+            )
+
+    @asynccontextmanager
+    async def _fake_create_session(_connection):
+        yield _FakeSession()
+
+    monkeypatch.setattr(mcp_adapter_module, "create_session", _fake_create_session)
+
+    result = await adapter._execute_mcp_call(adapter.connection, {}, {})
+
+    context = ExecutionContext()
+    message = context.add_tool_result(
+        "coding_agent_status", result, tool_call_id="tool-1"
+    )
+
+    assert message.content.startswith("Tool coding_agent_status returned: ")
+    assert "completed" in message.content
+    assert "abc" in message.content
+
+
+def test_return_type_declares_structured_content_field():
+    mcp_tool = SimpleNamespace(
+        name="status",
+        description="status tool",
+        inputSchema={"type": "object", "properties": {}},
+        outputSchema={
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+        },
+    )
+    adapter = MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection={"transport": "streamable_http", "url": "https://mcp.example.test"},
+    )
+
+    return_model = adapter.return_type()
+
+    assert "structured_content" in return_model.model_fields
 
 
 def test_build_mcp_tool_adapter_honors_concurrent_tool_allowlist():
@@ -608,7 +974,7 @@ async def test_runtime_bindings_hide_and_inject_mcp_meta_and_tool_arguments(
             captured["name"] = name
             captured["arguments"] = arguments
             captured["kwargs"] = kwargs
-            return SimpleNamespace(content=[], isError=False)
+            return CallToolResult(content=[], isError=False)
 
     @asynccontextmanager
     async def _fake_create_session(_connection):
@@ -931,6 +1297,7 @@ async def test_real_mcp_session_retries_nested_resolver_401_once(monkeypatch, ca
                 "meta": None,
             }
         ],
+        "structured_content": None,
         "is_error": False,
     }
     assert initial_client_builds == 1
@@ -1424,8 +1791,8 @@ async def test_delegated_authorization_401_refreshes_connection_once(monkeypatch
                 raise RuntimeError("HTTP 401 Unauthorized")
 
         async def call_tool(self, name, arguments, **kwargs):
-            return SimpleNamespace(
-                content=[SimpleNamespace(model_dump=lambda: {"text": "ok"})],
+            return CallToolResult(
+                content=[TextContent(type="text", text="ok")],
                 isError=False,
             )
 
@@ -1441,7 +1808,18 @@ async def test_delegated_authorization_401_refreshes_connection_once(monkeypatch
 
     result = await adapter.run_json_async({})
 
-    assert result == {"content": [{"text": "ok"}], "is_error": False}
+    assert result == {
+        "content": [
+            {
+                "type": "text",
+                "text": "ok",
+                "annotations": None,
+                "meta": None,
+            }
+        ],
+        "structured_content": None,
+        "is_error": False,
+    }
     assert refresh_calls == 1
     assert [item["headers"]["Authorization"] for item in connections] == [
         "Bearer expired-token",
