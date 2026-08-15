@@ -568,7 +568,11 @@ class TestWorkspaceFileOperations:
 
         assert "within this task's reach" in description
         # Rows whose reads always fail must not be offered at all.
-        assert "no filesystem path to them is returned here" in description
+        assert "no filesystem path to any of them is returned here" in description
+        # Deleting a task detaches its uploads rather than dropping them, so the
+        # description must not promise task-less uploads are still listed.
+        assert "left behind by a task that was deleted" in description
+        assert "not tied to a task" not in description
         # Paging and the two kinds of row the model can receive.
         assert "raise the offset to see older ones" in description
         assert "appended outside that slicing" in description
