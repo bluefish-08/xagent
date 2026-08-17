@@ -79,10 +79,12 @@ class SkillParser:
             "path": path,
             "content": content,  # Complete SKILL.md content
             "template": template_content,  # template.md content (if exists)
-            "description": section_description
-            or SkillParser._frontmatter_string(frontmatter, "description"),
-            "when_to_use": section_when_to_use
-            or SkillParser._frontmatter_string(frontmatter, "when_to_use"),
+            # Frontmatter wins like tags do: it is the bounded routing metadata,
+            # while a body section is prose with no length ceiling.
+            "description": SkillParser._frontmatter_string(frontmatter, "description")
+            or section_description,
+            "when_to_use": SkillParser._frontmatter_string(frontmatter, "when_to_use")
+            or section_when_to_use,
             "execution_flow": SkillParser._extract_section(content, "Execution Flow"),
             "tags": tags,
             "files": sorted(files),
