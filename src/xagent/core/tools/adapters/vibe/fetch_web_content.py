@@ -15,8 +15,11 @@ class FetchWebContentArgs(BaseModel):
     include_assets: bool = Field(
         default=False,
         description=(
-            "Also discover image, icon, manifest, script, and stylesheet URLs. "
-            "Enable this when looking for logos, brand assets, or images."
+            "Also list image, icon, manifest, script, and stylesheet URLs found "
+            "in the page; nothing is downloaded. Enable it when the user asked "
+            "you to inspect or enumerate what a page loads, or to obtain an "
+            "asset they asked for. Do not enable it to go asset-hunting on your "
+            "own."
         ),
     )
     asset_query: str | None = Field(
@@ -80,9 +83,12 @@ class FetchWebContentTool(AbstractBaseTool):
             "to markdown. Use this after web_search finds a promising source, or "
             "when the user provides a URL that needs to be read. This is for "
             "retrieving page content; use web_search first when you need to "
-            "discover sources. When the task needs a logo or other exact web "
-            "asset, set include_assets=true and usually asset_query='logo'. The "
-            "returned assets preserve official page URLs; pass the chosen URL to "
+            "discover sources. When the user asked you to obtain an exact asset, "
+            "or to inspect what a page loads, set include_assets=true and "
+            "asset_query to match it — the page may be one they named or one "
+            "web_search found for that request. What the tool is not for is "
+            "going after a brand's identity assets uninstructed. The returned "
+            "assets preserve official page URLs; pass the chosen URL to "
             "download_web_asset instead of recreating it with api_call/write_file."
         )
 
