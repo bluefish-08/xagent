@@ -70,6 +70,11 @@ def _built_image_descriptions() -> dict[str, str]:
     return {t.name: _normalized(t.description) for t in tool.get_tools()}
 
 
+# Emitted by the image builder but carrying no retrieval route: it only lists
+# configured models. Named so a third tool from the same wrapper fails below.
+IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE = {"list_image_models"}
+
+
 def _surfaces() -> dict[str, str]:
     """Every description reaching the model alongside an asset-fetch route."""
     image = _built_image_descriptions()
@@ -148,6 +153,20 @@ REQUIRED_WORDING = {
     "generate_image.description": "an asset the user directed you to retrieve",
     "edit_image.description": "an asset the user directed you to retrieve",
 }
+
+
+def test_every_built_image_tool_is_classified() -> None:
+    """A new tool from the same wrapper needs triage, not silent coverage."""
+    built = set(_built_image_descriptions())
+    named = {n.split(".")[0] for n in REQUIRED_WORDING} | (
+        IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE
+    )
+
+    assert built <= named, (
+        f"unclassified image tools: {sorted(built - named)}. Add each to "
+        f"REQUIRED_WORDING with its authorization wording, or to "
+        f"IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE if it takes no external reference."
+    )
 
 
 def test_every_retrieval_tool_is_classified() -> None:
@@ -251,8 +270,13 @@ def test_page_wide_inspection_leaves_asset_query_empty() -> None:
         "leaving asset_query empty so nothing is filtered out"
         in (_surfaces()["fetch_web_content.description"])
     )
-    assert "Leave it empty to list everything the page loads" in (
-        _field(FetchWebContentArgs, "asset_query")
+    query_field = _field(FetchWebContentArgs, "asset_query")
+    assert "Leave it empty to list every supported static reference" in query_field
+    # The tool parses the initial HTML and caps the result, so promising
+    # "everything the page loads" overstates what comes back.
+    assert "subject to the tool's result limit" in query_field
+    assert "runtime-loaded and CSS-nested resources are never enumerated" in (
+        query_field
     )
 
 
@@ -303,3 +327,53 @@ def test_skill_separates_looking_from_taking() -> None:
         body
     )
     assert "ask before acquiring or using it" in body
+
+
+def _system_context_after_load_skill() -> str:
+    """The system message an LLM call actually receives once the skill is loaded."""
+    import asyncio
+
+    from xagent.core.agent.context.execution import ExecutionContext
+    from xagent.core.agent.context.skill_tool import build_load_skill_tool
+
+    skill = SkillParser.parse(SKILL_DIR)
+
+    class _Manager:
+        async def list_skills(self) -> list[dict]:
+            return [
+                {
+                    "name": skill["name"],
+                    "description": skill.get("description", ""),
+                    "when_to_use": skill.get("when_to_use", ""),
+                }
+            ]
+
+        async def get_skill(self, name: str) -> dict | None:
+            return skill if name == skill["name"] else None
+
+    async def run() -> str:
+        context = ExecutionContext(system_prompt="Base prompt.")
+        tool = await build_load_skill_tool(skill_manager=_Manager(), context=context)
+        assert tool is not None
+        await tool.execute(skill["name"])
+        return str(context.get_messages_for_llm()[0]["content"])
+
+    return " ".join(asyncio.run(run()).split())
+
+
+def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
+    """Reading the file proves the text exists; this proves it reaches the model.
+
+    A transformation between the skill file and the assembled system message would
+    otherwise be invisible to every assertion above.
+    """
+    system = _system_context_after_load_skill()
+
+    assert "Two sources need no permission" in system
+    assert "take it only when they tell you to" in system
+    assert "their" in system and "direction permits the retrieval" in system
+    assert "act on that choice instead of asking again" in system
+    # The wording this PR exists to remove must not be reachable from the
+    # assembled context either.
+    for phrase in ("official web presence", "retrieved with the web tools"):
+        assert phrase not in system, f"assembled context still sanctions: {phrase!r}"

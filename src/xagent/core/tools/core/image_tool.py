@@ -54,10 +54,13 @@ When given a user request, rewrite and enrich the prompt into a **professional i
      produced, or an asset the user directed you to retrieve; do not retrieve
      one on your own initiative, not even from a brand's official site, and
      never take one from the user's other tasks. A plausible-looking search
-     result is not proof that an asset is the brand's; when nothing verifiable
-     is available, ask the user how to proceed — and once they have chosen to
-     continue without it, act on that choice instead of asking again. Pass such
-     a reference by path, URL, or
+     result is not proof that an asset is the brand's, and neither is one the
+     user sent you after: their direction permits the retrieval, not the
+     authenticity — a fetched result stays unverified until they confirm its
+     source, and an unverified mark cannot serve an identity-critical reference.
+     When nothing verifiable is available, ask the user how to proceed — and once
+     they have chosen to continue without it, act on that choice instead of
+     asking again. Pass such a reference by path, URL, or
      file_id through the images parameter. Mentioning a reference only in the
      prompt does not attach it to the model request.
   4. Generated depictions are not suitable when a supplied logo, QR code,
@@ -145,8 +148,11 @@ Use only images the user supplied, the task already produced, or an asset the
 user directed you to retrieve; do not retrieve source or reference material on
 your own initiative, not even from a brand's official site, and never take one
 from the user's other tasks. A plausible-looking search result is not proof that
-an asset is the brand's; when nothing verifiable is available, ask the user how
-to proceed — and once they have chosen to continue without it, act on that
+an asset is the brand's, and neither is one the user sent you after: their
+direction permits the retrieval, not the authenticity — a fetched result stays
+unverified until they confirm its source, and an unverified mark cannot serve an
+identity-critical reference. When nothing verifiable is available, ask the user
+how to proceed — and once they have chosen to continue without it, act on that
 choice instead of asking again.
 
 Available models (⭐[DEFAULT] marks the configured default model):

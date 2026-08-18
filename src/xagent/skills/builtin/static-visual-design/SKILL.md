@@ -185,11 +185,15 @@ candidates. Two sources need no permission: an asset the user gave you in this
 task — including one attached in an earlier turn, whose file_id is no longer in
 context and which you recover by finding it with `list_all_user_files` — and the
 current task workspace. Going to look for the asset yourself is a third path that
-belongs to the user, not to you: take it only when they tell you to. Being told to
-look at a page is not being told to take what it holds — list what is there, then
+belongs to the user, not to you: take it only when they tell you to. Their
+direction permits the retrieval, not the authenticity: what comes back stays
+unverified until they confirm its source. Being told to look at a page is not
+being told to take what it holds — list what is there, then
 ask before acquiring or using it. If no source yields a verified asset, ask the
-user for it; a visually plausible search result is not proof that a logo is
-authentic.
+user how to proceed — supply it, reserve clean space for it, or build the concept
+unbranded — and once they choose, act on that choice instead of asking again; only
+a later change in what they want reopens the question. A visually plausible search
+result is not proof that a logo is authentic.
 
 The user's other tasks and earlier outputs are not a source. Do not list them
 looking for brand material, and do not reverse-engineer a brand's identity by
@@ -211,10 +215,10 @@ Treat identity-critical assets differently:
   placement requires exact reproduction, say so plainly and ask the user to
   arrange deterministic post-processing; never claim a generated candidate is one.
 - Unless the user explicitly requests an unbranded or logo-free concept, a
-  brand-specific final requires a verified logo. If none is available, ask for
-  it and keep any interim output clearly labeled as a concept draft. Do not mark
-  the requested branded asset complete, and never typeset or invent a substitute
-  logo.
+  brand-specific final requires a verified logo. If none is available, ask how to
+  proceed once. After they choose reserved space or an unbranded concept, render
+  and inspect that draft without asking again, label it a concept draft, and leave
+  only the branded final incomplete. Never typeset or invent a substitute logo.
 
 Separate stable identity cues from temporary campaign styling. Stable cues may
 include the official logo, recurring color relationships, typography character,
@@ -419,9 +423,11 @@ The gate has two halves and the budget touches only one of them.
 asset exists as a successful tool result, including every direction and placement
 the brief or this skill asks for. A spent budget is never a reason an asset is
 absent, because coverage is not budgeted: if one has no candidate, render it. A
-brand-specific final also needs its verified logo — when none was ever obtained,
-ask the user rather than shipping a substitute, and keep the interim output
-labeled a concept draft rather than marking the branded asset complete.
+brand-specific final also needs its verified logo — when none was ever obtained
+and the user has not yet chosen, ask rather than shipping a substitute. Once they
+have chosen reserved space or an unbranded concept, that draft is the deliverable
+for this turn: hand it back labeled a concept draft, with only the branded final
+left incomplete, and do not reopen the question.
 
 **Quality is what the budget releases.** Every asset should pass
 `understand_media` inspection with no automatic rejection; a successful
