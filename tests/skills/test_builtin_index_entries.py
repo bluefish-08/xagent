@@ -36,9 +36,10 @@ def test_routing_field_is_present_and_untruncated(skill_dir: Path, field: str) -
 
     entry = _index_text(value)
     assert entry == collapsed, (
-        f"{skill_dir.name}: {field} is {len(collapsed)} chars and gets truncated to "
-        f"{INDEX_ENTRY_MAX_CHARS}; {len(collapsed) - INDEX_ENTRY_MAX_CHARS} chars never "
-        f"reach the model"
+        f"{skill_dir.name}: {field} is {len(collapsed)} chars, "
+        f"{len(collapsed) - INDEX_ENTRY_MAX_CHARS} over the "
+        f"{INDEX_ENTRY_MAX_CHARS}-char cap; the index entry keeps only "
+        f"{len(entry) - 1} of them and drops the rest"
     )
 
 
@@ -60,3 +61,24 @@ def test_frontmatter_wins_over_body_section() -> None:
 
     assert skill["description"] == "from frontmatter"
     assert skill["when_to_use"] == "also from frontmatter"
+
+
+def test_whitespace_only_frontmatter_falls_through_to_the_section() -> None:
+    """Otherwise it wins and then collapses to an empty index entry."""
+    skill = SkillParser.parse_bundle(
+        name="fixture",
+        files={
+            "SKILL.md": (
+                "---\n"
+                'description: "   "\n'
+                "when_to_use: |\n"
+                "  \n"
+                "---\n\n"
+                "## Description\n\nfrom section\n\n"
+                "## When to Use\n\nalso from section\n"
+            ).encode()
+        },
+    )
+
+    assert skill["description"] == "from section"
+    assert skill["when_to_use"] == "also from section"
