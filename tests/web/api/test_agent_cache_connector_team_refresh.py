@@ -83,7 +83,7 @@ def _cached_manager(built_team_id: Optional[int]) -> tuple[Any, Any, Any]:
     return manager, agent, tool_config
 
 
-async def _reuse(manager: AgentServiceManager, snapshot: Any) -> Any:
+async def _reuse(manager: AgentServiceManager, snapshot: Any, **extra: Any) -> Any:
     return await manager.get_agent_for_task(
         task_id=TASK_ID,
         db=None,
@@ -91,6 +91,7 @@ async def _reuse(manager: AgentServiceManager, snapshot: Any) -> Any:
         task_setup_snapshot=snapshot,
         task_owner_user_id=OWNER_ID,
         resolved_execution_scope=None,
+        **extra,
     )
 
 
@@ -123,13 +124,42 @@ async def test_unchanged_team_does_not_rebuild_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_absent_snapshot_leaves_the_team_alone() -> None:
-    """No snapshot is no read at all -- the sync may not guess a value."""
+    """Neither read supplied is no read at all -- the sync may not guess."""
     manager, agent, tool_config = _cached_manager(101)
 
     await _reuse(manager, None)
 
     assert tool_config._connector_team_id == 101
     agent.invalidate_tools.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("built_team_id", "read_team_id"),
+    [(None, 101), (101, 202), (101, None)],
+)
+async def test_governing_team_projection_alone_refreshes(
+    built_team_id, read_team_id
+) -> None:
+    """The reply paths pass only the team projection -- no snapshot -- so the
+    scalar has to be sufficient on its own."""
+    manager, agent, tool_config = _cached_manager(built_team_id)
+
+    await _reuse(manager, None, governing_team_id=read_team_id)
+
+    assert tool_config._connector_team_id == read_team_id
+    agent.invalidate_tools.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unread_projection_does_not_override_a_snapshot() -> None:
+    """Build callers pass a snapshot and no projection; the default sentinel
+    must not be mistaken for an authoritative ``None``."""
+    manager, agent, tool_config = _cached_manager(None)
+
+    await _reuse(manager, _snapshot(101))
+
+    assert tool_config._connector_team_id == 101
 
 
 @pytest.mark.asyncio

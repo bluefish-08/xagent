@@ -131,6 +131,8 @@ from ..services.task_runtime import (
     validate_task_extension_requests,
 )
 from ..services.task_setup_snapshot import (
+    GOVERNING_TEAM_NOT_READ,
+    GoverningTeamNotRead,
     RuntimeUserFields,
     TaskOwnerMismatchError,
     TaskSetupSnapshot,
@@ -2105,6 +2107,9 @@ class AgentServiceManager:
         resolved_execution_scope: Union[
             ExecutionScope, None, ExecutionScopeNotProvided
         ] = EXECUTION_SCOPE_NOT_PROVIDED,
+        governing_team_id: Union[int, None, GoverningTeamNotRead] = (
+            GOVERNING_TEAM_NOT_READ
+        ),
     ) -> AgentService:
         lock = self._agent_build_locks.get(task_id)
         if lock is None:
@@ -2119,6 +2124,7 @@ class AgentServiceManager:
                 task_owner_user_id=task_owner_user_id,
                 connector_runtime_turn_id=connector_runtime_turn_id,
                 resolved_execution_scope=resolved_execution_scope,
+                governing_team_id=governing_team_id,
             )
 
     async def _get_agent_for_task_unlocked(
@@ -2132,6 +2138,9 @@ class AgentServiceManager:
         resolved_execution_scope: Union[
             ExecutionScope, None, ExecutionScopeNotProvided
         ] = EXECUTION_SCOPE_NOT_PROVIDED,
+        governing_team_id: Union[int, None, GoverningTeamNotRead] = (
+            GOVERNING_TEAM_NOT_READ
+        ),
     ) -> AgentService:
         """Get or create AgentService instance for specific task.
 
@@ -2415,7 +2424,9 @@ class AgentServiceManager:
                             self._sync_connector_runtime_turn(
                                 task_id, connector_runtime_turn_id
                             )
-                            self._sync_connector_team_id(task_id, task_setup_snapshot)
+                            self._sync_connector_team_id(
+                                task_id, task_setup_snapshot, governing_team_id
+                            )
                             self._sync_execution_scope(task_id, scope)
                             return self._agents[task_id]
                     except (
@@ -2870,7 +2881,7 @@ class AgentServiceManager:
         self._agent_owner_ids[task_id] = runtime_user_id
         self._agent_scope_fingerprints[task_id] = fingerprint
         self._sync_connector_runtime_turn(task_id, connector_runtime_turn_id)
-        self._sync_connector_team_id(task_id, task_setup_snapshot)
+        self._sync_connector_team_id(task_id, task_setup_snapshot, governing_team_id)
         self._sync_execution_scope(task_id, scope)
         return self._agents[task_id]
 
@@ -2918,17 +2929,28 @@ class AgentServiceManager:
             )
 
     def _sync_connector_team_id(
-        self, task_id: int, task_setup_snapshot: Optional[TaskSetupSnapshot]
+        self,
+        task_id: int,
+        task_setup_snapshot: Optional[TaskSetupSnapshot],
+        governing_team_id: Union[int, None, GoverningTeamNotRead],
     ) -> None:
         """Re-derive the governing agent's team on a reused tool config.
 
-        Only a wholly absent snapshot skips the sync. A present snapshot whose
+        Either input is an authoritative read and the scalar wins when both
+        arrive: build callers already hold a full snapshot, while cache-hit
+        refresh callers pass only the team projection. A snapshot whose
         ``agent`` is ``None`` is an authoritative negative -- the governing
         agent is gone or no longer resolvable -- and must clear the team the
         same way fresh construction derives ``None`` from it, never leave the
-        previous team's grants in place.
+        previous team's grants in place. Only the absence of both reads skips
+        the sync.
         """
-        if task_setup_snapshot is None:
+        if not isinstance(governing_team_id, GoverningTeamNotRead):
+            team_id = governing_team_id
+        elif task_setup_snapshot is not None:
+            snapshot_agent = task_setup_snapshot.agent
+            team_id = snapshot_agent.team_id if snapshot_agent is not None else None
+        else:
             return
         agent = self._agents.get(task_id)
         if agent is None:
@@ -2937,8 +2959,6 @@ class AgentServiceManager:
         tool_config = getattr(agent, "tool_config", None)
         if tool_config is None or not hasattr(tool_config, "set_connector_team_id"):
             return
-        snapshot_agent = task_setup_snapshot.agent
-        team_id = snapshot_agent.team_id if snapshot_agent is not None else None
         if tool_config.set_connector_team_id(team_id):
             logger.info(
                 "Refreshing connector tools for task %s: governing team is now %s",

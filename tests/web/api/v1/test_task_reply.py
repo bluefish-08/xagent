@@ -206,10 +206,27 @@ def test_reply_happy_path_resumes_the_same_run(mock_start_task):
     task_id = _create_waiting_task(full_key, agent_id, run_id="run-original")
     _insert_question_message(task_id)
 
+    # A governing team to actually resolve, so the projection is proven to read
+    # the agent row rather than merely being threaded through as None.
+    team_db = _direct_db_session()
+    try:
+        governed = team_db.query(Agent).filter(Agent.id == agent_id).one()
+        governed.team_id = 77
+        team_db.commit()
+    finally:
+        team_db.close()
+
     post_user_message = AsyncMock(return_value=True)
     agent_patch, agent_service = _patch_agent_service(post_user_message)
+    bootstrap_load = MagicMock(
+        side_effect=AssertionError("reply loaded a full bootstrap snapshot")
+    )
     with (
         agent_patch,
+        patch(
+            "xagent.web.services.task_setup_snapshot.load_task_setup_snapshot_sync",
+            new=bootstrap_load,
+        ),
         patch(
             "xagent.web.api.v1.task_reply._schedule_waiting_reply_resume",
             new=AsyncMock(),
@@ -234,13 +251,13 @@ def test_reply_happy_path_resumes_the_same_run(mock_start_task):
     assert call_kwargs["display_message"] == "yes, continue"
     assert call_kwargs["request_interrupt"] is False
     assert call_kwargs["turn_id"].startswith(f"v1:reply:{task_id}:")
-    # The turn id is message metadata; the snapshot is the authoritative agent
-    # read that lets a cached tool config revalidate its team (#1281).
-    resume_snapshot = agent_service.agent_manager.get_agent_for_task.await_args.kwargs[
-        "task_setup_snapshot"
-    ]
-    assert resume_snapshot is not None
-    assert resume_snapshot.task.id == task_id
+    # The turn id is message metadata; the governing-team projection is the
+    # authoritative read that lets a cached tool config revalidate its team
+    # (#1281), without the bootstrap snapshot's transcript/recovery loads.
+    resume_kwargs = agent_service.agent_manager.get_agent_for_task.await_args.kwargs
+    assert resume_kwargs["governing_team_id"] == 77
+    assert "task_setup_snapshot" not in resume_kwargs
+    bootstrap_load.assert_not_called()
     schedule_resume.assert_called_once()
     scheduled_lease = schedule_resume.call_args.kwargs["task_lease"]
     assert scheduled_lease.run_id == "run-original"

@@ -454,22 +454,22 @@ async def _resume_input_required_a2a_task(
     try:
 
         async def inject_user_message() -> tuple[Any, bool]:
-            from ..services.task_setup_snapshot import (
-                load_task_setup_snapshot_sync,
-            )
+            from ..services.task_setup_snapshot import load_governing_team_sync
             from .chat import get_agent_manager
 
-            # An authoritative agent read, not just message metadata: a
-            # cache hit reuses a tool config whose governing team was captured
-            # on an earlier turn, and only a snapshot can revalidate it.
-            snapshot = await run_db_io_cancellation_safe(
-                lambda: load_task_setup_snapshot_sync(task_id, task_owner_user_id)
+            # An authoritative agent read, not the reply's own turn id, is what
+            # lets a reused tool config revalidate its governing team. Only the
+            # team projection: a cache miss loads its own full snapshot, so the
+            # transcript/recovery reads a bootstrap snapshot performs would be
+            # spent for one scalar on every reply.
+            governing_team_id = await run_db_io_cancellation_safe(
+                lambda: load_governing_team_sync(task_id, task_owner_user_id)
             )
             agent_service = await get_agent_manager().get_agent_for_task(
                 task_id,
                 None,
-                task_setup_snapshot=snapshot,
                 task_owner_user_id=task_owner_user_id,
+                governing_team_id=governing_team_id,
             )
             posted = await agent_service.post_user_message(
                 str(task_id),

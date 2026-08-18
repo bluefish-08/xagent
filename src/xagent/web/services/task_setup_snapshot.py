@@ -229,6 +229,51 @@ def _resolve_inline_preview_excluded_agent_id(
     return int(preview_agent.id)
 
 
+class GoverningTeamNotRead:
+    """Marker distinguishing an unread governing team from a resolved ``None``."""
+
+    __slots__ = ()
+
+
+GOVERNING_TEAM_NOT_READ = GoverningTeamNotRead()
+
+
+def load_governing_team_sync(
+    task_id: int,
+    task_owner_user_id: Optional[int],
+) -> int | None | GoverningTeamNotRead:
+    """Read only the governing agent's team, for refreshing a cached config.
+
+    The cache-hit refresh consumes one scalar, so this skips everything
+    ``load_task_setup_snapshot_sync`` loads for a build: LLM resolution, agent
+    builder config, transcript, recovery and reconstruction state. The agent
+    itself is resolved through the same ``_load_agent_for_task_runtime`` that
+    the full snapshot uses, so the two can never disagree about which agent
+    governs the task.
+    """
+    from .llm_utils import _load_agent_for_task_runtime
+    from .workforce_runtime import resolve_workforce_task_runtime
+
+    session_factory = get_session_local()
+    session: Session = session_factory()
+    try:
+        task_row = session.query(Task).filter(Task.id == task_id).first()
+        if task_row is None:
+            return GOVERNING_TEAM_NOT_READ
+
+        owner_user_id = int(task_row.user_id)
+        if task_owner_user_id is not None and owner_user_id != task_owner_user_id:
+            raise TaskOwnerMismatchError(task_id, task_owner_user_id, owner_user_id)
+
+        workforce = resolve_workforce_task_runtime(session, task_row)
+        agent_row = _load_agent_for_task_runtime(session, task_row, workforce)
+        if agent_row is None or agent_row.team_id is None:
+            return None
+        return int(agent_row.team_id)
+    finally:
+        session.close()
+
+
 def load_task_setup_snapshot_sync(
     task_id: int,
     task_owner_user_id: Optional[int],

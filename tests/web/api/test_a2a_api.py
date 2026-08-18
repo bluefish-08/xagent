@@ -656,12 +656,29 @@ def test_follow_up_infers_context_for_input_required_task() -> None:
             lease_db.close()
         return True
 
+    # A governing team to actually resolve, so the projection is proven to read
+    # the agent row rather than merely being threaded through as None.
+    team_db = _direct_db_session()
+    try:
+        governed = team_db.query(Agent).filter(Agent.id == agent_id).one()
+        governed.team_id = 77
+        team_db.commit()
+    finally:
+        team_db.close()
+
     agent_service = MagicMock()
     agent_service.post_user_message = AsyncMock(side_effect=post_user_message)
     agent_manager = MagicMock()
     agent_manager.get_agent_for_task = AsyncMock(return_value=agent_service)
     begin_turn = AsyncMock()
+    bootstrap_load = MagicMock(
+        side_effect=AssertionError("reply loaded a full bootstrap snapshot")
+    )
     with (
+        patch(
+            "xagent.web.services.task_setup_snapshot.load_task_setup_snapshot_sync",
+            new=bootstrap_load,
+        ),
         patch(
             "xagent.web.api.chat.get_agent_manager",
             return_value=agent_manager,
@@ -697,13 +714,14 @@ def test_follow_up_infers_context_for_input_required_task() -> None:
         request_interrupt=False,
         reason="A2A input-required response",
     )
-    # The reply carries an authoritative agent read, so a cached tool config
-    # can have its governing team revalidated rather than frozen (#1281).
-    resume_snapshot = agent_manager.get_agent_for_task.await_args.kwargs[
-        "task_setup_snapshot"
-    ]
-    assert resume_snapshot is not None
-    assert resume_snapshot.task.id == int(task_id)
+    # The reply carries an authoritative governing-team read, so a cached tool
+    # config can have its team revalidated rather than frozen (#1281) -- as the
+    # team projection, not a bootstrap snapshot whose transcript and recovery
+    # reads the cache-hit refresh never consumes.
+    resume_kwargs = agent_manager.get_agent_for_task.await_args.kwargs
+    assert resume_kwargs["governing_team_id"] == 77
+    assert "task_setup_snapshot" not in resume_kwargs
+    bootstrap_load.assert_not_called()
     begin_turn.assert_not_awaited()
     schedule_resume.assert_called_once()
     scheduled_lease = schedule_resume.call_args.kwargs["task_lease"]
