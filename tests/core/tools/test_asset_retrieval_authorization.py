@@ -70,6 +70,12 @@ def _built_image_descriptions() -> dict[str, str]:
     return {t.name: _normalized(t.description) for t in tool.get_tools()}
 
 
+def _built_image_description(name: str) -> str:
+    built = _built_image_descriptions()
+    assert name in built, f"image builder no longer emits {name!r}: {sorted(built)}"
+    return built[name]
+
+
 # Emitted by the image builder but carrying no retrieval route: it only lists
 # configured models. Named so a third tool from the same wrapper fails below.
 IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE = {"list_image_models"}
@@ -77,7 +83,6 @@ IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE = {"list_image_models"}
 
 def _surfaces() -> dict[str, str]:
     """Every description reaching the model alongside an asset-fetch route."""
-    image = _built_image_descriptions()
     return {
         "fetch_web_content.description": _normalized(FetchWebContentTool().description),
         "fetch_web_content.include_assets": _field(
@@ -87,8 +92,8 @@ def _surfaces() -> dict[str, str]:
             DownloadWebAssetTool(None).description  # type: ignore[arg-type]
         ),
         "download_web_asset.url": _field(DownloadWebAssetArgs, "url"),
-        "generate_image.description": image["generate_image"],
-        "edit_image.description": image["edit_image"],
+        "generate_image.description": _built_image_description("generate_image"),
+        "edit_image.description": _built_image_description("edit_image"),
     }
 
 
@@ -105,12 +110,22 @@ RETRIEVAL_TOOL_CLASSES = {
 # carry whichever description their builder hands them, asserted through the built
 # surfaces instead.
 NOT_A_RETRIEVAL_ROUTE = {
+    # Query-only search: returns text, takes no URL.
     "ExaWebSearchTool",
     "TavilyWebSearchTool",
     "WebSearchTool",
     "ZhipuWebSearchTool",
+    # FunctionTool wrappers: each carries whichever description its builder
+    # hands it; the retrieval-relevant ones (image) are asserted through the
+    # built surfaces above, the rest generate media from prompts.
+    "FunctionTool",
     "ImageGenerationFunctionTool",
     "VisionFunctionTool",
+    "AudioFunctionTool",
+    "MusicFunctionTool",
+    "SoundEffectFunctionTool",
+    "VideoGenerationFunctionTool",
+    # Browser session actions on an already-open page.
     "BrowserClickTool",
     "BrowserCloseTool",
     "BrowserEvaluateTool",
@@ -121,6 +136,16 @@ NOT_A_RETRIEVAL_ROUTE = {
     "BrowserScreenshotTool",
     "BrowserSelectOptionTool",
     "BrowserWaitForSelectorTool",
+    # Local file, document, and data operations: no remote fetch.
+    "FileAnalysisTool",
+    "FileTool",
+    "PPTXTool",
+    "SQLQueryFunctionTool",
+    "SkillTool",
+    # Delegating wrappers: the wrapped tool's class carries the classification,
+    # and the wrapper forwards its description verbatim.
+    "OutputFilteredToolWrapper",
+    "SandboxedToolWrapper",
 }
 
 # General-purpose remote routes that predate this contract and are not scoped to
@@ -129,9 +154,17 @@ NOT_A_RETRIEVAL_ROUTE = {
 # than a silent omission; tightening them is its own change.
 GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE = {
     "APITool",
+    "CustomApiTool",
+    "MCPToolAdapter",
     "BrowserNavigateTool",
     "ComputerTool",
     "CreateKnowledgeBaseFromUrlTool",
+    # Code executors can fetch anything by construction; constraining them to
+    # asset requests would break ordinary compute use.
+    "CommandExecutorFunctionTool",
+    "JavaScriptExecutorFunctionTool",
+    "PythonExecutorFunctionTool",
+    "_SshToolBase",
 }
 
 # Field names that make a tool capable of pulling a caller-named remote resource.
@@ -161,8 +194,10 @@ def _discovered_tool_classes() -> dict[str, type]:
     Widened past the two categories this PR touches: a tool in any category that
     accepts a URL is a route the policy has to account for.
     """
-    for module in pkgutil.iter_modules(vibe_pkg.__path__):
-        importlib.import_module(f"{vibe_pkg.__name__}.{module.name}")
+    # walk_packages, not iter_modules: subpackages such as sandboxed_tool are
+    # only imported lazily by the factory and would otherwise stay invisible.
+    for module in pkgutil.walk_packages(vibe_pkg.__path__, f"{vibe_pkg.__name__}."):
+        importlib.import_module(module.name)
 
     def descendants(cls: type) -> Iterator[type]:
         for sub in cls.__subclasses__():
@@ -173,9 +208,14 @@ def _discovered_tool_classes() -> dict[str, type]:
         if getattr(cls, "category", None) in REMOTE_CAPABLE_CATEGORIES:
             return True
         try:
+            # Unbound on purpose: most args_type implementations ignore self.
             fields = set(cls.args_type(cls).model_fields)  # type: ignore[attr-defined]
         except Exception:
-            return False
+            # Cannot be introspected statically (args_type reads instance
+            # state, e.g. CustomApiTool, SandboxedToolWrapper). Treat it as
+            # possibly remote so it must be classified explicitly — a swallowed
+            # error must never mean "not remote-capable".
+            return True
         return bool(URL_BEARING_FIELDS & fields)
 
     return {
@@ -326,10 +366,9 @@ def test_page_wide_inspection_leaves_asset_query_empty() -> None:
     Telling the model to always set asset_query would drop exactly the unrelated
     assets a page-wide inspection is asking for.
     """
-    assert (
-        "leaving asset_query empty so nothing is filtered out"
-        in (_surfaces()["fetch_web_content.description"])
-    )
+    fetch = _surfaces()["fetch_web_content.description"]
+    assert "leaving asset_query empty so none of the static references" in fetch
+    assert "the result limit still applies" in fetch
     query_field = _field(FetchWebContentArgs, "asset_query")
     assert "Leave it empty to list every supported static reference" in query_field
     # The tool parses the initial HTML and caps the result, so promising
@@ -360,13 +399,29 @@ def test_asking_the_user_stops_once_they_have_chosen() -> None:
         assert "act on that choice instead of asking again" in text, name
 
 
+# The provenance rule as one canonical clause, stated word-for-word on the skill
+# and both image descriptions, so agreement is a comparison rather than per-side
+# spot checks that can drift independently.
+ROUTE_CLAUSE = (
+    "URL is only a retrieval route: asking you to retrieve one authorizes the "
+    "fetch, not the authenticity, and what comes back stays unverified identity "
+    "material until the user confirms its source"
+)
+CONFIRMATION_CLAUSE = (
+    'A user naming a URL as the asset ("here is our logo: <url>") is that '
+    "confirmation; a URL that merely served as a fetch route is not."
+)
+
+
 def test_skill_and_tool_descriptions_agree_on_retrieval() -> None:
     """Both land in the same context once the skill is loaded.
 
     A skill that sanctions self-directed retrieval overrides the tool schema's
-    prohibition, so the two contracts have to move together.
+    prohibition, so the two contracts carry the same canonical clauses — asserted
+    as one string on every surface, not as independent per-side literals.
     """
     body = " ".join(SkillParser.parse(SKILL_DIR)["content"].split())
+    surfaces = _surfaces()
 
     assert "Two sources need no permission" in body
     assert "official web presence" not in body, (
@@ -374,7 +429,11 @@ def test_skill_and_tool_descriptions_agree_on_retrieval() -> None:
     )
     assert "take it only when they tell you to" in body
 
-    surfaces = _surfaces()
+    for clause in (ROUTE_CLAUSE, CONFIRMATION_CLAUSE):
+        assert clause in body, f"skill body dropped: {clause[:50]!r}"
+        for name in ("generate_image.description", "edit_image.description"):
+            assert clause in surfaces[name], f"{name} dropped: {clause[:50]!r}"
+
     for name in ("generate_image.description", "edit_image.description"):
         assert "an asset the user directed you to retrieve" in surfaces[name], name
 
@@ -488,7 +547,46 @@ def test_provenance_reads_the_same_on_every_surface_that_states_it() -> None:
 
     download = surfaces["download_web_asset.description"]
     assert "supplied its bytes or confirmed the source" in download
-    assert "a route, not a confirmation" in download
+    assert "Naming a URL as the asset is that confirmation" in download
+    assert "merely served as a fetch route is not" in download
 
     assert "trusted input" in system
     assert "authorizes the fetch, not the" in system
+
+
+def test_naming_a_url_as_the_asset_confirms_the_source() -> None:
+    """ "Here is our logo: <url>" must not trigger a redundant re-ask.
+
+    The fetch is authorized and the source is confirmed in the same sentence, so
+    every surface that demands confirmation also has to define this as the
+    confirming act.
+    """
+    surfaces = _surfaces()
+    system = _system_context_after_load_skill()
+
+    assert CONFIRMATION_CLAUSE in system
+    for name in ("generate_image.description", "edit_image.description"):
+        assert CONFIRMATION_CLAUSE in surfaces[name], name
+    assert (
+        "Naming a URL as the asset is that confirmation"
+        in (surfaces["download_web_asset.description"])
+    )
+
+
+def test_no_surface_frames_self_directed_search_as_a_pipeline_stage() -> None:
+    """The planning text and the always-loaded reference must not re-sanction it.
+
+    "Do not search in parallel" reads as "searching is expected, sequence it
+    right" — the residue this asserts against.
+    """
+    body = " ".join(SkillParser.parse(SKILL_DIR)["content"].split())
+    reference = " ".join(
+        (SKILL_DIR / "references" / "static-ad-art-direction.md").read_text().split()
+    )
+
+    for text, where in ((body, "SKILL.md"), (reference, "reference")):
+        assert "Do not search for identity assets in parallel" not in text, where
+        assert "Do not search for the logo in parallel" not in text, where
+
+    assert "never by searching on your own" in body
+    assert "never from a search you started yourself" in reference

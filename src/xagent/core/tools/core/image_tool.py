@@ -59,7 +59,9 @@ When given a user request, rewrite and enrich the prompt into a **professional i
      input. A URL is only a retrieval route: asking you to retrieve one
      authorizes the fetch, not the authenticity, and what comes back stays
      unverified identity material until the user confirms its source — an
-     unverified mark cannot serve an identity-critical reference.
+     unverified mark cannot serve an identity-critical reference. A user naming
+     a URL as the asset ("here is our logo: <url>") is that confirmation; a URL
+     that merely served as a fetch route is not.
      When nothing verifiable is available, ask the user how to proceed — and once
      they have chosen to continue without it, act on that choice instead of
      asking again. Pass such a reference by path, URL, or
@@ -154,7 +156,9 @@ an asset is the brand's. Bytes the user already put in this task or its
 workspace are trusted input. A URL is only a retrieval route: asking you to
 retrieve one authorizes the fetch, not the authenticity, and what comes back
 stays unverified identity material until the user confirms its source — an
-unverified mark cannot serve an identity-critical reference. When nothing
+unverified mark cannot serve an identity-critical reference. A user naming a URL
+as the asset ("here is our logo: <url>") is that confirmation; a URL that merely
+served as a fetch route is not. When nothing
 verifiable is available, ask the user
 how to proceed — and once they have chosen to continue without it, act on that
 choice instead of asking again.

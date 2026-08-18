@@ -15,8 +15,9 @@ class FetchWebContentArgs(BaseModel):
     include_assets: bool = Field(
         default=False,
         description=(
-            "Also list image, icon, manifest, script, and stylesheet URLs found "
-            "in the page; nothing is downloaded. Enable it when the user asked "
+            "Also list image, icon, manifest, script, stylesheet, and other "
+            "link-reference URLs found in the page; nothing is downloaded. "
+            "Enable it when the user asked "
             "you to inspect or enumerate what a page loads, or to obtain an "
             "asset they asked for. Do not enable it to go asset-hunting on your "
             "own, and note that listing a URL here does not authorize "
@@ -26,13 +27,13 @@ class FetchWebContentArgs(BaseModel):
     asset_query: str | None = Field(
         default=None,
         description=(
-            "Optional substring such as 'logo' used to filter assets discovered "
+            "Optional substring such as 'hero' used to filter assets discovered "
             "in the fetched HTML, matched against each asset's URL, name, and "
             "alt text. Leave it empty to list every supported static reference "
             "found in the fetched HTML, subject to the tool's result limit; "
             "runtime-loaded and CSS-nested resources are never enumerated. "
-            "A <link rel=manifest> URL may be included among the "
-            "discovered assets, but its contents are not fetched or searched."
+            "A <link rel=manifest> URL is returned regardless of the query, and "
+            "its contents are not fetched or searched."
         ),
     )
 
@@ -61,8 +62,9 @@ class FetchWebContentResult(BaseModel):
         default_factory=list,
         description=(
             "Static asset URLs discovered by parsing the fetched HTML (images, "
-            "icons, stylesheets, scripts, and any linked manifest URL) — the "
-            "manifest itself, if present, is not fetched or searched"
+            "icons, stylesheets, scripts, other link references, and any linked "
+            "manifest URL) — the manifest itself, if present, is not fetched or "
+            "searched"
         ),
     )
 
@@ -89,8 +91,9 @@ class FetchWebContentTool(AbstractBaseTool):
             "retrieving page content; use web_search first when you need to "
             "discover sources. Set include_assets=true when the user asked you "
             "to obtain an exact asset, with asset_query matching it, or when "
-            "they asked what a page loads, leaving asset_query empty so nothing "
-            "is filtered out of the static references it found. The page may be "
+            "they asked what a page loads, leaving asset_query empty so none of "
+            "the static references it found are filtered out (the result limit "
+            "still applies). The page may be "
             "one they named or one web_search "
             "found for that request. What the tool is not for is going after a "
             "brand's identity assets uninstructed. Asset URLs come back with the "

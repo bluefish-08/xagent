@@ -208,8 +208,9 @@ locked direction in a separate generation call.
 
 References must already be resolved before rendering begins. Every generation
 step must depend on the shared brand-and-brief step and receive the locked
-direction, exact copy, and relevant reference assets. Do not search for the logo
-in parallel with generation. Attach acquired references through the image
+direction, exact copy, and relevant reference assets. Identity assets come only
+from the main skill's sanctioned sources — never from a search you started
+yourself. Attach acquired references through the image
 tool's actual image-input parameter; a filename mentioned only inside prose is
 not a model input.
 

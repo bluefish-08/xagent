@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+from bs4 import BeautifulSoup
 
 from xagent.core.tools.adapters.vibe.fetch_web_content import (
     FetchWebContentArgs,
@@ -369,6 +370,67 @@ class TestFetchWebContentTool:
         assert args.url == "https://example.com"
         assert args.include_assets is False
         assert args.asset_query is None
+
+
+class TestExtractionMatchesItsDescription:
+    """The tool description promises "runtime-loaded and CSS-nested resources
+    are never enumerated"; these anchor that claim to the real extraction path,
+    so the description cannot silently become false.
+    """
+
+    def _extract(self, html: str):
+        soup = BeautifulSoup(html, "html.parser")
+        return WebContentFetcher._extract_html_assets(soup, "https://example.com/")
+
+    def test_css_nested_and_runtime_resources_are_not_enumerated(self):
+        assets = self._extract(
+            """
+            <html>
+              <head>
+                <style>.hero { background: url('/assets/css-bg.png'); }</style>
+                <script>
+                  const img = new Image();
+                  img.src = '/assets/runtime-injected.png';
+                </script>
+              </head>
+              <body><img src="/assets/static.png" alt="Static"></body>
+            </html>
+            """
+        )
+        urls = {a.url for a in assets}
+
+        assert "https://example.com/assets/static.png" in urls
+        assert not any("css-bg" in u for u in urls)
+        assert not any("runtime-injected" in u for u in urls)
+
+    def test_manifest_bypasses_the_query_filter(self):
+        assets = self._extract(
+            """
+            <html>
+              <head><link rel="manifest" href="/site.webmanifest"></head>
+              <body><img src="/assets/hero.png" alt="Hero"></body>
+            </html>
+            """
+        )
+        filtered = WebContentFetcher._filter_and_deduplicate_assets(
+            assets, asset_query="hero"
+        )
+        kinds = {a.kind for a in filtered}
+
+        assert "manifest" in kinds, "the manifest entry must survive any query"
+        assert any("hero" in a.url for a in filtered)
+
+    def test_link_kind_is_part_of_the_enumeration(self):
+        assets = self._extract(
+            """
+            <html>
+              <head><link rel="canonical" href="https://example.com/home"></head>
+              <body></body>
+            </html>
+            """
+        )
+
+        assert "link" in {a.kind for a in assets}
 
 
 class TestGetTrustedProxyUrl:
