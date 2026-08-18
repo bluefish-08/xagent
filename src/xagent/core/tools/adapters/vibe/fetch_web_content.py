@@ -19,7 +19,8 @@ class FetchWebContentArgs(BaseModel):
             "in the page; nothing is downloaded. Enable it when the user asked "
             "you to inspect or enumerate what a page loads, or to obtain an "
             "asset they asked for. Do not enable it to go asset-hunting on your "
-            "own."
+            "own, and note that listing a URL here does not authorize "
+            "download_web_asset — that needs its own request to obtain the asset."
         ),
     )
     asset_query: str | None = Field(

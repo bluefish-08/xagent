@@ -27,8 +27,10 @@ class DownloadWebAssetArgs(BaseModel):
     url: str = Field(
         description=(
             "Exact HTTP or HTTPS image URL: one the user supplied directly, or "
-            "one surfaced while carrying out a retrieval the user asked for. "
-            "For a brand asset, prefer the brand's own domain or its CDN."
+            "one surfaced while carrying out a download the user asked for — "
+            "enumerating a page's resources is not such a request. For a brand "
+            "asset, prefer the brand's own domain or its CDN, and treat what "
+            "you get as unverified until the user confirms it."
         )
     )
     filename: str | None = Field(
@@ -75,13 +77,15 @@ class DownloadWebAssetTool(AbstractBaseTool):
     def description(self) -> str:
         return (
             "Download an exact PNG, JPEG, WebP, GIF, BMP, or SVG asset from a "
-            "known URL and register it in the current workspace. Use a URL the "
-            "user supplied directly, or one fetch_web_content(include_assets="
-            "true) surfaced while carrying out a retrieval the user asked for; a "
-            "downloaded image is not proof that it is a brand's authentic asset, "
-            "so do not treat one as verified identity material for a retrieval "
-            "nobody requested. It returns a trusted FileRef, so do not reproduce "
-            "the asset through api_call plus write_file."
+            "known URL and register it in the current workspace. The user has to "
+            "have asked you to obtain this asset: use a URL they supplied "
+            "directly, or one fetch_web_content(include_assets=true) surfaced "
+            "while carrying out that request. Being asked to inspect or "
+            "enumerate a page does not authorize a download. Downloading also "
+            "proves nothing about provenance — however the URL was reached, an "
+            "asset counts as verified identity material only when the user "
+            "supplied it or confirmed the source. It returns a trusted FileRef, "
+            "so do not reproduce the asset through api_call plus write_file."
         )
 
     @property

@@ -35,9 +35,7 @@ def _surfaces() -> dict[str, str]:
             FetchWebContentArgs, "include_assets"
         ),
         "download_web_asset.description": _normalized(
-            DownloadWebAssetTool.description.fget(  # type: ignore[attr-defined]
-                DownloadWebAssetTool.__new__(DownloadWebAssetTool)
-            )
+            DownloadWebAssetTool(None).description
         ),
         "download_web_asset.url": _field(DownloadWebAssetArgs, "url"),
         "generate_image.description": _normalized(
@@ -66,7 +64,7 @@ REQUIRED_WORDING = {
         "Enable it when the user asked you to inspect or enumerate what a page loads"
     ),
     "download_web_asset.description": (
-        "surfaced while carrying out a retrieval the user asked for"
+        "The user has to have asked you to obtain this asset"
     ),
     "download_web_asset.url": "one the user supplied directly",
     "generate_image.description": "an asset the user directed you to retrieve",
@@ -105,7 +103,35 @@ def test_authorization_follows_the_request_not_the_url() -> None:
 def test_direct_user_urls_are_a_described_download_route() -> None:
     """The user pasting an exact URL is already authorized; describe it as such."""
     for name in ("download_web_asset.description", "download_web_asset.url"):
-        assert "the user supplied directly" in _surfaces()[name], name
+        assert "supplied directly" in _surfaces()[name], name
+
+
+def test_enumeration_does_not_authorize_a_download() -> None:
+    """include_assets is inspect-only, so a URL it lists is not yet acquirable.
+
+    Without this boundary the widened enumeration wording would let an
+    inspect-only request satisfy download_web_asset's authorization clause.
+    """
+    surfaces = _surfaces()
+
+    assert (
+        "does not authorize download_web_asset"
+        in (surfaces["fetch_web_content.include_assets"])
+    )
+    assert "does not authorize a download" in surfaces["download_web_asset.description"]
+    assert "is not such a request" in surfaces["download_web_asset.url"]
+
+
+def test_authenticity_is_independent_of_authorization() -> None:
+    """A requested retrieval can still return a counterfeit."""
+    surfaces = _surfaces()
+
+    assert "however the URL was reached" in surfaces["download_web_asset.description"]
+    assert (
+        "only when the user supplied it or confirmed the source"
+        in (surfaces["download_web_asset.description"])
+    )
+    assert "unverified until the user confirms it" in surfaces["download_web_asset.url"]
 
 
 def test_include_assets_is_also_an_enumeration_contract() -> None:
