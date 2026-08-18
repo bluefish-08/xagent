@@ -92,27 +92,75 @@ def _surfaces() -> dict[str, str]:
     }
 
 
-# Tools that can pull remote content into the run and therefore need the
-# authorization wording asserted below.
+# Tools that fetch a remote asset for reuse as a reference, which is what this
+# contract governs.
 RETRIEVAL_TOOL_CLASSES = {
     "FetchWebContentTool": "fetch_web_content",
     "DownloadWebAssetTool": "download_web_asset",
 }
 
-# Tools in the same categories that cannot: query-only search returns text and
-# takes no URL, and the image FunctionTool wrapper carries whichever description
-# the builder hands it, which is asserted through the built surfaces instead.
+# Reach the network or take a URL, but cannot turn one into a reusable asset
+# reference: query-only search returns text and takes no URL; the browser session
+# tools act on an already-open page; the vision and image FunctionTool wrappers
+# carry whichever description their builder hands them, asserted through the built
+# surfaces instead.
 NOT_A_RETRIEVAL_ROUTE = {
     "ExaWebSearchTool",
     "TavilyWebSearchTool",
     "WebSearchTool",
     "ZhipuWebSearchTool",
     "ImageGenerationFunctionTool",
+    "VisionFunctionTool",
+    "BrowserClickTool",
+    "BrowserCloseTool",
+    "BrowserEvaluateTool",
+    "BrowserExtractTextTool",
+    "BrowserFillTool",
+    "BrowserListSessionsTool",
+    "BrowserPdfTool",
+    "BrowserScreenshotTool",
+    "BrowserSelectOptionTool",
+    "BrowserWaitForSelectorTool",
 }
+
+# General-purpose remote routes that predate this contract and are not scoped to
+# asset retrieval: constraining them to "only when the user asked for an asset"
+# would break their ordinary use. Listed so they are an explicit carve-out rather
+# than a silent omission; tightening them is its own change.
+GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE = {
+    "APITool",
+    "BrowserNavigateTool",
+    "ComputerTool",
+    "CreateKnowledgeBaseFromUrlTool",
+}
+
+# Field names that make a tool capable of pulling a caller-named remote resource.
+URL_BEARING_FIELDS = {
+    "url",
+    "urls",
+    "image_url",
+    "image_urls",
+    "images",
+    "src",
+    "source_url",
+}
+
+# Categories whose tools reach outside the run by construction, even when no
+# field is named like a URL.
+REMOTE_CAPABLE_CATEGORIES = (
+    ToolCategory.WEB_SEARCH,
+    ToolCategory.IMAGE,
+    ToolCategory.VISION,
+    ToolCategory.BROWSER,
+)
 
 
 def _discovered_tool_classes() -> dict[str, type]:
-    """Every tool class in the adapter package, imported for its side effect."""
+    """Every tool class that can pull a remote resource into the run.
+
+    Widened past the two categories this PR touches: a tool in any category that
+    accepts a URL is a route the policy has to account for.
+    """
     for module in pkgutil.iter_modules(vibe_pkg.__path__):
         importlib.import_module(f"{vibe_pkg.__name__}.{module.name}")
 
@@ -121,10 +169,17 @@ def _discovered_tool_classes() -> dict[str, type]:
             yield sub
             yield from descendants(sub)
 
+    def remote_capable(cls: type) -> bool:
+        if getattr(cls, "category", None) in REMOTE_CAPABLE_CATEGORIES:
+            return True
+        try:
+            fields = set(cls.args_type(cls).model_fields)  # type: ignore[attr-defined]
+        except Exception:
+            return False
+        return bool(URL_BEARING_FIELDS & fields)
+
     return {
-        c.__name__: c
-        for c in descendants(AbstractBaseTool)
-        if getattr(c, "category", None) in (ToolCategory.WEB_SEARCH, ToolCategory.IMAGE)
+        c.__name__: c for c in set(descendants(AbstractBaseTool)) if remote_capable(c)
     }
 
 
@@ -172,12 +227,17 @@ def test_every_built_image_tool_is_classified() -> None:
 def test_every_retrieval_tool_is_classified() -> None:
     """A new web or image tool has to be triaged, not silently uncovered."""
     discovered = set(_discovered_tool_classes())
-    classified = set(RETRIEVAL_TOOL_CLASSES) | NOT_A_RETRIEVAL_ROUTE
+    classified = (
+        set(RETRIEVAL_TOOL_CLASSES)
+        | NOT_A_RETRIEVAL_ROUTE
+        | GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE
+    )
 
     assert discovered <= classified, (
-        f"unclassified web/image tools: {sorted(discovered - classified)}. Add each "
-        f"to RETRIEVAL_TOOL_CLASSES with its authorization wording, or to "
-        f"NOT_A_RETRIEVAL_ROUTE if it cannot pull remote content in."
+        f"unclassified remote-capable tools: {sorted(discovered - classified)}. "
+        f"Add each to RETRIEVAL_TOOL_CLASSES with its authorization wording, to "
+        f"NOT_A_RETRIEVAL_ROUTE if it cannot produce a reusable asset reference, "
+        f"or to GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE with a reason."
     )
     assert set(RETRIEVAL_TOOL_CLASSES) <= discovered, (
         f"renamed or removed: {sorted(set(RETRIEVAL_TOOL_CLASSES) - discovered)}"
@@ -361,6 +421,13 @@ def _system_context_after_load_skill() -> str:
     return " ".join(asyncio.run(run()).split())
 
 
+def _section(system: str, heading: str, next_heading: str) -> str:
+    """One `## ` section of the loaded skill, as it sits in the system message."""
+    assert heading in system, f"section missing from loaded context: {heading}"
+    body = system.split(heading, 1)[1]
+    return body.split(next_heading, 1)[0] if next_heading in body else body
+
+
 def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
     """Reading the file proves the text exists; this proves it reaches the model.
 
@@ -371,9 +438,34 @@ def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
 
     assert "Two sources need no permission" in system
     assert "take it only when they tell you to" in system
-    assert "their" in system and "direction permits the retrieval" in system
-    assert "act on that choice instead of asking again" in system
+    assert "a URL is only a retrieval route" in system
     # The wording this PR exists to remove must not be reachable from the
     # assembled context either.
     for phrase in ("official web presence", "retrieved with the web tools"):
         assert phrase not in system, f"assembled context still sanctions: {phrase!r}"
+
+
+def test_each_no_logo_gate_settles_the_choice_in_its_own_section() -> None:
+    """Three gates ask for a logo, so each needs its own after-choice rule.
+
+    A single global substring passes on whichever section happens to carry the
+    phrase, leaving the other two free to re-ask.
+    """
+    system = _system_context_after_load_skill()
+
+    source = _section(
+        system,
+        "## Use brand and reference assets intentionally",
+        "## Generate the complete creative",
+    )
+    assert "act on that choice instead of asking again" in source
+    assert "only a later change in what they want reopens the question" in source
+    # The identity-asset gate lives in the same section, after the source rules.
+    assert "ask how to proceed once" in source
+    assert "without asking again" in source
+    assert source.index("act on that choice") < source.index("ask how to proceed once")
+
+    gate = _section(system, "## Apply the completion gate", "## Deliver")
+    assert "the user has not yet chosen" in gate
+    assert "do not reopen the question" in gate
+    assert "that draft is the deliverable for this turn" in gate
