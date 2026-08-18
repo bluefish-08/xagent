@@ -2922,12 +2922,13 @@ class AgentServiceManager:
     ) -> None:
         """Re-derive the governing agent's team on a reused tool config.
 
-        Without a snapshot there is no authoritative read of the agent row:
-        the cache-hit path loads one only when the caller supplies it, and the
-        callers that omit it (a2a / v1 message posting) also omit the turn id,
-        so neither sync runs for them.
+        Only a wholly absent snapshot skips the sync. A present snapshot whose
+        ``agent`` is ``None`` is an authoritative negative -- the governing
+        agent is gone or no longer resolvable -- and must clear the team the
+        same way fresh construction derives ``None`` from it, never leave the
+        previous team's grants in place.
         """
-        if task_setup_snapshot is None or task_setup_snapshot.agent is None:
+        if task_setup_snapshot is None:
             return
         agent = self._agents.get(task_id)
         if agent is None:
@@ -2936,7 +2937,8 @@ class AgentServiceManager:
         tool_config = getattr(agent, "tool_config", None)
         if tool_config is None or not hasattr(tool_config, "set_connector_team_id"):
             return
-        team_id = task_setup_snapshot.agent.team_id
+        snapshot_agent = task_setup_snapshot.agent
+        team_id = snapshot_agent.team_id if snapshot_agent is not None else None
         if tool_config.set_connector_team_id(team_id):
             logger.info(
                 "Refreshing connector tools for task %s: governing team is now %s",

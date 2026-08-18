@@ -122,13 +122,24 @@ async def test_unchanged_team_does_not_rebuild_tools() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("snapshot", [None, _snapshot(None, with_agent=False)])
-async def test_no_authoritative_agent_read_leaves_the_team_alone(snapshot) -> None:
-    """Callers that post into a live agent (a2a, v1 reply) pass no snapshot,
-    exactly as they pass no turn id -- neither sync may guess a value."""
+async def test_absent_snapshot_leaves_the_team_alone() -> None:
+    """No snapshot is no read at all -- the sync may not guess a value."""
     manager, agent, tool_config = _cached_manager(101)
 
-    await _reuse(manager, snapshot)
+    await _reuse(manager, None)
 
     assert tool_config._connector_team_id == 101
     agent.invalidate_tools.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_negative_agent_result_clears_the_team() -> None:
+    """A present snapshot resolving no agent is an authoritative negative, not
+    an absent read: fresh construction derives None from it, so a reused config
+    must stop resolving the previous team's grants."""
+    manager, agent, tool_config = _cached_manager(101)
+
+    await _reuse(manager, _snapshot(None, with_agent=False))
+
+    assert tool_config._connector_team_id is None
+    agent.invalidate_tools.assert_called_once()
