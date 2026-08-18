@@ -346,7 +346,7 @@ def test_authenticity_is_independent_of_authorization() -> None:
 
     assert "however the URL was reached" in surfaces["download_web_asset.description"]
     assert (
-        "only when the user supplied it or confirmed the source"
+        "only when the user supplied its bytes or confirmed the source"
         in (surfaces["download_web_asset.description"])
     )
     assert "unverified until the user confirms it" in surfaces["download_web_asset.url"]
@@ -438,7 +438,7 @@ def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
 
     assert "Two sources need no permission" in system
     assert "take it only when they tell you to" in system
-    assert "a URL is only a retrieval route" in system
+    assert "URL is only a retrieval route" in system
     # The wording this PR exists to remove must not be reachable from the
     # assembled context either.
     for phrase in ("official web presence", "retrieved with the web tools"):
@@ -469,3 +469,26 @@ def test_each_no_logo_gate_settles_the_choice_in_its_own_section() -> None:
     assert "the user has not yet chosen" in gate
     assert "do not reopen the question" in gate
     assert "that draft is the deliverable for this turn" in gate
+
+
+def test_provenance_reads_the_same_on_every_surface_that_states_it() -> None:
+    """One distinction, three places: bytes are trusted, a URL is only a route.
+
+    "Supplied" means a URL two sentences earlier in the downloader, so each
+    surface has to keep the two senses apart in its own text.
+    """
+    surfaces = _surfaces()
+    system = _system_context_after_load_skill()
+
+    for name in ("generate_image.description", "edit_image.description"):
+        text = surfaces[name]
+        assert "trusted input" in text, name
+        assert "URL is only a retrieval route" in text, name
+        assert "authorizes the fetch, not the authenticity" in text, name
+
+    download = surfaces["download_web_asset.description"]
+    assert "supplied its bytes or confirmed the source" in download
+    assert "a route, not a confirmation" in download
+
+    assert "trusted input" in system
+    assert "authorizes the fetch, not the" in system

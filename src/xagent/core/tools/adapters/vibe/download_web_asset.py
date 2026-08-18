@@ -85,7 +85,8 @@ class DownloadWebAssetTool(AbstractBaseTool):
             "enumerate a page does not authorize a download. Downloading also "
             "proves nothing about provenance — however the URL was reached, an "
             "asset counts as verified identity material only when the user "
-            "supplied it or confirmed the source. It returns a trusted FileRef, "
+            "supplied its bytes or confirmed the source; a URL they gave you is "
+            "a route, not a confirmation. It returns a trusted FileRef, "
             "so do not reproduce the asset through api_call plus write_file."
         )
 
