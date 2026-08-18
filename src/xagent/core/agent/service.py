@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 _UNSET = object()
 
 
+# Bounded rebuild budget: each retry means an invalidation landed inside the
+# creator awaits, so exhausting it points at churn rather than a race.
+_TOOL_BUILD_ATTEMPTS = 3
+
+
 class AgentService:
     """Service facade that executes tasks through agent only."""
 
@@ -113,6 +118,7 @@ class AgentService:
         # cheap; the signature naturally invalidates when policy
         # changes later, restoring upstream's rebuild semantics.
         self._tool_policy_signature: Any | None = None
+        self._tool_invalidation_epoch = 0
         if self._tools_initialized and self.tool_config:
             try:
                 has_async_policy_refresh = callable(
@@ -218,6 +224,9 @@ class AgentService:
 
         self._tools_initialized = False
         self._tool_policy_signature = None
+        # A build already awaiting its creators cannot be cancelled, so it is
+        # retired by epoch instead: publishing it would overwrite this call.
+        self._tool_invalidation_epoch += 1
 
     def _refresh_task_runtime_context(self) -> None:
         """Refresh prompt and model preferences from the current tool contribution."""
@@ -731,29 +740,42 @@ class AgentService:
                     return
 
                 # Rebuild the tool list so disabled tools disappear from reused agents.
-                new_tools = await ToolFactory.create_all_tools(self.tool_config)
-                self.tools = list(new_tools)
-                self._refresh_task_runtime_context()
+                built: list[Any] = []
+                for _attempt in range(_TOOL_BUILD_ATTEMPTS):
+                    epoch = self._tool_invalidation_epoch
+                    built = list(await ToolFactory.create_all_tools(self.tool_config))
 
-                if hasattr(self.tool_config, "get_allowed_tools"):
-                    allowed_tools = self.tool_config.get_allowed_tools()
-                    if allowed_tools is not None:
-                        allowed_set = set(allowed_tools)
-                        self.tools = [
-                            tool
-                            for tool in self.tools
-                            if hasattr(tool, "name") and tool.name in allowed_set
-                        ]
+                    if hasattr(self.tool_config, "get_allowed_tools"):
+                        allowed_tools = self.tool_config.get_allowed_tools()
+                        if allowed_tools is not None:
+                            allowed_set = set(allowed_tools)
+                            built = [
+                                tool
+                                for tool in built
+                                if hasattr(tool, "name") and tool.name in allowed_set
+                            ]
 
-                self.agent.tools = self.tools
-                if self._execution_adapter is not None:
-                    self._execution_adapter.config.tools = self.tools
-                    self._execution_adapter.config.system_prompt = self.system_prompt
-                    self._execution_adapter.config.preferred_input_modalities = (
-                        self.preferred_input_modalities
-                    )
-                self._tools_initialized = True
-                self._tool_policy_signature = policy_signature
+                    # Nothing is published until the whole build is known to
+                    # belong to the current epoch: an invalidation that landed
+                    # in any creator await above (MCP handshakes included)
+                    # makes this set the previous config's, and installing it
+                    # would undo that invalidation.
+                    if epoch == self._tool_invalidation_epoch:
+                        self._publish_tools(built)
+                        self._tools_initialized = True
+                        self._tool_policy_signature = policy_signature
+                        return
+
+                # Budget exhausted: install the freshest build (never the
+                # pre-invalidation one) but leave it unmarked, so the next call
+                # rebuilds instead of accepting it.
+                self._publish_tools(built)
+                logger.warning(
+                    "Tool build for AgentService '%s' was retired %s times by "
+                    "concurrent invalidation; leaving the set unmarked",
+                    self.name,
+                    _TOOL_BUILD_ATTEMPTS,
+                )
             except ConnectorRuntimeError:
                 raise
             except RequiredMCPUnavailableError:
@@ -765,6 +787,18 @@ class AgentService:
                 raise RuntimeError(
                     f"Tool initialization failed for AgentService '{self.name}': {exc}"
                 ) from exc
+
+    def _publish_tools(self, tools: list[Any]) -> None:
+        """Install a built tool set on the agent and the execution adapter."""
+        self.tools = tools
+        self._refresh_task_runtime_context()
+        self.agent.tools = self.tools
+        if self._execution_adapter is not None:
+            self._execution_adapter.config.tools = self.tools
+            self._execution_adapter.config.system_prompt = self.system_prompt
+            self._execution_adapter.config.preferred_input_modalities = (
+                self.preferred_input_modalities
+            )
 
     def _current_tool_policy_signature(
         self,

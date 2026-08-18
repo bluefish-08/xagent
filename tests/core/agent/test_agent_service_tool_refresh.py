@@ -188,8 +188,8 @@ async def test_agent_service_refreshes_runtime_prompt_and_modalities_with_tools(
     }
     tool_config = ToolConfig({})
     tool_config.get_task_runtime_contribution = lambda: contribution_holder["value"]
-    tool_config.set_task_runtime_contribution = (
-        lambda value: contribution_holder.update(value=value)
+    tool_config.set_task_runtime_contribution = lambda value: (
+        contribution_holder.update(value=value)
     )
 
     async def create_all_tools(config: Any) -> list[Any]:
@@ -748,3 +748,79 @@ async def test_agent_service_preserves_required_mcp_initialization_errors(
         await service._ensure_tools_initialized()
 
     assert exc_info.value is required_error
+
+
+@pytest.mark.asyncio
+async def test_invalidation_inside_a_creator_await_is_not_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A build overtaken by ``invalidate_tools`` never reaches ``self.tools``.
+
+    ``create_all_tools`` awaits its creators (MCP handshakes among them), and an
+    invalidation landing in that window cannot cancel it. Publishing the result
+    would reinstate the tool set the invalidation just retired and mark it
+    initialized, so the next call would accept the stale build.
+    """
+    tool_config = AllowedToolsConfig()
+    service = AgentService(
+        name="epoch-test",
+        id="epoch-test",
+        tool_config=tool_config,
+        enable_workspace=False,
+    )
+    stale = NamedTool("stale")
+    fresh = NamedTool("fresh")
+    builds: list[list[Any]] = [[stale], [fresh]]
+
+    async def create_all_tools(config: Any) -> list[Any]:
+        assert config is tool_config
+        built = builds.pop(0)
+        if built[0] is stale:
+            # The team change lands while this build owns the creators.
+            service.invalidate_tools()
+        return built
+
+    monkeypatch.setattr(
+        "xagent.core.tools.adapters.vibe.factory.ToolFactory.create_all_tools",
+        create_all_tools,
+    )
+
+    await service._ensure_tools_initialized()
+
+    assert [tool.name for tool in service.tools] == ["fresh"]
+    assert service._tools_initialized is True
+    assert not builds
+
+
+@pytest.mark.asyncio
+async def test_exhausted_rebuild_budget_installs_the_freshest_set_unmarked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under continuous invalidation the newest build is still installed -- the
+    alternative is executing with the previous turn's tools -- but it stays
+    unmarked so the next call rebuilds rather than accepting it."""
+    tool_config = AllowedToolsConfig()
+    service = AgentService(
+        name="epoch-churn-test",
+        id="epoch-churn-test",
+        tool_config=tool_config,
+        enable_workspace=False,
+    )
+    attempts = 0
+
+    async def create_all_tools(config: Any) -> list[Any]:
+        nonlocal attempts
+        attempts += 1
+        service.invalidate_tools()
+        return [NamedTool(f"build-{attempts}")]
+
+    monkeypatch.setattr(
+        "xagent.core.tools.adapters.vibe.factory.ToolFactory.create_all_tools",
+        create_all_tools,
+    )
+
+    await service._ensure_tools_initialized()
+
+    assert attempts == 3
+    assert [tool.name for tool in service.tools] == ["build-3"]
+    assert service._tools_initialized is False
