@@ -1647,6 +1647,27 @@ class WebToolConfig(BaseToolConfig):
         self._pending_runtime_policy = None
         return True
 
+    def set_connector_team_id(self, team_id: Optional[int]) -> bool:
+        """Refresh the governing agent's owning team for a reused config.
+
+        Cached with ``AgentService`` by task, so a mid-session change to the
+        governing agent's team (shared to a team, made personal, re-homed)
+        must not keep resolving connector visibility against the team
+        captured at construction time. Clears the same caches the turn-id
+        setter does: all three connector reads (runtime view, MCP configs,
+        custom APIs) are keyed on this value.
+        """
+
+        normalized_team_id = int(team_id) if team_id is not None else None
+        if self._connector_team_id == normalized_team_id:
+            return False
+        self._connector_team_id = normalized_team_id
+        self._connector_runtime_view = None
+        self._cached_mcp_configs = None
+        self._factory_runtime_snapshot = None
+        self._pending_runtime_policy = None
+        return True
+
     def set_execution_scope(self, scope: Optional[Any]) -> bool:
         """Switch the per-turn execution scope for a reused tool config.
 

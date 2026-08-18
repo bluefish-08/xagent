@@ -2415,6 +2415,7 @@ class AgentServiceManager:
                             self._sync_connector_runtime_turn(
                                 task_id, connector_runtime_turn_id
                             )
+                            self._sync_connector_team_id(task_id, task_setup_snapshot)
                             self._sync_execution_scope(task_id, scope)
                             return self._agents[task_id]
                     except (
@@ -2869,6 +2870,7 @@ class AgentServiceManager:
         self._agent_owner_ids[task_id] = runtime_user_id
         self._agent_scope_fingerprints[task_id] = fingerprint
         self._sync_connector_runtime_turn(task_id, connector_runtime_turn_id)
+        self._sync_connector_team_id(task_id, task_setup_snapshot)
         self._sync_execution_scope(task_id, scope)
         return self._agents[task_id]
 
@@ -2914,6 +2916,34 @@ class AgentServiceManager:
                 task_id,
                 connector_runtime_turn_id,
             )
+
+    def _sync_connector_team_id(
+        self, task_id: int, task_setup_snapshot: Optional[TaskSetupSnapshot]
+    ) -> None:
+        """Re-derive the governing agent's team on a reused tool config.
+
+        Without a snapshot there is no authoritative read of the agent row:
+        the cache-hit path loads one only when the caller supplies it, and the
+        callers that omit it (a2a / v1 message posting) also omit the turn id,
+        so neither sync runs for them.
+        """
+        if task_setup_snapshot is None or task_setup_snapshot.agent is None:
+            return
+        agent = self._agents.get(task_id)
+        if agent is None:
+            return
+        # getattr/hasattr for the same reason as _sync_execution_scope below.
+        tool_config = getattr(agent, "tool_config", None)
+        if tool_config is None or not hasattr(tool_config, "set_connector_team_id"):
+            return
+        team_id = task_setup_snapshot.agent.team_id
+        if tool_config.set_connector_team_id(team_id):
+            logger.info(
+                "Refreshing connector tools for task %s: governing team is now %s",
+                task_id,
+                team_id,
+            )
+            agent.invalidate_tools()
 
     def _sync_execution_scope(
         self, task_id: int, scope: Optional[ExecutionScope]

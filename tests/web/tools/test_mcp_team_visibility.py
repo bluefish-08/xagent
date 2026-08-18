@@ -446,3 +446,56 @@ async def test_direct_private_loader_call_resolves_nothing_without_identity(db_s
         assert configs == []
     finally:
         connector_team_scope.set_connector_team_hooks()
+
+
+# ---------------------------------------------------------------------------
+# A cache-reused config re-resolves visibility after the governing agent's
+# team changes mid-session. Driven through the public entry point, which
+# serves ``_cached_mcp_configs`` -- the private loader below rebuilds
+# unconditionally, so it cannot tell a cleared cache from a stale one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("next_team_id", "expected_extra"),
+    [(T2, "team_x"), (None, None)],
+)
+async def test_team_change_between_turns_reresolves(
+    db_session, seed, next_team_id, expected_extra
+):
+    _install_env_t(seed)
+    cfg = _cfg(db_session, seed, connector_team_id=T1)
+    first = await cfg.get_mcp_server_configs()
+    assert {c["name"] for c in first} == {seed.active_own.name, seed.team_s.name}
+    assert cfg._cached_mcp_configs is not None  # the cache the refresh must clear
+
+    assert cfg.set_connector_team_id(next_team_id) is True
+
+    second = await cfg.get_mcp_server_configs()
+    expected = {seed.active_own.name}
+    if expected_extra is not None:
+        expected.add(getattr(seed, expected_extra).name)
+    assert {c["name"] for c in second} == expected
+
+
+def test_team_change_clears_every_sibling_cache(db_session, seed):
+    """The runtime view and factory snapshot are keyed on the same value but
+    have no cheap end-to-end probe here; assert the reset directly."""
+    cfg = _cfg(db_session, seed, connector_team_id=T1)
+    cfg._connector_runtime_view = {"mcp:1": {}}
+    cfg._factory_runtime_snapshot = object()
+    cfg._pending_runtime_policy = object()
+
+    assert cfg.set_connector_team_id(T2) is True
+
+    assert cfg._connector_runtime_view is None
+    assert cfg._factory_runtime_snapshot is None
+    assert cfg._pending_runtime_policy is None
+
+
+def test_unchanged_team_is_a_noop(db_session, seed):
+    cfg = _cfg(db_session, seed, connector_team_id=T1)
+    cfg._cached_mcp_configs = ["sentinel"]
+    assert cfg.set_connector_team_id(T1) is False
+    assert cfg._cached_mcp_configs == ["sentinel"]
