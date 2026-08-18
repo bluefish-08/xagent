@@ -1345,6 +1345,9 @@ class WebToolConfig(BaseToolConfig):
         self._cached_embedding_model: Optional[str] = None
         self._cached_rerank_model: Optional[str] = None
         self._factory_runtime_snapshot: _ToolFactoryRuntimeSnapshot | None = None
+        # Bumped by every discard so a detached factory load already in flight
+        # cannot install its pre-discard result over the current turn's inputs.
+        self._factory_runtime_generation = 0
         self._retained_factory_model_state: _RetainedFactoryModelState | None = None
         self._factory_runtime_handed_off = False
         self._pending_runtime_policy: _ToolRuntimePolicySnapshot | None = None
@@ -1643,8 +1646,7 @@ class WebToolConfig(BaseToolConfig):
         self._connector_runtime_turn_id = normalized_turn_id
         self._connector_runtime_view = None
         self._cached_mcp_configs = None
-        self._factory_runtime_snapshot = None
-        self._pending_runtime_policy = None
+        self.discard_prepared_factory_runtime()
         return True
 
     def set_connector_team_id(self, team_id: Optional[int]) -> bool:
@@ -1664,8 +1666,7 @@ class WebToolConfig(BaseToolConfig):
         self._connector_team_id = normalized_team_id
         self._connector_runtime_view = None
         self._cached_mcp_configs = None
-        self._factory_runtime_snapshot = None
-        self._pending_runtime_policy = None
+        self.discard_prepared_factory_runtime()
         return True
 
     def set_execution_scope(self, scope: Optional[Any]) -> bool:
@@ -1701,8 +1702,7 @@ class WebToolConfig(BaseToolConfig):
             return False
         self._execution_scope = scope
         self._cached_mcp_configs = None
-        self._factory_runtime_snapshot = None
-        self._pending_runtime_policy = None
+        self.discard_prepared_factory_runtime()
         return True
 
     def _parse_numeric_task_id(self) -> Optional[int]:
@@ -2161,6 +2161,7 @@ class WebToolConfig(BaseToolConfig):
         from ..services.db_runtime import run_db_io_cancellation_safe
 
         plan = self._build_factory_runtime_load_plan()
+        generation = self._factory_runtime_generation
         policy_snapshot = self._pending_runtime_policy
         self._pending_runtime_policy = None
         session_factory = self.get_session_factory()
@@ -2175,12 +2176,18 @@ class WebToolConfig(BaseToolConfig):
                 policy_snapshot,
             )
         )
+        # The plan was built before this await: a discard that landed while the
+        # worker ran makes its result the previous turn's, and applying it would
+        # republish inputs the invalidation just retired.
+        if generation != self._factory_runtime_generation:
+            return
         self._apply_factory_runtime_snapshot(snapshot)
 
     def discard_prepared_factory_runtime(self) -> None:
         """Discard construction-only snapshots without changing DB ownership."""
         self._factory_runtime_snapshot = None
         self._pending_runtime_policy = None
+        self._factory_runtime_generation += 1
 
     def release_prepared_factory_runtime(self) -> None:
         """Compatibility alias for configs that only discard snapshots."""

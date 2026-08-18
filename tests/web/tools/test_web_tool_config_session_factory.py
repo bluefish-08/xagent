@@ -36,6 +36,7 @@ from xagent.web.services.tool_credentials import (
     set_user_tool_allowlist_hook,
     set_user_tool_overrides_hook,
 )
+from xagent.web.tools import config as config_module
 from xagent.web.tools.config import WebToolConfig
 
 
@@ -2964,3 +2965,70 @@ def test_custom_api_config_loader_propagates_runtime_view_resolution_error(monke
 
     assert exc_info.value.code == ERROR_CONNECTOR_RUNTIME_UNAVAILABLE
     assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_in_flight_factory_load_does_not_republish_retired_inputs(monkeypatch):
+    """A per-turn invalidation landing during the detached load retires it.
+
+    ``prepare_factory_runtime`` builds its load plan before awaiting the
+    worker. A turn-id / team / scope change arriving in that window discards
+    the prepared state, but cannot cancel the worker -- so the result must be
+    dropped on return instead of installed over the current turn's inputs.
+    """
+    loads: list[object] = []
+
+    def session_factory() -> _TrackingSession:
+        return _TrackingSession()
+
+    def load_image_models(*_args, **_kwargs):
+        model = object()
+        loads.append(model)
+        return {"image": model}
+
+    monkeypatch.setattr(
+        "xagent.web.services.model_service.get_image_models",
+        load_image_models,
+    )
+    monkeypatch.setattr(
+        "xagent.web.services.model_service.get_default_image_generate_model",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "xagent.web.services.model_service.get_default_image_edit_model",
+        lambda *_args, **_kwargs: None,
+    )
+    cfg = WebToolConfig(
+        db=None,
+        request=None,
+        db_factory=session_factory,
+        user_id=1,
+        include_mcp_tools=False,
+        connector_team_id=101,
+        tool_selection_spec=ToolSelectionSpec.from_raw(tool_categories=["image"]),
+    )
+
+    real_loader = config_module._load_tool_factory_runtime_snapshot
+
+    def load_then_change_team(*args, **kwargs):
+        snapshot = real_loader(*args, **kwargs)
+        # The team change lands while this worker still owns the load.
+        assert cfg.set_connector_team_id(202) is True
+        return snapshot
+
+    monkeypatch.setattr(
+        config_module,
+        "_load_tool_factory_runtime_snapshot",
+        load_then_change_team,
+    )
+
+    try:
+        await cfg.prepare_factory_runtime()
+
+        assert cfg._factory_runtime_snapshot is None
+        # The retired result is not installed, so the getter re-reads under the
+        # new team instead of serving the worker's pre-change model.
+        assert cfg.get_image_models()["image"] is loads[-1]
+        assert len(loads) == 2
+    finally:
+        cfg.close()
