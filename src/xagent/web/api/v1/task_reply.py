@@ -502,11 +502,21 @@ async def reply_to_task(
     try:
 
         async def inject_user_message() -> tuple[Any, bool]:
+            from ...services.task_setup_snapshot import (
+                load_task_setup_snapshot_sync,
+            )
             from .. import chat
 
+            # See the a2a twin: the reply turn id is message metadata, so a
+            # snapshot is the only authoritative read that can revalidate a
+            # reused tool config's governing team.
+            snapshot = await run_db_io_cancellation_safe(
+                lambda: load_task_setup_snapshot_sync(task_id, ctx.task_owner_user_id)
+            )
             agent_service = await chat.get_agent_manager().get_agent_for_task(
                 task_id,
                 None,
+                task_setup_snapshot=snapshot,
                 task_owner_user_id=ctx.task_owner_user_id,
             )
             posted = await agent_service.post_user_message(

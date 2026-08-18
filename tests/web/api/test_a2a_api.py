@@ -697,6 +697,13 @@ def test_follow_up_infers_context_for_input_required_task() -> None:
         request_interrupt=False,
         reason="A2A input-required response",
     )
+    # The reply carries an authoritative agent read, so a cached tool config
+    # can have its governing team revalidated rather than frozen (#1281).
+    resume_snapshot = agent_manager.get_agent_for_task.await_args.kwargs[
+        "task_setup_snapshot"
+    ]
+    assert resume_snapshot is not None
+    assert resume_snapshot.task.id == int(task_id)
     begin_turn.assert_not_awaited()
     schedule_resume.assert_called_once()
     scheduled_lease = schedule_resume.call_args.kwargs["task_lease"]

@@ -141,6 +141,9 @@ def _patch_agent_service(post_user_message: AsyncMock):
     agent_service.post_user_message = post_user_message
     agent_manager = MagicMock()
     agent_manager.get_agent_for_task = AsyncMock(return_value=agent_service)
+    # Exposed on the service so the nine existing two-tuple call sites keep
+    # unpacking unchanged.
+    agent_service.agent_manager = agent_manager
     return patch(
         "xagent.web.api.chat.get_agent_manager",
         return_value=agent_manager,
@@ -231,6 +234,13 @@ def test_reply_happy_path_resumes_the_same_run(mock_start_task):
     assert call_kwargs["display_message"] == "yes, continue"
     assert call_kwargs["request_interrupt"] is False
     assert call_kwargs["turn_id"].startswith(f"v1:reply:{task_id}:")
+    # The turn id is message metadata; the snapshot is the authoritative agent
+    # read that lets a cached tool config revalidate its team (#1281).
+    resume_snapshot = agent_service.agent_manager.get_agent_for_task.await_args.kwargs[
+        "task_setup_snapshot"
+    ]
+    assert resume_snapshot is not None
+    assert resume_snapshot.task.id == task_id
     schedule_resume.assert_called_once()
     scheduled_lease = schedule_resume.call_args.kwargs["task_lease"]
     assert scheduled_lease.run_id == "run-original"

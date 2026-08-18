@@ -454,11 +454,21 @@ async def _resume_input_required_a2a_task(
     try:
 
         async def inject_user_message() -> tuple[Any, bool]:
+            from ..services.task_setup_snapshot import (
+                load_task_setup_snapshot_sync,
+            )
             from .chat import get_agent_manager
 
+            # An authoritative agent read, not just message metadata: a
+            # cache hit reuses a tool config whose governing team was captured
+            # on an earlier turn, and only a snapshot can revalidate it.
+            snapshot = await run_db_io_cancellation_safe(
+                lambda: load_task_setup_snapshot_sync(task_id, task_owner_user_id)
+            )
             agent_service = await get_agent_manager().get_agent_for_task(
                 task_id,
                 None,
+                task_setup_snapshot=snapshot,
                 task_owner_user_id=task_owner_user_id,
             )
             posted = await agent_service.post_user_message(
