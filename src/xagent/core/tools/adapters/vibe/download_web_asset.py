@@ -26,11 +26,12 @@ from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 class DownloadWebAssetArgs(BaseModel):
     url: str = Field(
         description=(
-            "Exact HTTP or HTTPS image URL: one the user supplied directly, or "
-            "one surfaced while carrying out a download the user asked for — "
-            "enumerating a page's resources is not such a request. For a brand "
-            "asset, prefer the brand's own domain or its CDN, and treat what "
-            "you get as unverified until the user confirms it."
+            "Exact HTTP or HTTPS image URL for an asset the user asked you to "
+            "obtain: one they supplied with that request, or one surfaced while "
+            "carrying it out. A URL pasted to be read or discussed, and a URL "
+            "that page enumeration merely listed, are not such requests. For a "
+            "brand asset, prefer the brand's own domain or its CDN, and treat "
+            "what you get as unverified until the user confirms it."
         )
     )
     filename: str | None = Field(

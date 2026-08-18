@@ -28,7 +28,8 @@ class FetchWebContentArgs(BaseModel):
         description=(
             "Optional substring such as 'logo' used to filter assets discovered "
             "in the fetched HTML, matched against each asset's URL, name, and "
-            "alt text. A <link rel=manifest> URL may be included among the "
+            "alt text. Leave it empty to list everything the page loads. "
+            "A <link rel=manifest> URL may be included among the "
             "discovered assets, but its contents are not fetched or searched."
         ),
     )
@@ -84,13 +85,16 @@ class FetchWebContentTool(AbstractBaseTool):
             "to markdown. Use this after web_search finds a promising source, or "
             "when the user provides a URL that needs to be read. This is for "
             "retrieving page content; use web_search first when you need to "
-            "discover sources. When the user asked you to obtain an exact asset, "
-            "or to inspect what a page loads, set include_assets=true and "
-            "asset_query to match it — the page may be one they named or one "
-            "web_search found for that request. What the tool is not for is "
-            "going after a brand's identity assets uninstructed. The returned "
-            "assets preserve official page URLs; pass the chosen URL to "
-            "download_web_asset instead of recreating it with api_call/write_file."
+            "discover sources. Set include_assets=true when the user asked you "
+            "to obtain an exact asset, with asset_query matching it, or when "
+            "they asked what a page loads, leaving asset_query empty so nothing "
+            "is filtered out. The page may be one they named or one web_search "
+            "found for that request. What the tool is not for is going after a "
+            "brand's identity assets uninstructed. Asset URLs come back with the "
+            "official page URL preserved; when the user asked you to obtain one, "
+            "pass the chosen URL to download_web_asset instead of recreating it "
+            "with api_call/write_file — being asked to inspect a page is not "
+            "such a request."
         )
 
     @property
