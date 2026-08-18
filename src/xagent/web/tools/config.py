@@ -1172,6 +1172,12 @@ def _load_tool_runtime_policy_snapshot(
 _APP_LOCALE_TO_BROWSER_LOCALE = {"en": "en-US", "zh": "zh-CN"}
 
 
+# Bounded reload budget for prepare_factory_runtime: each retry means a
+# per-turn invalidation landed mid-load, so exhausting it is a sign of a
+# resolver churning rather than a race worth chasing further.
+_FACTORY_RUNTIME_PREPARE_ATTEMPTS = 3
+
+
 class WebToolConfig(BaseToolConfig):
     """Web-specific tool configuration that loads from database."""
 
@@ -2160,28 +2166,40 @@ class WebToolConfig(BaseToolConfig):
 
         from ..services.db_runtime import run_db_io_cancellation_safe
 
-        plan = self._build_factory_runtime_load_plan()
-        generation = self._factory_runtime_generation
-        policy_snapshot = self._pending_runtime_policy
-        self._pending_runtime_policy = None
-        session_factory = self.get_session_factory()
-        # The worker mints its own Session from the same engine. A live request
-        # Session may already hold the pool's only connection after a SELECT,
-        # so release clean read transactions before the worker checks out.
-        self.release_db_connection()
-        snapshot = await run_db_io_cancellation_safe(
-            lambda: _load_tool_factory_runtime_snapshot(
-                session_factory,
-                plan,
-                policy_snapshot,
+        for _attempt in range(_FACTORY_RUNTIME_PREPARE_ATTEMPTS):
+            plan = self._build_factory_runtime_load_plan()
+            generation = self._factory_runtime_generation
+            policy_snapshot = self._pending_runtime_policy
+            self._pending_runtime_policy = None
+            session_factory = self.get_session_factory()
+            # The worker mints its own Session from the same engine. A live
+            # request Session may already hold the pool's only connection after
+            # a SELECT, so release clean read transactions before the worker
+            # checks out.
+            self.release_db_connection()
+            snapshot = await run_db_io_cancellation_safe(
+                lambda: _load_tool_factory_runtime_snapshot(
+                    session_factory,
+                    plan,
+                    policy_snapshot,
+                )
             )
+            # The plan was built before this await: a discard that landed while
+            # the worker ran makes its result the previous turn's. Reload
+            # against the current generation rather than returning without
+            # prepared inputs -- the factory treats a bare return as a
+            # successful preparation and its getters would then reopen the
+            # request Session synchronously on the event loop.
+            if generation == self._factory_runtime_generation:
+                self._apply_factory_runtime_snapshot(snapshot)
+                return
+        logger.warning(
+            "Factory runtime preparation retired %s times for task %s; leaving "
+            "inputs unprepared so the getters re-read under the current "
+            "generation",
+            _FACTORY_RUNTIME_PREPARE_ATTEMPTS,
+            self._task_id,
         )
-        # The plan was built before this await: a discard that landed while the
-        # worker ran makes its result the previous turn's, and applying it would
-        # republish inputs the invalidation just retired.
-        if generation != self._factory_runtime_generation:
-            return
-        self._apply_factory_runtime_snapshot(snapshot)
 
     def discard_prepared_factory_runtime(self) -> None:
         """Discard construction-only snapshots without changing DB ownership."""

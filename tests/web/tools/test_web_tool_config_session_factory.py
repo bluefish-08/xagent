@@ -2973,8 +2973,10 @@ async def test_in_flight_factory_load_does_not_republish_retired_inputs(monkeypa
 
     ``prepare_factory_runtime`` builds its load plan before awaiting the
     worker. A turn-id / team / scope change arriving in that window discards
-    the prepared state, but cannot cancel the worker -- so the result must be
-    dropped on return instead of installed over the current turn's inputs.
+    the prepared state but cannot cancel the worker, so its result must not be
+    installed. Preparation then reloads under the new generation instead of
+    returning unprepared, which the factory would read as success and answer
+    from the request Session on the event loop.
     """
     loads: list[object] = []
 
@@ -3012,8 +3014,10 @@ async def test_in_flight_factory_load_does_not_republish_retired_inputs(monkeypa
 
     def load_then_change_team(*args, **kwargs):
         snapshot = real_loader(*args, **kwargs)
-        # The team change lands while this worker still owns the load.
-        assert cfg.set_connector_team_id(202) is True
+        # Only the first worker is overtaken; the reload must be allowed to
+        # finish under the new generation.
+        if len(loads) == 1:
+            assert cfg.set_connector_team_id(202) is True
         return snapshot
 
     monkeypatch.setattr(
@@ -3025,10 +3029,12 @@ async def test_in_flight_factory_load_does_not_republish_retired_inputs(monkeypa
     try:
         await cfg.prepare_factory_runtime()
 
-        assert cfg._factory_runtime_snapshot is None
-        # The retired result is not installed, so the getter re-reads under the
-        # new team instead of serving the worker's pre-change model.
-        assert cfg.get_image_models()["image"] is loads[-1]
+        # Two worker loads: the retired one, then the reload that observes the
+        # new team. The installed snapshot is the second one, and the getter is
+        # served from it rather than from a synchronous re-read.
         assert len(loads) == 2
+        assert cfg._factory_runtime_snapshot is not None
+        assert cfg.get_image_models()["image"] is loads[-1]
+        assert cfg._connector_team_id == 202
     finally:
         cfg.close()
