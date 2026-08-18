@@ -6,6 +6,8 @@ that offers a wider route than the skill allows therefore wins by default, so th
 authorization wording has to live here too.
 """
 
+import pathlib
+
 import pytest
 
 from xagent.core.tools.adapters.vibe.download_web_asset import (
@@ -17,6 +19,16 @@ from xagent.core.tools.adapters.vibe.fetch_web_content import (
     FetchWebContentTool,
 )
 from xagent.core.tools.core.image_tool import ImageGenerationToolCore
+from xagent.skills.parser import SkillParser
+
+SKILL_DIR = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "src"
+    / "xagent"
+    / "skills"
+    / "builtin"
+    / "static-visual-design"
+)
 
 
 def _normalized(text: str) -> str:
@@ -153,3 +165,22 @@ def test_asking_the_user_stops_once_they_have_chosen() -> None:
         text = _surfaces()[name]
         assert "ask the user how to proceed" in text, name
         assert "act on that choice instead of asking again" in text, name
+
+
+def test_skill_and_tool_descriptions_agree_on_retrieval() -> None:
+    """Both land in the same context once the skill is loaded.
+
+    A skill that sanctions self-directed retrieval overrides the tool schema's
+    prohibition, so the two contracts have to move together.
+    """
+    body = " ".join(SkillParser.parse(SKILL_DIR)["content"].split())
+
+    assert "Two sources need no permission" in body
+    assert "official web presence" not in body, (
+        "the skill sanctions retrieval the tool descriptions forbid"
+    )
+    assert "take it only when they tell you to" in body
+
+    surfaces = _surfaces()
+    for name in ("generate_image.description", "edit_image.description"):
+        assert "an asset the user directed you to retrieve" in surfaces[name], name
