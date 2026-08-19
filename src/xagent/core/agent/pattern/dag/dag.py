@@ -1475,7 +1475,16 @@ class DAGPattern(AgentPattern):
             response=response,
             metadata={"phase": "dag_completion_assessment"},
         )
-        assessment = self._parse_completion_assessment(response)
+        try:
+            assessment = self._parse_completion_assessment(response)
+        except Exception as exc:
+            await streamer.fail(str(exc))
+            await runtime.on_llm_error(
+                context=context,
+                error=exc,
+                metadata={"phase": "dag_completion_assessment"},
+            )
+            raise
         if assessment.complete:
             await final_answer_stream.finish(assessment.answer)
         return assessment
@@ -1633,7 +1642,13 @@ class DAGPattern(AgentPattern):
             return arguments
         if not isinstance(arguments, str):
             raise TypeError("Tool call arguments must be an object or JSON string.")
-        payload = json.loads(arguments)
+        try:
+            payload = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{DAG_COMPLETION_TOOL_NAME} arguments must be valid JSON, got "
+                f"{arguments[:200]!r}."
+            ) from exc
         if not isinstance(payload, dict):
             raise TypeError("Tool call arguments must decode to an object.")
         return payload
