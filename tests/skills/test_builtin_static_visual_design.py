@@ -67,8 +67,11 @@ def test_static_visual_design_skill_routes_only_commercial_creatives() -> None:
     assert "any `generate_image` or `edit_image` call on an asset that" in content
     assert "any call on an optional asset, including its first" in content
     assert "even at another required placement" in content
-    # The gate's coverage half never yields to the budget.
-    assert "**Coverage is unconditional.**" in content
+    # The gate's coverage half never yields to the budget; its one exception is
+    # a branded final the user chose to go without, not a spent budget.
+    assert "**Coverage is unconditional, with one exception.**" in content
+    assert "branded final the user has already chosen to go without" in content
+    assert "A spent budget is never a reason an asset is" in content
     # Two rejection reasons a rewrite dropped, and the brand rule they serve.
     assert "a render that omits a required brand asset" in content
     assert "labeled a concept draft" in content

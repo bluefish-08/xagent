@@ -148,7 +148,7 @@ Parameters:
 - watermark (optional): whether to include provider watermark. Defaults to true when supported.
 - return_last_frame (optional): ask the provider to return the last frame URL when supported.
 - first_frame_image_url / last_frame_image_url (optional): Seedance-style first/last-frame control.
-- reference_image_urls / reference_video_urls / reference_audio_urls (optional): public URLs used as references. Audio references require at least one image or video reference.
+- reference_image_urls / reference_video_urls / reference_audio_urls (optional): public URLs used as references. Audio references require at least one image or video reference. Use only references the user supplied, the task already produced, or an asset the user directed you to retrieve; do not retrieve one on your own initiative, not even from a brand's official site. Bytes the user themselves put in this task or its workspace are trusted input; bytes you fetched are not, however they got there. A URL is only a retrieval route: asking you to retrieve one authorizes the fetch, not the authenticity, and what comes back stays unverified identity material until the user confirms its source — an unverified mark cannot serve as an identity-critical reference. A user naming a URL as the asset ("here is our logo: <url>") is that confirmation; a URL that merely served as a fetch route is not.
 - wait_for_result (optional): wait for task completion and download the result. Defaults to true.
 - poll_interval (optional): polling interval in seconds while waiting. Defaults to 30.
 - timeout (optional): maximum wait time in seconds.

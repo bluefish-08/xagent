@@ -18,7 +18,8 @@ class FetchWebContentArgs(BaseModel):
             "Also list image, icon, manifest, script, stylesheet, and other "
             "link-reference URLs found in the page; nothing is downloaded. "
             "Enable it when the user asked "
-            "you to inspect or enumerate what a page loads, or to obtain an "
+            "you to inspect or enumerate the static references a page declares, "
+            "or to obtain an "
             "asset they asked for. Do not enable it to go asset-hunting on your "
             "own, and note that listing a URL here does not authorize "
             "download_web_asset — that needs its own request to obtain the asset."
@@ -31,9 +32,12 @@ class FetchWebContentArgs(BaseModel):
             "in the fetched HTML, matched against each asset's URL, name, and "
             "alt text. Leave it empty to list every supported static reference "
             "found in the fetched HTML, subject to the tool's result limit; "
-            "runtime-loaded and CSS-nested resources are never enumerated. "
-            "A <link rel=manifest> URL is returned regardless of the query, and "
-            "its contents are not fetched or searched."
+            "resources referenced only from CSS or constructed at runtime by "
+            "script are not enumerated, though lazy-loading attributes such as "
+            "data-src are. "
+            "A <link rel=manifest> URL is exempt from the query filter, though "
+            "not from the result limit, and its contents are never fetched or "
+            "searched."
         ),
     )
 

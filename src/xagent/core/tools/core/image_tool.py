@@ -55,11 +55,12 @@ When given a user request, rewrite and enrich the prompt into a **professional i
      one on your own initiative, not even from a brand's official site, and
      never take one from the user's other tasks. A plausible-looking search
      result is not proof that an asset is the brand's.
-     Bytes the user already put in this task or its workspace are trusted
-     input. A URL is only a retrieval route: asking you to retrieve one
+     Bytes the user themselves put in this task or its workspace are trusted
+     input; bytes you fetched are not, however they got there. A URL is only a
+     retrieval route: asking you to retrieve one
      authorizes the fetch, not the authenticity, and what comes back stays
      unverified identity material until the user confirms its source — an
-     unverified mark cannot serve an identity-critical reference. A user naming
+     unverified mark cannot serve as an identity-critical reference. A user naming
      a URL as the asset ("here is our logo: <url>") is that confirmation; a URL
      that merely served as a fetch route is not.
      When nothing verifiable is available, ask the user how to proceed — and once
@@ -153,10 +154,11 @@ user directed you to retrieve; do not retrieve source or reference material on
 your own initiative, not even from a brand's official site, and never take one
 from the user's other tasks. A plausible-looking search result is not proof that
 an asset is the brand's. Bytes the user already put in this task or its
-workspace are trusted input. A URL is only a retrieval route: asking you to
+workspace are trusted input; bytes you fetched are not, however they got
+there. A URL is only a retrieval route: asking you to
 retrieve one authorizes the fetch, not the authenticity, and what comes back
 stays unverified identity material until the user confirms its source — an
-unverified mark cannot serve an identity-critical reference. A user naming a URL
+unverified mark cannot serve as an identity-critical reference. A user naming a URL
 as the asset ("here is our logo: <url>") is that confirmation; a URL that merely
 served as a fetch route is not. When nothing
 verifiable is available, ask the user

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 import xagent.core.tools.adapters.vibe as vibe_pkg
 from xagent.core.model.image.base import BaseImageModel
+from xagent.core.model.video.base import BaseVideoModel
 from xagent.core.tools.adapters.vibe.base import AbstractBaseTool, ToolCategory
 from xagent.core.tools.adapters.vibe.download_web_asset import (
     DownloadWebAssetArgs,
@@ -31,6 +32,7 @@ from xagent.core.tools.adapters.vibe.fetch_web_content import (
     FetchWebContentTool,
 )
 from xagent.core.tools.adapters.vibe.image_tool import ImageGenerationTool
+from xagent.core.tools.adapters.vibe.video_tool import VideoGenerationTool
 from xagent.skills.parser import SkillParser
 
 SKILL_DIR = (
@@ -70,15 +72,26 @@ def _built_image_descriptions() -> dict[str, str]:
     return {t.name: _normalized(t.description) for t in tool.get_tools()}
 
 
-def _built_image_description(name: str) -> str:
-    built = _built_image_descriptions()
-    assert name in built, f"image builder no longer emits {name!r}: {sorted(built)}"
+def _built_video_descriptions() -> dict[str, str]:
+    """generate_video accepts reference_image_urls, so it is a retrieval surface."""
+    model = Mock(spec=BaseVideoModel)
+    workspace = Mock()
+    workspace.output_dir = Path("/tmp/asset-authorization-test")
+    tool = VideoGenerationTool(
+        {"m": model}, {"m": "test model"}, workspace, default_video_model=model
+    )
+    return {t.name: _normalized(t.description) for t in tool.get_tools()}
+
+
+def _built_description(builder, name: str) -> str:
+    built = builder()
+    assert name in built, f"builder no longer emits {name!r}: {sorted(built)}"
     return built[name]
 
 
 # Emitted by the image builder but carrying no retrieval route: it only lists
 # configured models. Named so a third tool from the same wrapper fails below.
-IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE = {"list_image_models"}
+IMAGE_TOOLS_WITHOUT_A_RETRIEVAL_ROUTE = {"list_image_models", "list_video_models"}
 
 
 def _surfaces() -> dict[str, str]:
@@ -88,12 +101,22 @@ def _surfaces() -> dict[str, str]:
         "fetch_web_content.include_assets": _field(
             FetchWebContentArgs, "include_assets"
         ),
+        # Carries the one remaining 'logo' example this PR removed; without it
+        # here, no scan covers the field.
+        "fetch_web_content.asset_query": _field(FetchWebContentArgs, "asset_query"),
         "download_web_asset.description": _normalized(
             DownloadWebAssetTool(None).description  # type: ignore[arg-type]
         ),
         "download_web_asset.url": _field(DownloadWebAssetArgs, "url"),
-        "generate_image.description": _built_image_description("generate_image"),
-        "edit_image.description": _built_image_description("edit_image"),
+        "generate_image.description": _built_description(
+            _built_image_descriptions, "generate_image"
+        ),
+        "edit_image.description": _built_description(
+            _built_image_descriptions, "edit_image"
+        ),
+        "generate_video.description": _built_description(
+            _built_video_descriptions, "generate_video"
+        ),
     }
 
 
@@ -115,16 +138,13 @@ NOT_A_RETRIEVAL_ROUTE = {
     "TavilyWebSearchTool",
     "WebSearchTool",
     "ZhipuWebSearchTool",
-    # FunctionTool wrappers: each carries whichever description its builder
-    # hands it; the retrieval-relevant ones (image) are asserted through the
-    # built surfaces above, the rest generate media from prompts.
-    "FunctionTool",
-    "ImageGenerationFunctionTool",
+    # FunctionTool wrappers whose builders emit no URL-taking parameter. The
+    # image and video wrappers are absent on purpose: their built descriptions
+    # are asserted as surfaces above.
     "VisionFunctionTool",
     "AudioFunctionTool",
     "MusicFunctionTool",
     "SoundEffectFunctionTool",
-    "VideoGenerationFunctionTool",
     # Browser session actions on an already-open page.
     "BrowserClickTool",
     "BrowserCloseTool",
@@ -153,6 +173,12 @@ NOT_A_RETRIEVAL_ROUTE = {
 # would break their ordinary use. Listed so they are an explicit carve-out rather
 # than a silent omission; tightening them is its own change.
 GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE = {
+    # Builder-produced wrappers: a concrete instance carries whichever
+    # description its builder supplies, so the governed ones are asserted as
+    # built surfaces rather than by class.
+    "FunctionTool",
+    "ImageGenerationFunctionTool",
+    "VideoGenerationFunctionTool",
     "APITool",
     "CustomApiTool",
     "MCPToolAdapter",
@@ -205,7 +231,12 @@ def _discovered_tool_classes() -> dict[str, type]:
             yield from descendants(sub)
 
     def remote_capable(cls: type) -> bool:
-        if getattr(cls, "category", None) in REMOTE_CAPABLE_CATEGORIES:
+        category = getattr(cls, "category", None)
+        if isinstance(category, property):
+            # Declared as a property, so its value needs an instance; treat it
+            # as unknown rather than silently not-remote.
+            return True
+        if category in REMOTE_CAPABLE_CATEGORIES:
             return True
         try:
             # Unbound on purpose: most args_type implementations ignore self.
@@ -219,7 +250,10 @@ def _discovered_tool_classes() -> dict[str, type]:
         return bool(URL_BEARING_FIELDS & fields)
 
     return {
-        c.__name__: c for c in set(descendants(AbstractBaseTool)) if remote_capable(c)
+        c.__name__: c
+        for c in set(descendants(AbstractBaseTool))
+        # __subclasses__ is process-global: test fixtures subclass this too.
+        if c.__module__.startswith(vibe_pkg.__name__) and remote_capable(c)
     }
 
 
@@ -239,14 +273,17 @@ REQUIRED_WORDING = {
         "when the user asked you to obtain an exact asset"
     ),
     "fetch_web_content.include_assets": (
-        "Enable it when the user asked you to inspect or enumerate what a page loads"
+        "Enable it when the user asked you to inspect or enumerate the static "
+        "references a page declares"
     ),
+    "fetch_web_content.asset_query": "Leave it empty to list every supported static",
     "download_web_asset.description": (
         "The user has to have asked you to obtain this asset"
     ),
     "download_web_asset.url": "for an asset the user asked you to obtain",
     "generate_image.description": "an asset the user directed you to retrieve",
     "edit_image.description": "an asset the user directed you to retrieve",
+    "generate_video.description": "an asset the user directed you to retrieve",
 }
 
 
@@ -282,6 +319,10 @@ def test_every_retrieval_tool_is_classified() -> None:
     assert set(RETRIEVAL_TOOL_CLASSES) <= discovered, (
         f"renamed or removed: {sorted(set(RETRIEVAL_TOOL_CLASSES) - discovered)}"
     )
+    # Dead entries hide the fact that a carve-out stopped applying.
+    assert classified <= discovered, (
+        f"classified but no longer discovered: {sorted(classified - discovered)}"
+    )
 
 
 def test_every_retrieval_tool_has_a_covered_surface() -> None:
@@ -297,7 +338,7 @@ def test_every_surface_has_required_wording() -> None:
     )
 
 
-@pytest.mark.parametrize("name", sorted(_surfaces()))
+@pytest.mark.parametrize("name", sorted(REQUIRED_WORDING))
 def test_surface_forbids_unprompted_retrieval(name: str) -> None:
     lowered = _surfaces()[name].lower()
     for phrase in BANNED_WORDING:
@@ -374,9 +415,11 @@ def test_page_wide_inspection_leaves_asset_query_empty() -> None:
     # The tool parses the initial HTML and caps the result, so promising
     # "everything the page loads" overstates what comes back.
     assert "subject to the tool's result limit" in query_field
-    assert "runtime-loaded and CSS-nested resources are never enumerated" in (
-        query_field
-    )
+    # Lazy-loading attributes ARE extracted (web_content.py:262,276), so the
+    # caveat has to name what is really excluded.
+    assert "referenced only from CSS or constructed at runtime" in query_field
+    assert "lazy-loading attributes such as data-src are" in query_field
+    assert "not from the result limit" in query_field
 
 
 def test_authenticity_is_independent_of_authorization() -> None:

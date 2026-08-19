@@ -87,8 +87,9 @@ class DownloadWebAssetTool(AbstractBaseTool):
             "asset counts as verified identity material only when the user "
             "supplied its bytes or confirmed the source. Naming a URL as the "
             "asset is that confirmation; one that merely served as a fetch route "
-            "is not. It returns a trusted FileRef, "
-            "so do not reproduce the asset through api_call plus write_file."
+            "is not. The download returns a workspace FileRef, so do not "
+            "reproduce the asset through api_call plus write_file — the FileRef "
+            "is trustworthy as a file, never as evidence of provenance."
         )
 
     @property

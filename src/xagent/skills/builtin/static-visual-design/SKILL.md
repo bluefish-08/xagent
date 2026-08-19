@@ -187,7 +187,8 @@ task — including one attached in an earlier turn, whose file_id is no longer i
 context and which you recover by finding it with `list_all_user_files` — and the
 current task workspace. Going to look for the asset yourself is a third path that
 belongs to the user, not to you: take it only when they tell you to. Bytes
-already in this task or its workspace are trusted input; a URL is only a
+the user themselves put in this task or its workspace are trusted input; bytes
+you fetched are not, however they got there; a URL is only a
 retrieval route: asking you to retrieve one authorizes the fetch, not the
 authenticity, and what comes back stays unverified identity material until the
 user confirms its source. A user naming a URL as the asset ("here is our logo:
@@ -228,8 +229,9 @@ Separate stable identity cues from temporary campaign styling. Stable cues may
 include the official logo, recurring color relationships, typography character,
 product imagery, graphic proportions, and tone of voice. Temporary styling may
 include a particular gradient, metallic 3D type, bevel, glow, ribbon, confetti,
-swoosh, or seasonal campaign motif. Use several recent official references when
-available to infer what recurs; do not copy every effect from one old banner.
+swoosh, or seasonal campaign motif. When several recent references are already
+available to you from the sources above, infer what recurs across them; do not
+go collecting more, and do not copy every effect from one old banner.
 
 When official references look dated, familiarity still matters, but datedness
 is not a brand requirement. Preserve recognition through the stable cues and
@@ -423,9 +425,11 @@ layout.
 
 The gate has two halves and the budget touches only one of them.
 
-**Coverage is unconditional.** Do not enter `final_answer` until every required
-asset exists as a successful tool result, including every direction and placement
-the brief or this skill asks for. A spent budget is never a reason an asset is
+**Coverage is unconditional, with one exception.** Do not enter `final_answer`
+until every required asset exists as a successful tool result, including every
+direction and placement the brief or this skill asks for. The exception is a
+branded final the user has already chosen to go without: that one asset stays
+incomplete by their decision, and the rule below governs instead. A spent budget is never a reason an asset is
 absent, because coverage is not budgeted: if one has no candidate, render it. A
 brand-specific final also needs its verified logo — when none was ever obtained
 and the user has not yet chosen, ask rather than shipping a substitute. Once they
