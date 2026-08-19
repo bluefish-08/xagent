@@ -5122,7 +5122,7 @@ class CompletionAssessmentRecordingRuntime(PatternRuntime):
 @pytest.mark.asyncio
 async def test_dag_completion_assessment_blank_arguments_report_llm_error() -> None:
     """Blank `assess_dag_completion` arguments must raise the named error and
-    reach both `streamer.fail` and `on_llm_error` — with no `on_llm_end`."""
+    reach both `on_llm_error` and the unconditional `on_llm_end`."""
 
     class BlankCompletionLLM:
         async def chat(self, **kwargs: Any) -> Any:
@@ -5179,9 +5179,7 @@ async def test_dag_completion_assessment_parse_failure_fails_a_started_stream() 
                         "id": "call_assess",
                         "function": {
                             "name": DAG_COMPLETION_TOOL_NAME,
-                            "arguments": (
-                                '{"status":"completed","answer":"part'  # noqa: B907
-                            ),
+                            "arguments": '{"status":"completed","answer":"part',
                         },
                     }
                 ],
@@ -5208,6 +5206,8 @@ async def test_dag_completion_assessment_parse_failure_fails_a_started_stream() 
     ]
     assert len(error_events) == 1
     assert "part" not in error_events[0]["error"]
+    # Usage accounting survives the parse failure.
+    assert len(runtime.llm_ends) == 1
 
 
 @pytest.mark.asyncio

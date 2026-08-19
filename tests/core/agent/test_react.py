@@ -5960,10 +5960,8 @@ async def test_react_runs_a_parameterless_tool_called_with_blank_arguments() -> 
 async def test_react_repairs_final_answer_called_with_blank_arguments() -> None:
     """The #1501 production trace shape: streaming `final_answer` with `""`.
 
-    A documentation/resilience test, not a regression guard for this PR:
-    `final_answer` is a control tool, so it short-circuits before the new
-    blank-string branch, landing on the pre-existing `_empty_final_answer_call`
-    guard, which spends the one repair retry. The LLM is a fake.
+    `final_answer` is a control tool, so blank arguments short-circuit to the
+    `_empty_final_answer_call` guard, which spends the one repair retry.
     """
 
     llm = StreamingEmptyFinalAnswerLLM(broken_arguments="")

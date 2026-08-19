@@ -101,17 +101,21 @@ class PlanStep:
             )
         tool_names = normalize_tool_names(data)
         for required in ("id", "task"):
-            if required not in data:
+            if data.get(required) is None:
                 raise PlanValidationError(
                     f"Plan step missing required field {required!r}."
                 )
-        dependencies = data.get("dependencies") or []
+        dependencies = data.get("dependencies")
+        if dependencies is None:
+            dependencies = []
         if not isinstance(dependencies, list):
             raise PlanValidationError("Plan step 'dependencies' must be a list.")
         return cls(
             id=str(data["id"]),
             task=str(data["task"]),
-            dependencies=list(dependencies),
+            # str() matches the id coercion above, so integer ids and integer
+            # dependency references stay comparable in validate().
+            dependencies=[str(dependency) for dependency in dependencies],
             description=(
                 str(data["description"])
                 if data.get("description") is not None
@@ -807,7 +811,8 @@ def normalize_tool_names(data: dict[str, Any]) -> list[str]:
             name = item
         elif isinstance(item, dict):
             if isinstance(item.get("function"), dict):
-                name = item["function"].get("name")
+                value = item["function"].get("name")
+                name = str(value) if value is not None else None
             else:
                 value = item.get("name") or item.get("tool_name")
                 name = str(value) if value is not None else None

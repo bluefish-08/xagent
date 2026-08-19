@@ -1607,7 +1607,8 @@ class DAGPattern(AgentPattern):
         payload = self._extract_tool_arguments(response, DAG_COMPLETION_TOOL_NAME)
         status = str(payload.get("status", "")).strip().lower()
         if status not in {"completed", "incomplete"}:
-            raise ValueError(f"Invalid DAG completion status: {status}")
+            # Truncated: str(exc) reaches end users via streamer.fail (#1479).
+            raise ValueError(f"Invalid DAG completion status: {str(status)[:80]!r}")
         answer = str(payload.get("answer", ""))
         return DAGCompletionAssessment(
             complete=status == "completed",
