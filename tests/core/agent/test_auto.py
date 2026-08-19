@@ -2307,16 +2307,22 @@ def test_clearing_request_scoped_enrichment_drops_the_image_edit_flag() -> None:
 
 
 def test_auto_decision_empty_arguments_raise_retryable_error() -> None:
-    """Blank provider arguments must stay retryable, not become a bare `{}`.
+    """Blank provider arguments must stay retryable, not become a bare `{}`."""
 
-    `"{}"` parses into a decision with no action and escapes the retry loop.
-    """
+    def response(arguments: str) -> dict[str, Any]:
+        return {
+            "tool_calls": [
+                {"function": {"name": DECISION_TOOL_NAME, "arguments": arguments}}
+            ]
+        }
+
     pattern = AutoPattern()
-    with pytest.raises(AutoDecisionArgumentsError):
-        pattern._parse_decision(
-            {
-                "tool_calls": [
-                    {"function": {"name": DECISION_TOOL_NAME, "arguments": ""}}
-                ]
-            }
-        )
+    for blank in ("", "   "):
+        with pytest.raises(AutoDecisionArgumentsError):
+            pattern._parse_decision(response(blank))
+
+    # The other half of the contract: `"{}"` yields a plain ValueError, which the
+    # retry loop's `except AutoDecisionArgumentsError` does not catch.
+    with pytest.raises(ValueError) as excinfo:
+        pattern._parse_decision(response("{}"))
+    assert not isinstance(excinfo.value, AutoDecisionArgumentsError)

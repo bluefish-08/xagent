@@ -386,7 +386,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     # Only handle function tool calls, not custom tool calls
                     if hasattr(tool_call, "function"):
                         func = tool_call.function
-                        args = func.arguments if func.arguments else ""
+                        args = func.arguments or ""
 
                         tool_calls.append(
                             {
@@ -705,7 +705,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     # Only handle function tool calls, not custom tool calls
                     if hasattr(tool_call, "function"):
                         func = tool_call.function
-                        args = func.arguments if func.arguments else ""
+                        args = func.arguments or ""
 
                         tool_calls.append(
                             {

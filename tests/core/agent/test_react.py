@@ -5857,3 +5857,126 @@ async def test_run_flags_missing_image_editing_and_renders_the_correction(
     rendered = llm.calls[0]["messages"][0]["content"]
     assert ("image editing is unavailable here" in rendered) is unavailable
     assert ("attach a reference through images" in rendered) is unavailable
+
+
+class NoArgToolLLM:
+    """Calls a parameterless tool with `arguments: ""`, then finishes.
+
+    Reproduces the provider shape behind xorbitsai/xagent#1501 on the streaming
+    path: a blank argument string must reach the tool as an empty call, not kill
+    the run.
+    """
+
+    def __init__(self) -> None:
+        self.stream_calls: list[dict[str, Any]] = []
+
+    async def chat(self, **kwargs: Any) -> Any:
+        raise AssertionError("this path should stay streaming")
+
+    async def stream_chat(
+        self, messages: list[dict[str, Any]] | None = None, **kwargs: Any
+    ) -> Any:
+        if messages is not None:
+            kwargs["messages"] = messages
+        self.stream_calls.append(kwargs)
+        if len(self.stream_calls) == 1:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_list_0",
+                        "function": {"name": "list_models", "arguments": ""},
+                    }
+                ],
+            )
+        else:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_final_0",
+                        "function": {
+                            "name": "final_answer",
+                            "arguments": (
+                                '{"response_language":"English",'
+                                '"answer":"gpt-4o","outcome":"completed"}'
+                            ),
+                        },
+                    }
+                ],
+            )
+        yield StreamChunk(type=ChunkType.END)
+
+
+class NoArgTool:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+        class Metadata:
+            name = "list_models"
+            description = "List available models."
+
+        self.metadata = Metadata()
+
+    def args_type(self) -> type[BaseModel]:
+        return _NoArgs
+
+    async def run_json_async(self, args: dict[str, Any]) -> Any:
+        self.calls.append(args)
+        return {"models": ["gpt-4o"]}
+
+
+class _NoArgs(BaseModel):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_react_runs_a_parameterless_tool_called_with_blank_arguments() -> None:
+    """#1501 (a): a no-arg tool sent `""` executes instead of failing the run."""
+
+    llm = NoArgToolLLM()
+    pattern, context, runtime, _outbound, _tracer = _react_empty_final_answer_fixture()
+    tool = NoArgTool()
+
+    result = await pattern.run(
+        context=context,
+        tools=[tool, FakeTool()],
+        llm=llm,
+        runtime=runtime,
+    )
+
+    assert result["success"] is True
+    assert result["response"] == "gpt-4o"
+    assert tool.calls == [{}]
+
+
+@pytest.mark.asyncio
+async def test_react_repairs_final_answer_called_with_blank_arguments() -> None:
+    """#1501 (b): the production trace — streaming `final_answer` with `""`.
+
+    Before #1501 this raised inside the LLM adapter and killed the task. It must
+    instead spend the pattern's one repair retry and recover.
+    """
+
+    llm = StreamingEmptyFinalAnswerLLM(broken_arguments="")
+    pattern, context, runtime, outbound, tracer = _react_empty_final_answer_fixture()
+
+    result = await pattern.run(
+        context=context,
+        tools=[FakeTool()],
+        llm=llm,
+        runtime=runtime,
+    )
+
+    assert result["success"] is True
+    assert result["response"] == "The result is 4."
+    assert len(llm.stream_calls) == 2
+
+    retry_starts = [
+        event
+        for event in tracer.events
+        if event["event_type"] == "action_start_llm"
+        and event["data"].get("phase") == "empty_final_answer_recovery"
+    ]
+    assert len(retry_starts) == 1
+    assert outbound.events[-1]["content"] == "The result is 4."

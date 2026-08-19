@@ -35,6 +35,7 @@ from xagent.core.agent.pattern.dag.dag import _DAGStepRuntime
 from xagent.core.agent.pattern.dag.plan_generator import (
     PLAN_GENERATION_REQUIRED_TOOL_MESSAGE,
     PlanToolArgumentsError,
+    coerce_execution_plan,
 )
 from xagent.core.model.chat.types import ChunkType, StreamChunk
 from xagent.core.task_runtime import PREFERRED_INPUT_MODALITIES_METADATA_KEY
@@ -4951,11 +4952,14 @@ async def test_dag_pattern_resume_after_replan_keeps_new_active_step(
 
 
 def test_plan_generator_empty_arguments_raise_retryable_error() -> None:
-    """Blank provider arguments must stay retryable, not become a bare `{}`.
+    """Blank provider arguments must stay retryable, not become a bare `{}`."""
+    generator = LLMPlanGenerator()
+    for blank in ("", "   "):
+        with pytest.raises(PlanToolArgumentsError):
+            generator._coerce_arguments(blank)
 
-    `"{}"` coerces cleanly and then dies in `coerce_execution_plan` outside the
-    generator's retry, losing the run instead of one repair attempt.
-    """
-    generator = LLMPlanGenerator.__new__(LLMPlanGenerator)
-    with pytest.raises(PlanToolArgumentsError):
-        generator._coerce_arguments("")
+    # The other half of the contract: normalizing to `"{}"` upstream would coerce
+    # cleanly here and then die in coerce_execution_plan, outside the retry.
+    assert generator._coerce_arguments("{}") == {}
+    with pytest.raises(TypeError):
+        coerce_execution_plan({})
