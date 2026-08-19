@@ -1036,13 +1036,15 @@ class AutoPattern(AgentPattern):
                     },
                 )
                 continue
-            except AutoDecisionArgumentsError as exc:
+            except (ValueError, TypeError) as exc:
+                # Any malformed decision is retryable, not just the JSON-shape
+                # subclass: from_dict raises a plain ValueError for a bad action.
                 attempt += 1
                 if attempt >= MAX_DECISION_PARSE_ATTEMPTS:
                     raise
                 retry_feedback = self._decision_retry_feedback(exc)
                 logger.warning(
-                    "AutoPattern decision arguments were invalid JSON; retrying "
+                    "AutoPattern decision arguments were invalid; retrying "
                     "decision parse. execution_id=%s error=%s",
                     getattr(context, "execution_id", None),
                     exc,
@@ -1194,11 +1196,13 @@ class AutoPattern(AgentPattern):
             "Do not answer in natural language."
         )
 
-    def _decision_retry_feedback(self, error: AutoDecisionArgumentsError) -> str:
-        argument_preview = self._truncate_retry_preview(error.arguments or "")
+    def _decision_retry_feedback(self, error: Exception) -> str:
+        argument_preview = self._truncate_retry_preview(
+            getattr(error, "arguments", None) or ""
+        )
         return (
             f"The previous {DECISION_TOOL_NAME} tool call could not be used "
-            f"because its arguments were invalid JSON: {error}. Call "
+            f"because its arguments were invalid: {error}. Call "
             f"{DECISION_TOOL_NAME} again exactly once. The tool arguments must be "
             "one complete valid JSON object. Do not truncate string values. If "
             "action is final_answer, include the complete non-empty answer field "

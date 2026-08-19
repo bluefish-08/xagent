@@ -1567,7 +1567,7 @@ async def test_auto_pattern_retries_unrepairable_decision_arguments() -> None:
     assert result["output"] == "after retry"
     assert len(llm.calls) == 2
     retry_messages = llm.calls[1]["messages"]
-    assert "invalid JSON" in retry_messages[-1]["content"]
+    assert "arguments were invalid" in retry_messages[-1]["content"]
     assert "not json at all" in retry_messages[-1]["content"]
     llm_start_metadata = [
         hook[1]["metadata"] for hook in runtime.hooks if hook[0] == "llm_start"
@@ -1936,10 +1936,11 @@ async def test_auto_pattern_missing_decision_tool_call_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_pattern_unknown_action_fails() -> None:
+async def test_auto_pattern_unknown_action_fails_after_retry() -> None:
     llm = FakeLLM(
         [
             decision_tool_response("unknown", "Bad action."),
+            decision_tool_response("unknown", "Still bad."),
         ]
     )
     pattern = AutoPattern()
@@ -1953,6 +1954,7 @@ async def test_auto_pattern_unknown_action_fails() -> None:
             llm=llm,
             runtime=PatternRuntime(),
         )
+    assert len(llm.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -2321,8 +2323,44 @@ def test_auto_decision_empty_arguments_raise_retryable_error() -> None:
         with pytest.raises(AutoDecisionArgumentsError):
             pattern._parse_decision(response(blank))
 
-    # The other half of the contract: `"{}"` yields a plain ValueError, which the
-    # retry loop's `except AutoDecisionArgumentsError` does not catch.
-    with pytest.raises(ValueError) as excinfo:
+    # `"{}"` parses but carries no action, so it surfaces as a plain ValueError;
+    # the decide loop's widened except catches it too (pinned by the loop test
+    # below).
+    with pytest.raises(ValueError):
         pattern._parse_decision(response("{}"))
-    assert not isinstance(excinfo.value, AutoDecisionArgumentsError)
+
+
+@pytest.mark.asyncio
+async def test_auto_pattern_retries_an_empty_object_decision() -> None:
+    """A `{}` decision payload spends one retry with feedback, not the run."""
+    empty_object_response = {
+        "tool_calls": [
+            {
+                "id": f"call_{DECISION_TOOL_NAME}",
+                "type": "function",
+                "function": {"name": DECISION_TOOL_NAME, "arguments": "{}"},
+            }
+        ]
+    }
+    llm = FakeLLM(
+        [
+            empty_object_response,
+            decision_tool_response(
+                "final_answer",
+                "Retry produced valid arguments.",
+                answer="after retry",
+            ),
+        ]
+    )
+    pattern = AutoPattern()
+    context = ExecutionContext()
+    context.add_user_message("Continue")
+
+    result = await pattern.run(
+        context=context, tools=[], llm=llm, runtime=RecordingRuntime()
+    )
+
+    assert result["success"] is True
+    assert result["output"] == "after retry"
+    assert len(llm.calls) == 2
+    assert "arguments were invalid" in llm.calls[1]["messages"][-1]["content"]
