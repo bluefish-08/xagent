@@ -1,13 +1,8 @@
 """Asset-retrieval tool descriptions must not authorize unprompted retrieval.
 
-These descriptions are injected into the tool schema on every tool-capable step,
-while a skill's policy is only present once it has been loaded. A description
-that offers a wider route than the skill allows therefore wins by default, so the
-authorization wording has to live here too.
-
-The surfaces are read from the tools as they are actually built, and the
-inventory is walked out of the adapter package, so a new retrieval tool fails
-here rather than slipping past a hand-written list.
+A tool description is in the schema on every step; a skill's policy only after
+it loads, so a wider description silently wins. Surfaces are read from the built
+tools and the inventory is walked out of the package, not hand-listed.
 """
 
 import importlib
@@ -20,6 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 import xagent.core.tools.adapters.vibe as vibe_pkg
+from tests.shared.fake_skill_manager import FakeSkillManager
 from xagent.core.model.image.base import BaseImageModel
 from xagent.core.model.video.base import BaseVideoModel
 from xagent.core.tools.adapters.vibe.base import AbstractBaseTool, ToolCategory
@@ -33,16 +29,10 @@ from xagent.core.tools.adapters.vibe.fetch_web_content import (
 )
 from xagent.core.tools.adapters.vibe.image_tool import ImageGenerationTool
 from xagent.core.tools.adapters.vibe.video_tool import VideoGenerationTool
+from xagent.skills.manager import SkillManager
 from xagent.skills.parser import SkillParser
 
-SKILL_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "src"
-    / "xagent"
-    / "skills"
-    / "builtin"
-    / "static-visual-design"
-)
+SKILL_DIR = SkillManager.get_builtin_root() / "static-visual-design"
 
 
 def _normalized(text: str) -> str:
@@ -54,11 +44,7 @@ def _field(model: type[BaseModel], name: str) -> str:
 
 
 def _built_image_descriptions() -> dict[str, str]:
-    """The generate/edit descriptions as `get_tools` emits them to the schema.
-
-    Reading the class constants instead would miss anything the builder prepends
-    or interpolates.
-    """
+    """As `get_tools` emits them: the class constants miss builder interpolation."""
     model = Mock(spec=BaseImageModel)
     workspace = Mock()
     workspace.output_dir = Path("/tmp/asset-authorization-test")
@@ -128,19 +114,14 @@ RETRIEVAL_TOOL_CLASSES = {
 }
 
 # Reach the network or take a URL, but cannot turn one into a reusable asset
-# reference: query-only search returns text and takes no URL; the browser session
-# tools act on an already-open page; the vision and image FunctionTool wrappers
-# carry whichever description their builder hands them, asserted through the built
-# surfaces instead.
+# reference.
 NOT_A_RETRIEVAL_ROUTE = {
-    # Query-only search: returns text, takes no URL.
+    # Query-only: returns text, takes no URL.
     "ExaWebSearchTool",
     "TavilyWebSearchTool",
     "WebSearchTool",
     "ZhipuWebSearchTool",
-    # FunctionTool wrappers whose builders emit no URL-taking parameter. The
-    # image and video wrappers are absent on purpose: their built descriptions
-    # are asserted as surfaces above.
+    # Wrappers whose builders emit no URL-taking parameter.
     "VisionFunctionTool",
     "AudioFunctionTool",
     "MusicFunctionTool",
@@ -156,26 +137,21 @@ NOT_A_RETRIEVAL_ROUTE = {
     "BrowserScreenshotTool",
     "BrowserSelectOptionTool",
     "BrowserWaitForSelectorTool",
-    # Local file, document, and data operations: no remote fetch.
+    # Local file, document, and data operations.
     "FileAnalysisTool",
     "FileTool",
     "PPTXTool",
     "SQLQueryFunctionTool",
     "SkillTool",
-    # Delegating wrappers: the wrapped tool's class carries the classification,
-    # and the wrapper forwards its description verbatim.
+    # Delegating wrappers: the wrapped class carries the classification.
     "OutputFilteredToolWrapper",
     "SandboxedToolWrapper",
 }
 
-# General-purpose remote routes that predate this contract and are not scoped to
-# asset retrieval: constraining them to "only when the user asked for an asset"
-# would break their ordinary use. Listed so they are an explicit carve-out rather
-# than a silent omission; tightening them is its own change.
+# General-purpose remote routes predating this contract. Listed as an explicit
+# carve-out rather than a silent omission; tightening them is its own change.
 GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE = {
-    # Builder-produced wrappers: a concrete instance carries whichever
-    # description its builder supplies, so the governed ones are asserted as
-    # built surfaces rather than by class.
+    # Builder-produced: governed instances are asserted as built surfaces.
     "FunctionTool",
     "ImageGenerationFunctionTool",
     "VideoGenerationFunctionTool",
@@ -185,8 +161,7 @@ GENERIC_REMOTE_ROUTE_OUT_OF_SCOPE = {
     "BrowserNavigateTool",
     "ComputerTool",
     "CreateKnowledgeBaseFromUrlTool",
-    # Code executors can fetch anything by construction; constraining them to
-    # asset requests would break ordinary compute use.
+    # Code executors fetch anything by construction.
     "CommandExecutorFunctionTool",
     "JavaScriptExecutorFunctionTool",
     "PythonExecutorFunctionTool",
@@ -215,11 +190,7 @@ REMOTE_CAPABLE_CATEGORIES = (
 
 
 def _discovered_tool_classes() -> dict[str, type]:
-    """Every tool class that can pull a remote resource into the run.
-
-    Widened past the two categories this PR touches: a tool in any category that
-    accepts a URL is a route the policy has to account for.
-    """
+    """Every tool class that can pull a remote resource into the run."""
     # walk_packages, not iter_modules: subpackages such as sandboxed_tool are
     # only imported lazily by the factory and would otherwise stay invisible.
     for module in pkgutil.walk_packages(vibe_pkg.__path__, f"{vibe_pkg.__name__}."):
@@ -242,10 +213,8 @@ def _discovered_tool_classes() -> dict[str, type]:
             # Unbound on purpose: most args_type implementations ignore self.
             fields = set(cls.args_type(cls).model_fields)  # type: ignore[attr-defined]
         except Exception:
-            # Cannot be introspected statically (args_type reads instance
-            # state, e.g. CustomApiTool, SandboxedToolWrapper). Treat it as
-            # possibly remote so it must be classified explicitly — a swallowed
-            # error must never mean "not remote-capable".
+            # Not statically introspectable; a swallowed error must never read
+            # as "not remote-capable".
             return True
         return bool(URL_BEARING_FIELDS & fields)
 
@@ -361,10 +330,7 @@ def test_authorization_follows_the_request_not_the_url() -> None:
 
 
 def test_a_user_supplied_url_is_a_route_but_not_a_licence() -> None:
-    """A URL supplied with an obtain request is a valid route; one pasted to be
-    read is not. The obtain intent has to qualify both routes, not only the
-    surfaced one.
-    """
+    """The obtain intent qualifies both routes, not only the surfaced one."""
     surfaces = _surfaces()
 
     assert "they supplied with that request" in surfaces["download_web_asset.url"]
@@ -402,11 +368,7 @@ def test_include_assets_is_also_an_enumeration_contract() -> None:
 
 
 def test_page_wide_inspection_leaves_asset_query_empty() -> None:
-    """`_filter_and_deduplicate_assets` only filters on a non-empty query.
-
-    Telling the model to always set asset_query would drop exactly the unrelated
-    assets a page-wide inspection is asking for.
-    """
+    """A non-empty asset_query filters, so page-wide inspection leaves it empty."""
     fetch = _surfaces()["fetch_web_content.description"]
     assert "leaving asset_query empty so none of the static references" in fetch
     assert "the result limit still applies" in fetch
@@ -442,9 +404,8 @@ def test_asking_the_user_stops_once_they_have_chosen() -> None:
         assert "act on that choice instead of asking again" in text, name
 
 
-# The provenance rule as one canonical clause, stated word-for-word on the skill
-# and both image descriptions, so agreement is a comparison rather than per-side
-# spot checks that can drift independently.
+# One canonical clause, word-for-word on every surface, so agreement is a
+# comparison rather than per-side spot checks.
 ROUTE_CLAUSE = (
     "URL is only a retrieval route: asking you to retrieve one authorizes the "
     "fetch, not the authenticity, and what comes back stays unverified identity "
@@ -457,12 +418,7 @@ CONFIRMATION_CLAUSE = (
 
 
 def test_skill_and_tool_descriptions_agree_on_retrieval() -> None:
-    """Both land in the same context once the skill is loaded.
-
-    A skill that sanctions self-directed retrieval overrides the tool schema's
-    prohibition, so the two contracts carry the same canonical clauses — asserted
-    as one string on every surface, not as independent per-side literals.
-    """
+    """Both land in the same context, so both carry the same canonical clauses."""
     body = " ".join(SkillParser.parse(SKILL_DIR)["content"].split())
     surfaces = _surfaces()
 
@@ -499,23 +455,11 @@ def _system_context_after_load_skill() -> str:
     from xagent.core.agent.context.skill_tool import build_load_skill_tool
 
     skill = SkillParser.parse(SKILL_DIR)
-
-    class _Manager:
-        async def list_skills(self) -> list[dict]:
-            return [
-                {
-                    "name": skill["name"],
-                    "description": skill.get("description", ""),
-                    "when_to_use": skill.get("when_to_use", ""),
-                }
-            ]
-
-        async def get_skill(self, name: str) -> dict | None:
-            return skill if name == skill["name"] else None
+    manager = FakeSkillManager([skill])
 
     async def run() -> str:
         context = ExecutionContext(system_prompt="Base prompt.")
-        tool = await build_load_skill_tool(skill_manager=_Manager(), context=context)
+        tool = await build_load_skill_tool(skill_manager=manager, context=context)
         assert tool is not None
         await tool.execute(skill["name"])
         return str(context.get_messages_for_llm()[0]["content"])
@@ -531,11 +475,7 @@ def _section(system: str, heading: str, next_heading: str) -> str:
 
 
 def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
-    """Reading the file proves the text exists; this proves it reaches the model.
-
-    A transformation between the skill file and the assembled system message would
-    otherwise be invisible to every assertion above.
-    """
+    """Reading the file proves the text exists; this proves it reaches the model."""
     system = _system_context_after_load_skill()
 
     assert "Two sources need no permission" in system
@@ -548,11 +488,7 @@ def test_loaded_context_carries_the_policy_without_contradicting_it() -> None:
 
 
 def test_each_no_logo_gate_settles_the_choice_in_its_own_section() -> None:
-    """Three gates ask for a logo, so each needs its own after-choice rule.
-
-    A single global substring passes on whichever section happens to carry the
-    phrase, leaving the other two free to re-ask.
-    """
+    """Three gates ask for a logo; a global substring passes on any one of them."""
     system = _system_context_after_load_skill()
 
     source = _section(
@@ -574,11 +510,7 @@ def test_each_no_logo_gate_settles_the_choice_in_its_own_section() -> None:
 
 
 def test_provenance_reads_the_same_on_every_surface_that_states_it() -> None:
-    """One distinction, three places: bytes are trusted, a URL is only a route.
-
-    "Supplied" means a URL two sentences earlier in the downloader, so each
-    surface has to keep the two senses apart in its own text.
-    """
+    """Keep the two senses of "supplied" apart on every surface that states it."""
     surfaces = _surfaces()
     system = _system_context_after_load_skill()
 
@@ -598,12 +530,7 @@ def test_provenance_reads_the_same_on_every_surface_that_states_it() -> None:
 
 
 def test_naming_a_url_as_the_asset_confirms_the_source() -> None:
-    """ "Here is our logo: <url>" must not trigger a redundant re-ask.
-
-    The fetch is authorized and the source is confirmed in the same sentence, so
-    every surface that demands confirmation also has to define this as the
-    confirming act.
-    """
+    """Naming a URL as the asset is authorization and confirmation in one."""
     surfaces = _surfaces()
     system = _system_context_after_load_skill()
 
@@ -617,11 +544,7 @@ def test_naming_a_url_as_the_asset_confirms_the_source() -> None:
 
 
 def test_no_surface_frames_self_directed_search_as_a_pipeline_stage() -> None:
-    """The planning text and the always-loaded reference must not re-sanction it.
-
-    "Do not search in parallel" reads as "searching is expected, sequence it
-    right" — the residue this asserts against.
-    """
+    """ "Do not search in parallel" implies searching is expected; assert it is gone."""
     body = " ".join(SkillParser.parse(SKILL_DIR)["content"].split())
     reference = " ".join(
         (SKILL_DIR / "references" / "static-ad-art-direction.md").read_text().split()

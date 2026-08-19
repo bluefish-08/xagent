@@ -1,9 +1,8 @@
 """Tests for the model-invocable ``load_skill`` tool and skill index."""
 
-from typing import Any
-
 import pytest
 
+from tests.shared.fake_skill_manager import FakeSkillManager
 from xagent.core.agent.context import ExecutionContext
 from xagent.core.agent.context.enrichment import (
     SELECTED_SKILL_METADATA_KEY,
@@ -28,24 +27,6 @@ CODER_SKILL = {
     "when_to_use": "Coding tasks",
     "content": "Prefer small functions.",
 }
-
-
-class FakeSkillManager:
-    def __init__(self, skills: list[dict[str, Any]]) -> None:
-        self.skills = {skill["name"]: skill for skill in skills}
-
-    async def list_skills(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": skill["name"],
-                "description": skill.get("description", ""),
-                "when_to_use": skill.get("when_to_use", ""),
-            }
-            for skill in self.skills.values()
-        ]
-
-    async def get_skill(self, name: str) -> dict[str, Any] | None:
-        return self.skills.get(name)
 
 
 @pytest.mark.asyncio

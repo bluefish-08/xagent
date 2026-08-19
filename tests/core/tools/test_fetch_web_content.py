@@ -373,10 +373,7 @@ class TestFetchWebContentTool:
 
 
 class TestExtractionMatchesItsDescription:
-    """The tool description promises "runtime-loaded and CSS-nested resources
-    are never enumerated"; these anchor that claim to the real extraction path,
-    so the description cannot silently become false.
-    """
+    """Anchor the asset_query description's claims to the real extraction path."""
 
     def _extract(self, html: str):
         soup = BeautifulSoup(html, "html.parser")
