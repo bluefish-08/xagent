@@ -1624,6 +1624,9 @@ class ReActPattern(AgentPattern):
 
         if tool_name in self._control_tool_names():
             return {}
+        if isinstance(payload, str) and not payload.strip():
+            # Nothing to preserve, and `input` is not a field a no-arg tool declares.
+            return {}
         return {"input": payload}
 
     def _build_tool_schema(self, tool: Any) -> dict[str, Any]:
