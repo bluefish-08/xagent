@@ -4958,8 +4958,112 @@ def test_plan_generator_empty_arguments_raise_retryable_error() -> None:
         with pytest.raises(PlanToolArgumentsError):
             generator._coerce_arguments(blank)
 
-    # The other half of the contract: normalizing to `"{}"` upstream would coerce
-    # cleanly here and then die in coerce_execution_plan, outside the retry.
+    # `"{}"` coerces cleanly and dies in coerce_execution_plan instead; the
+    # generate loop's except must catch that TypeError too (pinned below).
     assert generator._coerce_arguments("{}") == {}
     with pytest.raises(TypeError):
         coerce_execution_plan({})
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_retries_an_empty_object_plan() -> None:
+    """A `{}` plan payload spends one retry with feedback, not the whole run."""
+    generator = LLMPlanGenerator()
+    empty_object_response = {
+        "tool_calls": [
+            {
+                "id": "call_plan",
+                "type": "function",
+                "function": {
+                    "name": LLMPlanGenerator.PLAN_TOOL_NAME,
+                    "arguments": "{}",
+                },
+            }
+        ]
+    }
+    llm = SequenceLLM(
+        [
+            empty_object_response,
+            plan_tool_response(
+                [
+                    {
+                        "id": "s1",
+                        "task": "Do the work.",
+                        "dependencies": [],
+                        "termination_condition": "Stop after the work is done once.",
+                        "completion_evidence": "The work result has been returned.",
+                        "tool_names": [],
+                    }
+                ]
+            ),
+        ]
+    )
+
+    plan = await generator.generate_plan(
+        request=PlanGenerationRequest(
+            context=ExecutionContext(execution_id="plan-1"),
+            execution_id="plan-1",
+        ),
+        llm=llm,
+    )
+
+    assert [step.id for step in plan.steps] == ["s1"]
+    assert llm.calls == 2
+    retry_message = llm.seen_messages[1][-1]["content"]
+    assert "invalid DAG" in retry_message
+
+
+class CompletionAssessmentRecordingRuntime(PatternRuntime):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.llm_errors: list[dict[str, Any]] = []
+        self.llm_ends: list[dict[str, Any]] = []
+
+    async def on_llm_error(self, **kwargs: Any) -> None:
+        self.llm_errors.append(kwargs)
+
+    async def on_llm_end(self, **kwargs: Any) -> None:
+        self.llm_ends.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_dag_completion_assessment_blank_arguments_report_llm_error() -> None:
+    """Blank `assess_dag_completion` arguments must raise the named error and
+    reach both `streamer.fail` and `on_llm_error` — with no `on_llm_end`."""
+
+    class BlankCompletionLLM:
+        async def chat(self, **kwargs: Any) -> Any:
+            raise AssertionError("completion assessment should stay streaming")
+
+        async def stream_chat(self, **kwargs: Any) -> Any:
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_assess",
+                        "function": {
+                            "name": DAG_COMPLETION_TOOL_NAME,
+                            "arguments": "",
+                        },
+                    }
+                ],
+            )
+            yield StreamChunk(type=ChunkType.END)
+
+    runtime = CompletionAssessmentRecordingRuntime(execution_id="dag-1")
+    pattern = DAGPattern(lambda **_: build_plan())
+    context = ExecutionContext(execution_id="dag-1")
+
+    with pytest.raises(ValueError, match="must be valid JSON"):
+        await pattern._assess_completion(
+            context=context,
+            llm=BlankCompletionLLM(),
+            runtime=runtime,
+        )
+
+    assert len(runtime.llm_errors) == 1
+    error_call = runtime.llm_errors[0]
+    assert error_call["metadata"]["phase"] == "dag_completion_assessment"
+    # The message must not carry the raw provider payload (#1479 channel).
+    assert '""' not in str(error_call["error"])
+    assert runtime.llm_ends == []

@@ -1462,12 +1462,10 @@ class DAGPattern(AgentPattern):
                 thinking={"type": "disabled", "enable": False},
                 on_chunk=streamer.handle_chunk,
             )
+            assessment = self._parse_completion_assessment(response)
         except Exception as exc:
-            await streamer.fail(str(exc))
-            await runtime.on_llm_error(
-                context=context,
-                error=exc,
-                metadata={"phase": "dag_completion_assessment"},
+            await self._fail_completion_assessment_call(
+                streamer=streamer, runtime=runtime, context=context, exc=exc
             )
             raise
         await runtime.on_llm_end(
@@ -1475,19 +1473,19 @@ class DAGPattern(AgentPattern):
             response=response,
             metadata={"phase": "dag_completion_assessment"},
         )
-        try:
-            assessment = self._parse_completion_assessment(response)
-        except Exception as exc:
-            await streamer.fail(str(exc))
-            await runtime.on_llm_error(
-                context=context,
-                error=exc,
-                metadata={"phase": "dag_completion_assessment"},
-            )
-            raise
         if assessment.complete:
             await final_answer_stream.finish(assessment.answer)
         return assessment
+
+    async def _fail_completion_assessment_call(
+        self, *, streamer: Any, runtime: PatternRuntime, context: Any, exc: Exception
+    ) -> None:
+        await streamer.fail(str(exc))
+        await runtime.on_llm_error(
+            context=context,
+            error=exc,
+            metadata={"phase": "dag_completion_assessment"},
+        )
 
     def _completion_assessment_messages(self, context: Any) -> list[dict[str, Any]]:
         latest_messages = [
@@ -1617,7 +1615,9 @@ class DAGPattern(AgentPattern):
             function_payload = self._function_payload(tool_call)
             if not function_payload or function_payload.get("name") != tool_name:
                 continue
-            return self._coerce_tool_arguments(function_payload.get("arguments", {}))
+            return self._coerce_tool_arguments(
+                function_payload.get("arguments", {}), tool_name=tool_name
+            )
         raise ValueError(f"DAG completion requires a {tool_name} tool call response.")
 
     def _response_tool_calls(self, response: Any) -> list[Any]:
@@ -1637,7 +1637,9 @@ class DAGPattern(AgentPattern):
             "arguments": getattr(function_payload, "arguments", {}),
         }
 
-    def _coerce_tool_arguments(self, arguments: Any) -> dict[str, Any]:
+    def _coerce_tool_arguments(
+        self, arguments: Any, *, tool_name: str
+    ) -> dict[str, Any]:
         if isinstance(arguments, dict):
             return arguments
         if not isinstance(arguments, str):
@@ -1645,10 +1647,9 @@ class DAGPattern(AgentPattern):
         try:
             payload = json.loads(arguments)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"{DAG_COMPLETION_TOOL_NAME} arguments must be valid JSON, got "
-                f"{arguments[:200]!r}."
-            ) from exc
+            # No payload in the message: str(exc) reaches end users via
+            # streamer.fail, the same channel as #1479.
+            raise ValueError(f"{tool_name} arguments must be valid JSON.") from exc
         if not isinstance(payload, dict):
             raise TypeError("Tool call arguments must decode to an object.")
         return payload

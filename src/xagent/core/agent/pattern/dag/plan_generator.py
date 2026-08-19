@@ -393,7 +393,9 @@ class LLMPlanGenerator(PlanGenerator):
                     plan=plan,
                     plan_arguments=plan_arguments,
                 )
-            except PlanValidationError as exc:
+            except (PlanValidationError, TypeError) as exc:
+                # coerce_execution_plan raises TypeError for unsupported payload
+                # shapes (e.g. `{}`); that is a malformed plan, so retry it too.
                 if attempt + 1 >= MAX_PLAN_TOOL_CALL_ATTEMPTS:
                     raise
                 retry_feedback = self._invalid_plan_retry_feedback(exc)
@@ -713,7 +715,7 @@ class LLMPlanGenerator(PlanGenerator):
             )
         )
 
-    def _invalid_plan_retry_feedback(self, error: PlanValidationError) -> str:
+    def _invalid_plan_retry_feedback(self, error: Exception) -> str:
         if isinstance(error, PlanLanguageMismatchError):
             language = error.response_language or "the supported target language"
             return (
