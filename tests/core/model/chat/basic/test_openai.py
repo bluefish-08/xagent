@@ -1213,7 +1213,10 @@ class TestOpenAILLM:
         assert call_args.kwargs["response_format"]["type"] == "json_schema"
         assert "json_schema" in call_args.kwargs["response_format"]
 
-    @pytest.mark.parametrize("empty_arguments", ["", "   ", None])
+    @pytest.mark.parametrize(
+        ("empty_arguments", "expected"),
+        [("", ""), ("   ", "   "), (None, "")],
+    )
     @pytest.mark.parametrize("method", ["chat", "vision_chat"])
     @pytest.mark.asyncio
     async def test_empty_tool_arguments_are_not_fatal(
@@ -1223,12 +1226,13 @@ class TestOpenAILLM:
         mocker,
         method,
         empty_arguments,
+        expected,
     ):
         """Providers send `""` for parameterless calls; patterns repair the rest.
 
         Passed through rather than normalized to `"{}"`: the blank string is what
-        AutoPattern and DAG plan generation key their retry paths on. `None` and
-        whitespace-only both coerce to `""`, the predicate the deleted guards used.
+        the patterns' retry paths key on. `None` coerces to `""`; whitespace-only
+        passes through unchanged.
         """
         llm = OpenAILLM(**openai_llm_config, abilities=["chat", "vision"])
         mock_tool_call_completion.choices[0].message.tool_calls[
@@ -1245,14 +1249,16 @@ class TestOpenAILLM:
         response = await getattr(llm, method)([{"role": "user", "content": "hi"}])
 
         assert response["type"] == "tool_call"
-        expected = empty_arguments if empty_arguments == "   " else ""
         assert response["tool_calls"][0]["function"]["arguments"] == expected
 
-    @pytest.mark.parametrize("empty_arguments", ["", "   "])
+    @pytest.mark.parametrize(
+        ("empty_arguments", "expected"),
+        [("", ""), ("   ", "   "), (None, "")],
+    )
     def test_parse_stream_chunk_passes_empty_tool_arguments_through(
-        self, llm, empty_arguments
+        self, llm, empty_arguments, expected
     ):
-        """Same on the streaming finish-reason path."""
+        """Same on the streaming finish-reason path; `None` accumulates as `""`."""
         accumulated_tool_calls = {}
         llm._parse_stream_chunk(
             _stream_chunk(
@@ -1271,4 +1277,4 @@ class TestOpenAILLM:
         )
 
         assert final_chunk is not None
-        assert final_chunk.tool_calls[0]["function"]["arguments"] == empty_arguments
+        assert final_chunk.tool_calls[0]["function"]["arguments"] == expected
