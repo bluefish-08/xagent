@@ -1036,11 +1036,12 @@ class AutoPattern(AgentPattern):
                     },
                 )
                 continue
-            except (ValueError, TypeError) as exc:
-                # Any malformed decision is retryable, not just the JSON-shape
-                # subclass: from_dict raises a plain ValueError for a bad action.
+            except (AutoDecisionArgumentsError, TypeError) as exc:
                 attempt += 1
                 if attempt >= MAX_DECISION_PARSE_ATTEMPTS:
+                    await answer_streamer.fail(
+                        "The routing decision could not be parsed."
+                    )
                     raise
                 retry_feedback = self._decision_retry_feedback(exc)
                 logger.warning(
@@ -1538,7 +1539,13 @@ class AutoPattern(AgentPattern):
             DECISION_TOOL_NAME,
             attempts=attempts,
         )
-        return AutoDecision.from_dict(payload)
+        try:
+            return AutoDecision.from_dict(payload)
+        except ValueError as exc:
+            raise AutoDecisionArgumentsError(
+                str(exc),
+                arguments=json.dumps(payload, ensure_ascii=False),
+            ) from exc
 
     def _extract_tool_arguments(
         self,

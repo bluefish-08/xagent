@@ -2323,11 +2323,13 @@ def test_auto_decision_empty_arguments_raise_retryable_error() -> None:
         with pytest.raises(AutoDecisionArgumentsError):
             pattern._parse_decision(response(blank))
 
-    # `"{}"` parses but carries no action, so it surfaces as a plain ValueError;
-    # the decide loop's widened except catches it too (pinned by the loop test
-    # below).
-    with pytest.raises(ValueError):
+    # `"{}"` parses but carries no action; the raise site wraps it into the
+    # retryable subclass with the payload attached for the retry preview.
+    with pytest.raises(
+        AutoDecisionArgumentsError, match="Invalid AutoPattern action"
+    ) as excinfo:
         pattern._parse_decision(response("{}"))
+    assert excinfo.value.arguments == "{}"
 
 
 @pytest.mark.asyncio
