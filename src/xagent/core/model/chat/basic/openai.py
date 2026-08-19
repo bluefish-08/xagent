@@ -388,14 +388,6 @@ class OpenAICompatibleLLM(BaseLLM):
                         func = tool_call.function
                         args = func.arguments if func.arguments else ""
 
-                        # Validate arguments are not empty
-                        if not args or args.strip() == "":
-                            raise RuntimeError(
-                                f"Tool '{func.name}' has empty arguments. "
-                                f"This is a bug in the LLM provider's tool calling implementation. "
-                                f"Model: {self._model_name}"
-                            )
-
                         tool_calls.append(
                             {
                                 "id": tool_call.id,
@@ -714,14 +706,6 @@ class OpenAICompatibleLLM(BaseLLM):
                     if hasattr(tool_call, "function"):
                         func = tool_call.function
                         args = func.arguments if func.arguments else ""
-
-                        # Validate arguments are not empty
-                        if not args or args.strip() == "":
-                            raise RuntimeError(
-                                f"Tool '{func.name}' has empty arguments. "
-                                f"This is a bug in the LLM provider's tool calling implementation. "
-                                f"Model: {self._model_name}"
-                            )
 
                         tool_calls.append(
                             {
@@ -1244,18 +1228,6 @@ class OpenAICompatibleLLM(BaseLLM):
             # If there are tool calls, return complete tool calls
             if accumulated_tool_calls:
                 tool_calls_list = list(accumulated_tool_calls.values())
-
-                # Validate all tool calls have non-empty arguments
-                for tool_call_dict in tool_calls_list:
-                    func_info = tool_call_dict.get("function", {})
-                    args = func_info.get("arguments", "")
-                    if not args or args.strip() == "":
-                        tool_name = func_info.get("name", "unknown")
-                        raise RuntimeError(
-                            f"Tool '{tool_name}' has empty arguments in streaming response. "
-                            f"This is a bug in the LLM provider's tool calling implementation. "
-                            f"Model: {self._model_name}, raw tool call: {tool_call_dict}"
-                        )
 
                 return StreamChunk(
                     type=ChunkType.TOOL_CALL,

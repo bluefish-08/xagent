@@ -1210,3 +1210,69 @@ class TestOpenAILLM:
         assert "response_format" in call_args.kwargs
         assert call_args.kwargs["response_format"]["type"] == "json_schema"
         assert "json_schema" in call_args.kwargs["response_format"]
+
+    @pytest.mark.parametrize("empty_arguments", ["", None])
+    @pytest.mark.parametrize("method", ["chat", "vision_chat"])
+    @pytest.mark.asyncio
+    async def test_empty_tool_arguments_are_not_fatal(
+        self, llm, mock_tool_call_completion, mocker, method, empty_arguments
+    ):
+        """Providers send `""` for parameterless calls; patterns repair the rest.
+
+        Passed through rather than normalized to `"{}"`: the blank string is what
+        AutoPattern and DAG plan generation key their retry paths on.
+        """
+        llm._abilities = [*llm.abilities, "vision"]
+        mock_tool_call_completion.choices[0].message.tool_calls[
+            0
+        ].function.arguments = empty_arguments
+
+        mock_client = mocker.AsyncMock()
+        mock_client.chat.completions.create.return_value = mock_tool_call_completion
+        mocker.patch(
+            "xagent.core.model.chat.basic.openai.AsyncOpenAI",
+            return_value=mock_client,
+        )
+
+        response = await getattr(llm, method)([{"role": "user", "content": "hi"}])
+
+        assert response["type"] == "tool_call"
+        assert response["tool_calls"][0]["function"]["arguments"] == ""
+
+    def test_parse_stream_chunk_passes_empty_tool_arguments_through(self, llm):
+        """Same on the streaming finish-reason path."""
+
+        def chunk(tool_calls=None, finish_reason=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=None, tool_calls=tool_calls),
+                        finish_reason=finish_reason,
+                    )
+                ]
+            )
+
+        accumulated_tool_calls = {}
+        llm._parse_stream_chunk(
+            chunk(
+                [
+                    SimpleNamespace(
+                        index=0,
+                        id="call_empty",
+                        type="function",
+                        function=SimpleNamespace(
+                            name="list_image_models", arguments=""
+                        ),
+                    )
+                ]
+            ),
+            accumulated_tool_calls,
+        )
+
+        final_chunk = llm._parse_stream_chunk(
+            chunk(finish_reason="tool_calls"),
+            accumulated_tool_calls,
+        )
+
+        assert final_chunk is not None
+        assert final_chunk.tool_calls[0]["function"]["arguments"] == ""

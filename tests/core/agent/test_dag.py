@@ -34,6 +34,7 @@ from xagent.core.agent.pattern.base import RequiredToolCallError
 from xagent.core.agent.pattern.dag.dag import _DAGStepRuntime
 from xagent.core.agent.pattern.dag.plan_generator import (
     PLAN_GENERATION_REQUIRED_TOOL_MESSAGE,
+    PlanToolArgumentsError,
 )
 from xagent.core.model.chat.types import ChunkType, StreamChunk
 from xagent.core.task_runtime import PREFERRED_INPUT_MODALITIES_METADATA_KEY
@@ -4947,3 +4948,14 @@ async def test_dag_pattern_resume_after_replan_keeps_new_active_step(
     }
     assert "step_2" not in resumed["step_results"]
     assert tool.calls == []
+
+
+def test_plan_generator_empty_arguments_raise_retryable_error() -> None:
+    """Blank provider arguments must stay retryable, not become a bare `{}`.
+
+    `"{}"` coerces cleanly and then dies in `coerce_execution_plan` outside the
+    generator's retry, losing the run instead of one repair attempt.
+    """
+    generator = LLMPlanGenerator.__new__(LLMPlanGenerator)
+    with pytest.raises(PlanToolArgumentsError):
+        generator._coerce_arguments("")

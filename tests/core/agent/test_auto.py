@@ -24,7 +24,11 @@ from xagent.core.agent.language import (
     OUTPUT_LANGUAGE_SOURCE_METADATA_KEY,
     OUTPUT_LANGUAGE_SOURCE_ROUTER,
 )
-from xagent.core.agent.pattern.auto.auto import DECISION_TOOL_NAME, _AutoChildRuntime
+from xagent.core.agent.pattern.auto.auto import (
+    DECISION_TOOL_NAME,
+    AutoDecisionArgumentsError,
+    _AutoChildRuntime,
+)
 from xagent.core.model.chat.exceptions import LLMToolProtocolError
 from xagent.core.model.chat.tool_protocol import (
     ToolProtocolViolation,
@@ -2300,3 +2304,19 @@ def test_clearing_request_scoped_enrichment_drops_the_image_edit_flag() -> None:
     AutoPattern()._clear_request_scoped_enrichment(context)
 
     assert IMAGE_EDIT_UNAVAILABLE_METADATA_KEY not in context.metadata
+
+
+def test_auto_decision_empty_arguments_raise_retryable_error() -> None:
+    """Blank provider arguments must stay retryable, not become a bare `{}`.
+
+    `"{}"` parses into a decision with no action and escapes the retry loop.
+    """
+    pattern = AutoPattern()
+    with pytest.raises(AutoDecisionArgumentsError):
+        pattern._parse_decision(
+            {
+                "tool_calls": [
+                    {"function": {"name": DECISION_TOOL_NAME, "arguments": ""}}
+                ]
+            }
+        )
