@@ -1462,17 +1462,25 @@ class DAGPattern(AgentPattern):
                 thinking={"type": "disabled", "enable": False},
                 on_chunk=streamer.handle_chunk,
             )
+        except Exception as exc:
+            await self._fail_completion_assessment_call(
+                streamer=streamer, runtime=runtime, context=context, exc=exc
+            )
+            raise
+        # Unconditional: on_llm_end is the only hook that records token usage,
+        # so a parse failure must not drop the call's cost accounting.
+        await runtime.on_llm_end(
+            context=context,
+            response=response,
+            metadata={"phase": "dag_completion_assessment"},
+        )
+        try:
             assessment = self._parse_completion_assessment(response)
         except Exception as exc:
             await self._fail_completion_assessment_call(
                 streamer=streamer, runtime=runtime, context=context, exc=exc
             )
             raise
-        await runtime.on_llm_end(
-            context=context,
-            response=response,
-            metadata={"phase": "dag_completion_assessment"},
-        )
         if assessment.complete:
             await final_answer_stream.finish(assessment.answer)
         return assessment

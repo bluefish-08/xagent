@@ -96,6 +96,11 @@ class PlanStep:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanStep":
         tool_names = normalize_tool_names(data)
+        for required in ("id", "task"):
+            if required not in data:
+                raise PlanValidationError(
+                    f"Plan step missing required field {required!r}."
+                )
         return cls(
             id=str(data["id"]),
             task=str(data["task"]),
@@ -393,9 +398,7 @@ class LLMPlanGenerator(PlanGenerator):
                     plan=plan,
                     plan_arguments=plan_arguments,
                 )
-            except (PlanValidationError, TypeError) as exc:
-                # coerce_execution_plan raises TypeError for unsupported payload
-                # shapes (e.g. `{}`); that is a malformed plan, so retry it too.
+            except PlanValidationError as exc:
                 if attempt + 1 >= MAX_PLAN_TOOL_CALL_ATTEMPTS:
                     raise
                 retry_feedback = self._invalid_plan_retry_feedback(exc)
@@ -844,4 +847,8 @@ def coerce_execution_plan(payload: Any) -> ExecutionPlan:
                 for index, item in enumerate(payload)
             ]
         ).validate()
-    raise TypeError(f"Unsupported plan payload: {type(payload).__name__}")
+    if isinstance(payload, dict):
+        raise PlanValidationError("Plan payload is missing the 'steps' list.")
+    raise PlanValidationError(
+        f"Plan payload must be an object with steps, got {type(payload).__name__}."
+    )

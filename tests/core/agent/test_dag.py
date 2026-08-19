@@ -4958,11 +4958,16 @@ def test_plan_generator_empty_arguments_raise_retryable_error() -> None:
         with pytest.raises(PlanToolArgumentsError):
             generator._coerce_arguments(blank)
 
-    # `"{}"` coerces cleanly and dies in coerce_execution_plan instead; the
-    # generate loop's except must catch that TypeError too (pinned below).
+    # `"{}"` coerces cleanly and dies in coerce_execution_plan instead, as the
+    # retryable type the generate loop catches (recovery pinned below).
     assert generator._coerce_arguments("{}") == {}
-    with pytest.raises(TypeError):
+    with pytest.raises(PlanValidationError, match="missing the 'steps' list"):
         coerce_execution_plan({})
+
+    # A step missing a required field must also raise the retryable type, not
+    # the bare KeyError that used to escape the retry loop.
+    with pytest.raises(PlanValidationError, match="missing required field 'id'"):
+        coerce_execution_plan({"steps": [{"task": "x"}]})
 
 
 @pytest.mark.asyncio
@@ -5011,6 +5016,82 @@ async def test_plan_generation_retries_an_empty_object_plan() -> None:
     assert llm.calls == 2
     retry_message = llm.seen_messages[1][-1]["content"]
     assert "invalid DAG" in retry_message
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_retries_a_step_missing_required_fields() -> None:
+    # A plan step missing `id` used to escape the retry loop as a KeyError.
+    generator = LLMPlanGenerator()
+    missing_id_response = {
+        "tool_calls": [
+            {
+                "id": "call_plan",
+                "type": "function",
+                "function": {
+                    "name": LLMPlanGenerator.PLAN_TOOL_NAME,
+                    "arguments": json.dumps({"steps": [{"task": "Do the work."}]}),
+                },
+            }
+        ]
+    }
+    llm = SequenceLLM(
+        [
+            missing_id_response,
+            plan_tool_response(
+                [
+                    {
+                        "id": "s1",
+                        "task": "Do the work.",
+                        "dependencies": [],
+                        "termination_condition": "Stop after the work is done once.",
+                        "completion_evidence": "The work result has been returned.",
+                        "tool_names": [],
+                    }
+                ]
+            ),
+        ]
+    )
+
+    plan = await generator.generate_plan(
+        request=PlanGenerationRequest(
+            context=ExecutionContext(execution_id="plan-2"),
+            execution_id="plan-2",
+        ),
+        llm=llm,
+    )
+
+    assert [step.id for step in plan.steps] == ["s1"]
+    assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_exhaustion_raises_the_validation_type() -> None:
+    # Exhausted retries surface as PlanValidationError, so dag.py classifies
+    # the failure as invalid_plan rather than the generic bucket.
+    generator = LLMPlanGenerator()
+    empty_object_response = {
+        "tool_calls": [
+            {
+                "id": "call_plan",
+                "type": "function",
+                "function": {
+                    "name": LLMPlanGenerator.PLAN_TOOL_NAME,
+                    "arguments": "{}",
+                },
+            }
+        ]
+    }
+    llm = SequenceLLM([empty_object_response, empty_object_response])
+
+    with pytest.raises(PlanValidationError, match="missing the 'steps' list"):
+        await generator.generate_plan(
+            request=PlanGenerationRequest(
+                context=ExecutionContext(execution_id="plan-3"),
+                execution_id="plan-3",
+            ),
+            llm=llm,
+        )
+    assert llm.calls == 2
 
 
 class CompletionAssessmentRecordingRuntime(PatternRuntime):
@@ -5064,6 +5145,136 @@ async def test_dag_completion_assessment_blank_arguments_report_llm_error() -> N
     assert len(runtime.llm_errors) == 1
     error_call = runtime.llm_errors[0]
     assert error_call["metadata"]["phase"] == "dag_completion_assessment"
-    # The message must not carry the raw provider payload (#1479 channel).
-    assert '""' not in str(error_call["error"])
-    assert runtime.llm_ends == []
+    # on_llm_end still fires: it is the only hook that records token usage.
+    assert len(runtime.llm_ends) == 1
+
+
+@pytest.mark.asyncio
+async def test_dag_completion_assessment_parse_failure_fails_a_started_stream() -> None:
+    # When the answer stream has already started, a parse failure must reach
+    # the outbound final_answer_error channel with no payload in the text.
+    class TruncatedCompletionLLM:
+        async def chat(self, **kwargs: Any) -> Any:
+            raise AssertionError("completion assessment should stay streaming")
+
+        async def stream_chat(self, **kwargs: Any) -> Any:
+            # Confirms the guard field so the streamer starts, then ends with
+            # arguments that never become valid JSON.
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                tool_calls=[
+                    {
+                        "id": "call_assess",
+                        "function": {
+                            "name": DAG_COMPLETION_TOOL_NAME,
+                            "arguments": (
+                                '{"status":"completed","answer":"part'  # noqa: B907
+                            ),
+                        },
+                    }
+                ],
+            )
+            yield StreamChunk(type=ChunkType.END)
+
+    outbound = OutboundCollector()
+    runtime = CompletionAssessmentRecordingRuntime(
+        execution_id="dag-2",
+        outbound_message_handler=outbound,
+    )
+    pattern = DAGPattern(lambda **_: build_plan())
+    context = ExecutionContext(execution_id="dag-2")
+
+    with pytest.raises(ValueError, match="must be valid JSON"):
+        await pattern._assess_completion(
+            context=context,
+            llm=TruncatedCompletionLLM(),
+            runtime=runtime,
+        )
+
+    error_events = [
+        event for event in outbound.events if event.get("type") == "final_answer_error"
+    ]
+    assert len(error_events) == 1
+    assert "part" not in error_events[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_blank_plan_arguments_flow_from_adapter_into_generator(mocker) -> None:
+    # The non-streaming seam: a real OpenAILLM chat() response carrying
+    # arguments "" reaches the generator's retry and the run recovers.
+    from openai.types.chat import ChatCompletion
+    from openai.types.chat.chat_completion import Choice
+    from openai.types.chat.chat_completion_message import ChatCompletionMessage
+    from openai.types.chat.chat_completion_message_tool_call import (
+        ChatCompletionMessageToolCall,
+    )
+    from openai.types.chat.chat_completion_message_tool_call import (
+        Function as ToolCallFunction,
+    )
+
+    from xagent.core.model.chat.basic.openai import OpenAILLM
+
+    def plan_completion(arguments: str) -> ChatCompletion:
+        return ChatCompletion(
+            id="cmpl-plan",
+            choices=[
+                Choice(
+                    finish_reason="tool_calls",
+                    index=0,
+                    message=ChatCompletionMessage(
+                        content=None,
+                        role="assistant",
+                        tool_calls=[
+                            ChatCompletionMessageToolCall(
+                                id="call_plan",
+                                type="function",
+                                function=ToolCallFunction(
+                                    name=LLMPlanGenerator.PLAN_TOOL_NAME,
+                                    arguments=arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                )
+            ],
+            created=1,
+            model="gpt-4o-mini",
+            object="chat.completion",
+            usage=None,
+        )
+
+    valid_arguments = json.dumps(
+        {
+            "response_language": "English",
+            "steps": [
+                {
+                    "id": "s1",
+                    "task": "Do the work.",
+                    "dependencies": [],
+                    "termination_condition": "Stop after the work is done once.",
+                    "completion_evidence": "The work result has been returned.",
+                    "tool_names": [],
+                }
+            ],
+        }
+    )
+    mock_client = mocker.AsyncMock()
+    mock_client.chat.completions.create.side_effect = [
+        plan_completion(""),
+        plan_completion(valid_arguments),
+    ]
+    mocker.patch(
+        "xagent.core.model.chat.basic.openai.AsyncOpenAI",
+        return_value=mock_client,
+    )
+
+    plan = await LLMPlanGenerator().generate_plan(
+        request=PlanGenerationRequest(
+            context=ExecutionContext(execution_id="plan-seam"),
+            execution_id="plan-seam",
+        ),
+        llm=OpenAILLM(model_name="gpt-4o-mini", base_url=None, api_key="test-key"),
+    )
+
+    assert [step.id for step in plan.steps] == ["s1"]
+    assert mock_client.chat.completions.create.call_count == 2
