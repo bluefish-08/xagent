@@ -12,7 +12,7 @@ here rather than slipping past a hand-written list.
 
 import importlib
 import pkgutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -83,7 +83,7 @@ def _built_video_descriptions() -> dict[str, str]:
     return {t.name: _normalized(t.description) for t in tool.get_tools()}
 
 
-def _built_description(builder, name: str) -> str:
+def _built_description(builder: Callable[[], dict[str, str]], name: str) -> str:
     built = builder()
     assert name in built, f"builder no longer emits {name!r}: {sorted(built)}"
     return built[name]
