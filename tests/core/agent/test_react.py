@@ -5485,6 +5485,12 @@ def test_coerce_arguments_drops_unusable_control_tool_payloads() -> None:
         "input": [1, 2]
     }
 
+    # Blank payloads have nothing to preserve, whether the raw string is blank
+    # or the JSON literal of a blank string.
+    assert pattern._coerce_arguments("", tool_name="calculator") == {}
+    assert pattern._coerce_arguments('""', tool_name="calculator") == {}
+    assert pattern._coerce_arguments('"   "', tool_name="calculator") == {}
+
     # Control tools must not smuggle a malformed payload through as ``input``,
     # which would silently strip ``answer`` and finalize with nothing to show.
     assert pattern._coerce_arguments("not json", tool_name="final_answer") == {}
@@ -5954,9 +5960,10 @@ async def test_react_runs_a_parameterless_tool_called_with_blank_arguments() -> 
 async def test_react_repairs_final_answer_called_with_blank_arguments() -> None:
     """The #1501 production trace shape: streaming `final_answer` with `""`.
 
-    Exercises only the pattern layer (the LLM is a fake): `final_answer` is a
-    control tool, so blank arguments coerce to `{}` and land on the pre-existing
-    `_empty_final_answer_call` guard, which spends the one repair retry.
+    A documentation/resilience test, not a regression guard for this PR:
+    `final_answer` is a control tool, so it short-circuits before the new
+    blank-string branch, landing on the pre-existing `_empty_final_answer_call`
+    guard, which spends the one repair retry. The LLM is a fake.
     """
 
     llm = StreamingEmptyFinalAnswerLLM(broken_arguments="")
@@ -6055,6 +6062,10 @@ async def test_react_survives_required_argument_tool_called_with_blank_arguments
     assert result["success"] is True
     assert result["response"] == "The result is 4."
     assert len(llm.stream_calls) == 2
+
+    # Discriminating assertion for react.py's blank-string fallback branch: the
+    # old code delivered {"input": ""} here, which would fail this equality.
+    assert tool.calls == [{}]
 
     tool_results = [m for m in context.messages if m.role == "tool"]
     assert len(tool_results) >= 1
