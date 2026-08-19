@@ -4964,10 +4964,22 @@ def test_plan_generator_empty_arguments_raise_retryable_error() -> None:
     with pytest.raises(PlanValidationError, match="missing the 'steps' list"):
         coerce_execution_plan({})
 
-    # A step missing a required field must also raise the retryable type, not
-    # the bare KeyError that used to escape the retry loop.
+    # Every malformed shape a model can emit must raise the retryable type;
+    # KeyError / TypeError / AttributeError used to escape the retry loop.
     with pytest.raises(PlanValidationError, match="missing required field 'id'"):
         coerce_execution_plan({"steps": [{"task": "x"}]})
+    with pytest.raises(PlanValidationError, match="'steps' must be a list"):
+        coerce_execution_plan({"steps": "not a list"})
+    with pytest.raises(PlanValidationError, match="must be an object"):
+        coerce_execution_plan({"steps": [None]})
+    with pytest.raises(PlanValidationError, match="'dependencies' must be a list"):
+        coerce_execution_plan({"steps": [{"id": "s1", "task": "x", "dependencies": 5}]})
+
+    # A null dependencies field means "no dependencies", not an invalid plan.
+    plan = coerce_execution_plan(
+        {"steps": [{"id": "s1", "task": "x", "dependencies": None}]}
+    )
+    assert plan.steps[0].dependencies == []
 
 
 @pytest.mark.asyncio

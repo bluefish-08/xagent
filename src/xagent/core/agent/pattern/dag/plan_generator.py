@@ -95,16 +95,23 @@ class PlanStep:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanStep":
+        if not isinstance(data, dict):
+            raise PlanValidationError(
+                f"Plan step must be an object, got {type(data).__name__}."
+            )
         tool_names = normalize_tool_names(data)
         for required in ("id", "task"):
             if required not in data:
                 raise PlanValidationError(
                     f"Plan step missing required field {required!r}."
                 )
+        dependencies = data.get("dependencies") or []
+        if not isinstance(dependencies, list):
+            raise PlanValidationError("Plan step 'dependencies' must be a list.")
         return cls(
             id=str(data["id"]),
             task=str(data["task"]),
-            dependencies=list(data.get("dependencies", [])),
+            dependencies=list(dependencies),
             description=(
                 str(data["description"])
                 if data.get("description") is not None
@@ -187,7 +194,10 @@ class ExecutionPlan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ExecutionPlan":
-        return cls(steps=[PlanStep.from_dict(item) for item in data.get("steps", [])])
+        steps = data.get("steps", [])
+        if not isinstance(steps, list):
+            raise PlanValidationError("Plan 'steps' must be a list.")
+        return cls(steps=[PlanStep.from_dict(item) for item in steps])
 
 
 @dataclass
