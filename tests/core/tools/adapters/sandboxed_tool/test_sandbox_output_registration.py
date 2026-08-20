@@ -11,14 +11,25 @@ from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from tests.core.tools.adapters.sandboxed_tool.conftest import FakeBaseTool
 from xagent.config import SANDBOX_TOOL_RUNNER
+from xagent.core.file_storage.factory import (
+    get_unscoped_file_storage,
+    get_user_file_storage,
+)
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import sandbox_config
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
     SandboxedToolWrapper,
 )
 from xagent.core.workspace import SANDBOX_FILE_ID_PREFIX, TaskWorkspace
+from xagent.web.models import Base
+from xagent.web.models.task import Task
+from xagent.web.models.uploaded_file import UploadedFile
+from xagent.web.models.user import User
 
 SANDBOX_MINTED_FILE_ID = "sandbox-only-file-id"
 
@@ -453,3 +464,85 @@ def test_a_symlink_inside_output_is_not_registered(tmp_path, monkeypatch):
 
     assert registered == []
     assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+
+
+@pytest.fixture
+def mock_workspace_db():
+    """Opt out of the autouse stub so registration reaches a real database."""
+    yield
+
+
+@pytest.fixture
+def durable_workspace(monkeypatch, tmp_path, mock_workspace_db):
+    """A workspace whose register_file creates real rows and storage objects."""
+    del mock_workspace_db
+    # StaticPool: host registration runs in a worker thread, and a per-thread
+    # connection would open a second, empty in-memory database.
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    monkeypatch.setattr("xagent.core.storage.manager.create_db_session", SessionLocal)
+    monkeypatch.setenv("XAGENT_FILE_STORAGE_URI", (tmp_path / "objects").as_uri())
+    get_unscoped_file_storage.cache_clear()
+
+    user = User(username="sandbox-durable-user", password_hash="hash")
+    db.add(user)
+    db.flush()
+    db.add(Task(id=9101, user_id=user.id, title="Sandbox durable task"))
+    db.commit()
+
+    workspace = TaskWorkspace(id="web_task_9101", base_dir=str(tmp_path / "workspaces"))
+    try:
+        yield workspace, db, int(user.id)
+    finally:
+        db.close()
+        engine.dispose()
+        get_unscoped_file_storage.cache_clear()
+
+
+def _served_bytes(user_id: int, db, file_id: str) -> bytes:
+    record = db.query(UploadedFile).filter(UploadedFile.file_id == file_id).one()
+    with get_user_file_storage(user_id).open_read(str(record.storage_key)) as handle:
+        return handle.read()
+
+
+def test_host_registration_creates_a_durable_record(durable_workspace):
+    """The returned file_id must name a real row whose object serves the bytes."""
+    workspace, db, user_id = durable_workspace
+    generated = workspace.output_dir / "report.docx"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_bytes(b"PK\x03\x04 first generation")
+
+    wrapper = _guest_ref_wrapper(workspace, generated)
+    result = asyncio.run(wrapper.run_json_async({}))
+
+    file_id = result["file_refs"][0]["file_id"]
+    assert file_id != SANDBOX_MINTED_FILE_ID
+    assert not file_id.startswith(SANDBOX_FILE_ID_PREFIX)
+    record = db.query(UploadedFile).filter(UploadedFile.file_id == file_id).one()
+    assert record.user_id == user_id
+    assert record.task_id == 9101
+    assert _served_bytes(user_id, db, file_id) == b"PK\x03\x04 first generation"
+
+
+def test_regeneration_serves_the_revised_bytes(durable_workspace):
+    """The second run must re-stage, not leave the first draft as the served object."""
+    workspace, db, user_id = durable_workspace
+    generated = workspace.output_dir / "report.docx"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+
+    generated.write_bytes(b"PK\x03\x04 first draft")
+    first = asyncio.run(_guest_ref_wrapper(workspace, generated).run_json_async({}))
+    first_id = first["file_refs"][0]["file_id"]
+
+    generated.write_bytes(b"PK\x03\x04 revised and longer")
+    second = asyncio.run(_guest_ref_wrapper(workspace, generated).run_json_async({}))
+    second_id = second["file_refs"][0]["file_id"]
+
+    assert second_id == first_id
+    assert _served_bytes(user_id, db, second_id) == b"PK\x03\x04 revised and longer"
