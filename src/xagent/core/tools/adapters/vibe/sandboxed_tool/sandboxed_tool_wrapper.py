@@ -426,13 +426,45 @@ class SandboxedToolWrapper(AbstractBaseTool):
             return None
 
     @staticmethod
+    def _host_output_key(workspace: Any, ref: Mapping[str, Any]) -> str | None:
+        """Resolved key for a ref the host is willing to register.
+
+        A guest-supplied path is not authorization to persist whatever it
+        points at: sandboxed code can drop a symlink into the output tree.
+        Only a regular, non-symlink file whose resolved path stays under this
+        workspace's output directory is accepted.
+        """
+        raw = ref.get("file_path")
+        if not raw:
+            return None
+        candidate = Path(str(raw))
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                return None
+            resolved = candidate.resolve()
+            output_root = Path(workspace.output_dir).resolve()
+        except OSError:
+            return None
+        if not resolved.is_relative_to(output_root):
+            logger.warning(
+                "Refusing to register sandbox output %s outside %s",
+                resolved,
+                output_root,
+            )
+            return None
+        return str(resolved)
+
+    @staticmethod
     def _reregister_on_host(workspace: Any, paths: list[str]) -> dict[str, Any]:
-        """Re-stage sandbox outputs on the host, then describe them.
+        """Re-stage sandbox outputs on the host, then describe what persisted.
 
         ``register_file`` is called explicitly: a regenerated file already
         carries an id, and ``build_workspace_file_ref`` would short-circuit on
         it and leave the previous generation's bytes as the served version.
+        Only paths that registered are described, because that same
+        short-circuit would otherwise hand a failed path its stale id back.
         """
+        registered: list[str] = []
         for path in paths:
             try:
                 workspace.register_file(path)
@@ -440,7 +472,11 @@ class SandboxedToolWrapper(AbstractBaseTool):
                 logger.warning(
                     "Host-side re-registration failed for %s", path, exc_info=True
                 )
-        return build_generated_file_metadata(workspace=workspace, file_paths=paths)
+                continue
+            registered.append(path)
+        if not registered:
+            return {"generated_files": [], "file_refs": [], "artifacts": []}
+        return build_generated_file_metadata(workspace=workspace, file_paths=registered)
 
     async def _register_sandbox_outputs(self, result: Any) -> Any:
         """Mint usable file_ids for sandbox-produced files.
@@ -467,11 +503,8 @@ class SandboxedToolWrapper(AbstractBaseTool):
 
         # Merge on resolved paths: a guest mount point deliberately keeps the
         # unresolved spelling, while FileRefs carry the resolved one.
-        paths = [
-            key
-            for key in (self._resolved_ref_key(ref) for ref in original_refs)
-            if key and Path(key).is_file()
-        ]
+        keys = [self._host_output_key(workspace, ref) for ref in original_refs]
+        paths = [key for key in keys if key]
         if not paths:
             return result
 
@@ -491,8 +524,7 @@ class SandboxedToolWrapper(AbstractBaseTool):
         # Both sandboxed executors keep artifacts 1:1 with file_refs, so the
         # rebuild below is lossless for them and only for them.
         merged = [
-            rebuilt_by_path.get(self._resolved_ref_key(ref) or "", ref)
-            for ref in original_refs
+            rebuilt_by_path.get(key or "", ref) for key, ref in zip(keys, original_refs)
         ]
         result["file_refs"] = merged
         result["artifacts"] = [build_inline_artifact(ref) for ref in merged]

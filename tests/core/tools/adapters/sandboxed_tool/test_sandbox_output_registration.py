@@ -305,3 +305,151 @@ def test_regenerated_output_is_re_registered(tmp_path, monkeypatch):
 
     assert len(registered) == 2
     assert second["file_refs"][0]["size"] == generated.stat().st_size
+
+
+def test_failed_registration_never_falls_back_to_a_stale_id(tmp_path, monkeypatch):
+    """A path that failed to re-stage must not be described from its old id."""
+    workspace = TaskWorkspace("test_sandbox_stale", str(tmp_path))
+    generated = workspace.output_dir / "report.docx"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_bytes(b"PK\x03\x04 revised")
+
+    def _boom(self, file_path, *args, **kwargs):
+        raise RuntimeError("staging failed")
+
+    monkeypatch.setattr(TaskWorkspace, "register_file", _boom)
+    # The previous generation is still cached under this path.
+    monkeypatch.setattr(
+        TaskWorkspace, "get_file_id_from_path", lambda self, path: "stale-generation-id"
+    )
+
+    wrapper = SandboxedToolWrapper(
+        _FakeGeneratingTool(workspace=workspace),
+        _make_sandbox(
+            {
+                "success": True,
+                "generated_files": ["report.docx"],
+                "file_refs": [
+                    {
+                        "file_id": SANDBOX_MINTED_FILE_ID,
+                        "filename": "report.docx",
+                        "file_path": str(generated),
+                    }
+                ],
+                "artifacts": [],
+            }
+        ),
+    )
+
+    result = asyncio.run(wrapper.run_json_async({}))
+
+    assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+    assert result["file_refs"][0]["file_id"] != "stale-generation-id"
+
+
+def test_symlinked_output_cannot_register_a_file_outside_output(tmp_path):
+    """A guest path is not authorization: sandboxed code can plant a symlink."""
+    workspace = TaskWorkspace("test_sandbox_symlink_escape", str(tmp_path))
+    workspace.output_dir.mkdir(parents=True, exist_ok=True)
+    workspace.input_dir.mkdir(parents=True, exist_ok=True)
+    secret = workspace.input_dir / "uploaded.docx"
+    secret.write_bytes(b"PK\x03\x04 someone elses upload")
+    planted = workspace.output_dir / "report.docx"
+    planted.symlink_to(secret)
+
+    registered: list[str] = []
+    original_register_file = TaskWorkspace.register_file
+
+    def _counting_register_file(self, file_path, *args, **kwargs):
+        registered.append(str(file_path))
+        return original_register_file(self, file_path, *args, **kwargs)
+
+    wrapper = SandboxedToolWrapper(
+        _FakeGeneratingTool(workspace=workspace),
+        _make_sandbox(
+            {
+                "success": True,
+                "generated_files": ["report.docx"],
+                "file_refs": [
+                    {
+                        "file_id": SANDBOX_MINTED_FILE_ID,
+                        "filename": "report.docx",
+                        "file_path": str(planted),
+                    }
+                ],
+                "artifacts": [],
+            }
+        ),
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(TaskWorkspace, "register_file", _counting_register_file)
+        result = asyncio.run(wrapper.run_json_async({}))
+
+    assert registered == []
+    assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+
+
+def _guest_ref_wrapper(workspace, file_path):
+    return SandboxedToolWrapper(
+        _FakeGeneratingTool(workspace=workspace),
+        _make_sandbox(
+            {
+                "success": True,
+                "generated_files": ["report.docx"],
+                "file_refs": [
+                    {
+                        "file_id": SANDBOX_MINTED_FILE_ID,
+                        "filename": "report.docx",
+                        "file_path": str(file_path),
+                    }
+                ],
+                "artifacts": [],
+            }
+        ),
+    )
+
+
+def _registrations_during(wrapper, monkeypatch):
+    registered: list[str] = []
+    original = TaskWorkspace.register_file
+
+    def _counting(self, file_path, *args, **kwargs):
+        registered.append(str(file_path))
+        return original(self, file_path, *args, **kwargs)
+
+    monkeypatch.setattr(TaskWorkspace, "register_file", _counting)
+    return registered, asyncio.run(wrapper.run_json_async({}))
+
+
+def test_a_guest_ref_outside_output_is_not_registered(tmp_path, monkeypatch):
+    """No symlink needed: the ref itself can just name a file outside output."""
+    workspace = TaskWorkspace("test_sandbox_outside_output", str(tmp_path))
+    workspace.input_dir.mkdir(parents=True, exist_ok=True)
+    workspace.output_dir.mkdir(parents=True, exist_ok=True)
+    uploaded = workspace.input_dir / "uploaded.docx"
+    uploaded.write_bytes(b"PK\x03\x04 someone elses upload")
+
+    registered, result = _registrations_during(
+        _guest_ref_wrapper(workspace, uploaded), monkeypatch
+    )
+
+    assert registered == []
+    assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+
+
+def test_a_symlink_inside_output_is_not_registered(tmp_path, monkeypatch):
+    """Registering the link target would file the bytes under the wrong name."""
+    workspace = TaskWorkspace("test_sandbox_inner_symlink", str(tmp_path))
+    workspace.output_dir.mkdir(parents=True, exist_ok=True)
+    real = workspace.output_dir / "actual.docx"
+    real.write_bytes(b"PK\x03\x04 real")
+    link = workspace.output_dir / "report.docx"
+    link.symlink_to(real)
+
+    registered, result = _registrations_during(
+        _guest_ref_wrapper(workspace, link), monkeypatch
+    )
+
+    assert registered == []
+    assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
