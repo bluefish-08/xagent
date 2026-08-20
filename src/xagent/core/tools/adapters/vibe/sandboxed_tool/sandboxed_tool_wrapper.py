@@ -404,7 +404,16 @@ class SandboxedToolWrapper(AbstractBaseTool):
     async def run_json_async(self, args: Mapping[str, Any]) -> Any:
         """Execute the tool in the sandbox, then register its files here."""
         result = await self._run_json_in_sandbox(args)
-        return await self._register_sandbox_outputs(result)
+        try:
+            return await self._register_sandbox_outputs(result)
+        except Exception:
+            # A successful sandbox run must survive a registration failure.
+            logger.warning(
+                "Host-side registration failed for %s; returning sandbox metadata",
+                self._target.name,
+                exc_info=True,
+            )
+            return result
 
     async def _register_sandbox_outputs(self, result: Any) -> Any:
         """Mint usable file_ids for sandbox-produced files.
@@ -415,7 +424,13 @@ class SandboxedToolWrapper(AbstractBaseTool):
         what makes an agent overwrite a real file to obtain a usable id.
         """
         workspace = getattr(self._reconstruction_target, "_workspace", None)
-        if workspace is None or not isinstance(result, dict):
+        if workspace is None:
+            logger.debug(
+                "%s exposes no _workspace; sandbox outputs stay unregistered",
+                self._target.name,
+            )
+            return result
+        if not isinstance(result, dict):
             return result
         original_refs = [
             ref for ref in result.get("file_refs") or [] if isinstance(ref, dict)
@@ -444,6 +459,8 @@ class SandboxedToolWrapper(AbstractBaseTool):
         if not rebuilt_by_path:
             return result
 
+        # Both sandboxed executors keep artifacts 1:1 with file_refs, so the
+        # rebuild below is lossless for them and only for them.
         merged = [
             rebuilt_by_path.get(str(ref.get("file_path")), ref) for ref in original_refs
         ]

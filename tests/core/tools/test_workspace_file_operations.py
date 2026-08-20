@@ -1724,11 +1724,43 @@ class TestWorkspaceFileOperations:
         target.write_bytes(b"PK\x03\x04 real docx")
         file_id = workspace.register_file(str(target))
 
-        with pytest.raises(ValueError, match="binary container"):
-            ops.append_file(file_id, "more text")
-        with pytest.raises(ValueError, match="binary container"):
-            ops.find_and_replace(file_id, "TODO", "Q3")
+        for call in (
+            lambda: ops.write_file(file_id, "text"),
+            lambda: ops.append_file(file_id, "more text"),
+            lambda: ops.edit_file(file_id, []),
+            lambda: ops.find_and_replace(file_id, "TODO", "Q3"),
+            lambda: ops.write_json_file(file_id, {"a": 1}),
+            lambda: ops.write_csv_file(file_id, [{"a": "1"}]),
+        ):
+            with pytest.raises(ValueError, match="binary container"):
+                call()
         assert target.read_bytes() == b"PK\x03\x04 real docx"
+
+    def test_json_and_csv_writes_cannot_overwrite_a_binary_document(self, tmp_path):
+        """Same guard on every write entry point, not just the text ones."""
+        workspace = TaskWorkspace("test_binary_guard_structured", str(tmp_path))
+        ops = WorkspaceFileOperations(workspace)
+
+        target = workspace.output_dir / "report.xlsx"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"PK\x03\x04 real xlsx")
+
+        with pytest.raises(ValueError, match="binary container"):
+            ops.write_json_file("report.xlsx", {"rows": []})
+        with pytest.raises(ValueError, match="binary container"):
+            ops.write_csv_file("report.xlsx", [{"a": "1"}])
+        assert target.read_bytes() == b"PK\x03\x04 real xlsx"
+
+    def test_text_formats_still_write(self, tmp_path):
+        """The suffix guard must not over-match ordinary text outputs."""
+        workspace = TaskWorkspace("test_binary_guard_text", str(tmp_path))
+        ops = WorkspaceFileOperations(workspace)
+
+        assert ops.write_file("notes.md", "# hi")["success"] is True
+        assert ops.write_file("page.html", "<p>hi</p>")["success"] is True
+        assert ops.write_json_file("data.json", {"a": 1})["success"] is True
+        assert ops.write_csv_file("rows.csv", [{"a": "1"}])["success"] is True
+        assert ops.append_file("notes.md", "\nmore") is True
 
 
 if __name__ == "__main__":

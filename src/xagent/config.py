@@ -2601,6 +2601,20 @@ def get_sandbox_host_project_root() -> Path | None:
     return None
 
 
+def in_sandbox_tool_runner() -> bool:
+    """Return whether this process is the sandbox tool runner.
+
+    Priority:
+    1. XAGENT_SANDBOX_TOOL_RUNNER environment variable
+    2. False, the host process default
+
+    Returns:
+        True when running inside the sandbox, where no database or object
+        storage credentials are available.
+    """
+    return bool(os.getenv(SANDBOX_TOOL_RUNNER))
+
+
 def get_sandbox_host_storage_root() -> Path | None:
     """Get the Docker host storage root used for sibling sandbox bind mounts.
 

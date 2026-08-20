@@ -373,7 +373,7 @@ class WorkspaceFileOperations:
         )
 
         resolved_path = self._resolve_path(file_path, "output")
-        _reject_binary_document_write(resolved_path)
+        self._guard_write_target(file_path, resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         if create_dirs:
@@ -401,6 +401,19 @@ class WorkspaceFileOperations:
             **file_ref,
             "file_ref": file_ref,
         }
+
+    def _guard_write_target(self, file_path: str, resolved_path: Path) -> None:
+        """Reject binary-container writes, including through a file_id."""
+        _reject_binary_document_write(resolved_path)
+        if Path(str(file_path)).suffix:
+            return
+        # A file_id carries no suffix of its own, so check what it resolves to.
+        try:
+            registered = self.workspace.resolve_file_id(str(file_path).strip())
+        except Exception:
+            return
+        if registered is not None:
+            _reject_binary_document_write(registered)
 
     def _registered_write_result(self, file_path: Path) -> Dict[str, Any]:
         file_ref = build_workspace_file_ref(
@@ -644,6 +657,7 @@ class WorkspaceFileOperations:
         from .file_tool import write_json_file as basic_write_json_file
 
         resolved_path = self._resolve_path(file_path, "output")
+        self._guard_write_target(file_path, resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         with self.workspace.auto_register_files():
@@ -686,6 +700,7 @@ class WorkspaceFileOperations:
         from .file_tool import write_csv_file as basic_write_csv_file
 
         resolved_path = self._resolve_path(file_path, "output")
+        self._guard_write_target(file_path, resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         with self.workspace.auto_register_files():

@@ -79,6 +79,7 @@ from xagent.config import (
     SANDBOX_MEMORY,
     SANDBOX_NAMESPACE,
     SANDBOX_SWEEP_INTERVAL,
+    SANDBOX_TOOL_RUNNER,
     SANDBOX_VOLUMES,
     SLACK_APP_TOKEN,
     SLACK_CLIENT_ID,
@@ -213,6 +214,7 @@ from xagent.config import (
     get_web_crawl_tls_impersonate,
     get_web_dir,
     get_web_search_provider,
+    in_sandbox_tool_runner,
     validate_sandbox_namespace,
 )
 
@@ -265,6 +267,17 @@ class TestEnvironmentVariableConstants:
 
     def test_sandbox_host_storage_root_constant(self):
         assert SANDBOX_HOST_STORAGE_ROOT == "XAGENT_SANDBOX_HOST_STORAGE_ROOT"
+
+    def test_sandbox_tool_runner_constant(self):
+        assert SANDBOX_TOOL_RUNNER == "XAGENT_SANDBOX_TOOL_RUNNER"
+
+    def test_in_sandbox_tool_runner_defaults_to_false(self, monkeypatch):
+        monkeypatch.delenv(SANDBOX_TOOL_RUNNER, raising=False)
+        assert in_sandbox_tool_runner() is False
+
+    def test_in_sandbox_tool_runner_env_override(self, monkeypatch):
+        monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
+        assert in_sandbox_tool_runner() is True
 
     def test_lancedb_path_constant(self):
         assert LANCEDB_PATH == "LANCEDB_PATH"

@@ -18,7 +18,7 @@ from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import sandbo
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
     SandboxedToolWrapper,
 )
-from xagent.core.workspace import TaskWorkspace
+from xagent.core.workspace import SANDBOX_FILE_ID_PREFIX, TaskWorkspace
 
 SANDBOX_MINTED_FILE_ID = "sandbox-only-file-id"
 
@@ -83,6 +83,7 @@ def test_host_process_reregisters_sandbox_generated_files(tmp_path):
 
 
 def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
+    """No host-visible path at all: the early return keeps the sandbox refs."""
     workspace = TaskWorkspace("test_sandbox_guest_paths", str(tmp_path))
     payload = {
         "success": True,
@@ -106,7 +107,7 @@ def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
     assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
 
 
-def test_registration_inside_sandbox_runner_never_touches_the_database(
+def test_register_files_inside_sandbox_runner_never_touches_the_database(
     tmp_path, monkeypatch
 ):
     workspace = TaskWorkspace("test_sandbox_runner", str(tmp_path))
@@ -123,7 +124,7 @@ def test_registration_inside_sandbox_runner_never_touches_the_database(
     assert (
         workspace.register_file(str(target), file_id="requested-id") == "requested-id"
     )
-    assert workspace.register_file(str(target))
+    assert workspace.register_file(str(target)) == "requested-id"
 
     monkeypatch.delenv(SANDBOX_TOOL_RUNNER)
     with pytest.raises(AssertionError):
@@ -168,6 +169,11 @@ def test_partially_visible_refs_keep_the_sandbox_entry(tmp_path):
     assert result["file_refs"][0]["file_id"] != SANDBOX_MINTED_FILE_ID
     assert result["file_refs"][1]["file_id"] == "guest-only-id"
     assert result["generated_files"] == ["visible.docx", "guest.docx"]
+    # The unregistered ref stays in artifacts on purpose; its id is recognizably
+    # not database-backed rather than silently dropped.
+    artifact_ids = [artifact.get("file_id") for artifact in result["artifacts"]]
+    assert artifact_ids[0] == result["file_refs"][0]["file_id"]
+    assert artifact_ids[1] == "guest-only-id"
 
 
 def test_failed_host_registration_keeps_the_sandbox_metadata(tmp_path, monkeypatch):
@@ -204,9 +210,10 @@ def test_failed_host_registration_keeps_the_sandbox_metadata(tmp_path, monkeypat
 
     assert result["generated_files"] == ["report.docx"]
     assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
+    assert result["artifacts"] == []
 
 
-def test_sandbox_runner_reuses_one_id_per_path(tmp_path, monkeypatch):
+def test_sandbox_runner_reuses_one_prefixed_id_per_path(tmp_path, monkeypatch):
     workspace = TaskWorkspace("test_sandbox_stable_ids", str(tmp_path))
     target = workspace.output_dir / "note.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -214,5 +221,6 @@ def test_sandbox_runner_reuses_one_id_per_path(tmp_path, monkeypatch):
     monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
 
     first = workspace.register_file(str(target))
+    assert first.startswith(SANDBOX_FILE_ID_PREFIX)
     assert workspace.register_file(str(target)) == first
     assert workspace.get_file_id_from_path(str(target)) == first
