@@ -213,25 +213,58 @@ def test_deepseek_codec_keeps_valid_tool_call() -> None:
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n"])
-def test_deepseek_codec_keeps_blank_arguments_for_parameterless_tool(
+@pytest.mark.parametrize(
+    ("tool_name", "tool"),
+    [
+        ("list_image_models", LIST_IMAGE_MODELS_TOOL),
+        # A tool with declared properties skips the `additionalProperties`
+        # guard entirely rather than passing trivially against an empty set.
+        ("write_file", WRITE_FILE_TOOL),
+    ],
+)
+def test_deepseek_codec_keeps_blank_arguments_for_declared_tool(
     blank: str,
+    tool_name: str,
+    tool: dict[str, object],
 ) -> None:
     response = {
         "type": "tool_call",
         "tool_calls": [
             {
-                "id": "call_list",
+                "id": "call_blank",
                 "type": "function",
-                "function": {"name": "list_image_models", "arguments": blank},
+                "function": {"name": tool_name, "arguments": blank},
             }
         ],
     }
 
-    assert (
-        normalize_deepseek_response(response, tools=[LIST_IMAGE_MODELS_TOOL])
-        is response
-    )
+    assert normalize_deepseek_response(response, tools=[tool]) is response
     assert response["tool_calls"][0]["function"]["arguments"] == blank
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_deepseek_codec_still_rejects_unavailable_tool_with_blank_arguments(
+    blank: str,
+) -> None:
+    """Blank arguments must not become a bypass for the unavailable-tool guard."""
+
+    normalized = normalize_deepseek_response(
+        {
+            "type": "tool_call",
+            "tool_calls": [
+                {
+                    "id": "call_ghost",
+                    "type": "function",
+                    "function": {"name": "fetch_web_content", "arguments": blank},
+                }
+            ],
+        },
+        tools=[WRITE_FILE_TOOL],
+    )
+
+    error = get_tool_protocol_error(normalized)
+    assert error is not None
+    assert error["code"] == "unavailable_tool_call"
 
 
 def test_deepseek_codec_repairs_complete_malformed_tool_arguments() -> None:

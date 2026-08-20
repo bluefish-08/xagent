@@ -1584,13 +1584,22 @@ class ReActPattern(AgentPattern):
             try:
                 parsed = json.loads(arguments)
             except json.JSONDecodeError:
-                logger.warning(
-                    "ReAct tool call %s returned malformed JSON arguments "
-                    "(%d chars); dropping them for control tools and blank "
-                    "payloads, passing anything else through as `input`.",
-                    tool_name or "<unknown>",
-                    len(arguments),
-                )
+                if not arguments.strip():
+                    # The happy path for a parameterless tool on providers that
+                    # send `""` instead of `"{}"` (#1501) - not a malformation.
+                    logger.debug(
+                        "ReAct tool call %s returned blank arguments; "
+                        "treating as no arguments.",
+                        tool_name or "<unknown>",
+                    )
+                else:
+                    logger.warning(
+                        "ReAct tool call %s returned malformed JSON arguments "
+                        "(%d chars); dropping them for control tools, passing "
+                        "anything else through as `input`.",
+                        tool_name or "<unknown>",
+                        len(arguments),
+                    )
                 return self._fallback_arguments(tool_name, arguments)
             if isinstance(parsed, dict):
                 return parsed
@@ -1625,7 +1634,8 @@ class ReActPattern(AgentPattern):
         if tool_name in self._control_tool_names():
             return {}
         if isinstance(payload, str) and not payload.strip():
-            # Nothing to preserve, and `input` is not a field any work tool declares.
+            # A blank payload carries nothing to preserve, so there is no
+            # opaque value for the `input` passthrough to forward.
             return {}
         return {"input": payload}
 
