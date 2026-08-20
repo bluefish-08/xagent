@@ -306,7 +306,7 @@ class SandboxedToolWrapper(AbstractBaseTool):
 
     def _build_execution_env(self) -> dict[str, str]:
         """Build per-exec environment variables (scoped to this process, not the sandbox)."""
-        env = {"PYTHONPATH": SANDBOX_SRC_ROOT}
+        env: dict[str, str] = {}
 
         for env_var in self._env_vars:
             value = os.getenv(env_var)
@@ -315,7 +315,9 @@ class SandboxedToolWrapper(AbstractBaseTool):
             else:
                 logger.warning(f"Environment variable {env_var} not found in host")
 
-        # Seeded last: a tool-declared env_var must not be able to clear it.
+        # Seeded last: a tool-declared env_var must not be able to override
+        # these. A host PYTHONPATH would point the runner outside the sandbox.
+        env["PYTHONPATH"] = SANDBOX_SRC_ROOT
         env[SANDBOX_TOOL_RUNNER] = "1"
         return env
 

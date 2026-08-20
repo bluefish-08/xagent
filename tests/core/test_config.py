@@ -1,5 +1,8 @@
 """Unit tests for core/config.py configuration functions."""
 
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from tempfile import gettempdir
@@ -293,6 +296,19 @@ class TestEnvironmentVariableConstants:
         """Agent-authored code runs late; it must not flip the whole process."""
         monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
         assert in_sandbox_tool_runner() is False
+
+    def test_in_sandbox_tool_runner_does_read_the_env_at_import(self):
+        """The other tests patch the snapshot, so pin that it is populated."""
+        probe = "import xagent.config as c; print(c.in_sandbox_tool_runner())"
+        env = {**os.environ, SANDBOX_TOOL_RUNNER: "1"}
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert proc.stdout.strip() == "True"
 
     def test_lancedb_path_constant(self):
         assert LANCEDB_PATH == "LANCEDB_PATH"

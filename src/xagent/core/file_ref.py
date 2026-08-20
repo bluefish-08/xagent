@@ -7,9 +7,9 @@ from urllib.parse import quote, unquote, urlsplit
 
 WORKSPACE_OUTPUT_FILES_TOOL_NAME = "get_workspace_output_files"
 
-# Minted inside the sandbox runner, which reaches no database. Unlike
-# ``internal-``, nothing in any process can resolve one: the host re-registers
-# these after the call, and a survivor means that re-registration failed.
+# Minted inside the sandbox runner, which reaches no database. Only the runner
+# that minted one resolves it, through its own path cache; the host re-registers
+# these after the call, so one surviving on the host means that failed.
 SANDBOX_FILE_ID_PREFIX = "sandbox-"
 
 

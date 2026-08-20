@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..file_ref import (
-    WORKSPACE_OUTPUT_FILES_TOOL_NAME,
     build_workspace_file_ref,
     guess_mime_type,
     is_sandbox_local_file_id,
@@ -180,9 +179,9 @@ def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
                     [
                         f"- {filename}",
                         "  file_id: unavailable, registration did not complete",
-                        "  The file exists; call "
-                        f"{WORKSPACE_OUTPUT_FILES_TOOL_NAME} for a usable "
-                        "file_id. Do not rewrite the file to obtain one.",
+                        "  The file itself is written and intact. No file_id "
+                        "can be obtained for it in this task; say so plainly "
+                        "and never rewrite the file to try to mint one.",
                     ]
                 )
             )
@@ -231,9 +230,23 @@ def _sanitize_tool_result_value(value: Any, known_paths: dict[str, str]) -> Any:
     }
 
 
+# A sandbox id resolves nowhere outside the runner that minted it, so every key
+# asserting a fetchable file would hand the model a link that 404s.
+_UNRESOLVABLE_FILE_REF_KEYS = {
+    "download_url",
+    "file_id",
+    "markdown_link",
+    "markdown_ref",
+    "preview_url",
+}
+
+
 def _safe_tool_result_items(value: dict[str, Any]) -> Iterable[tuple[str, Any]]:
     if _is_file_ref_like(value):
-        return ((key, value[key]) for key in SAFE_FILE_REF_KEYS if key in value)
+        keys = SAFE_FILE_REF_KEYS
+        if is_sandbox_local_file_id(value.get("file_id")):
+            keys = keys - _UNRESOLVABLE_FILE_REF_KEYS
+        return ((key, value[key]) for key in keys if key in value)
     return ((key, item) for key, item in value.items() if key not in LOCAL_PATH_KEYS)
 
 

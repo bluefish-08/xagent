@@ -17,7 +17,6 @@ from sqlalchemy.pool import StaticPool
 
 import xagent.config as xagent_config
 from tests.core.tools.adapters.sandboxed_tool.conftest import FakeBaseTool
-from xagent.core.file_ref import WORKSPACE_OUTPUT_FILES_TOOL_NAME
 from xagent.core.file_storage.factory import (
     get_unscoped_file_storage,
     get_user_file_storage,
@@ -199,28 +198,53 @@ def test_partially_visible_refs_keep_the_sandbox_entry(tmp_path):
 
 
 def test_a_surviving_sandbox_id_is_never_offered_to_the_model_as_a_link(tmp_path):
-    """A sandbox id means registration failed; a file: link for it 404s."""
+    """A sandbox id means registration failed; any link built from it 404s."""
     from xagent.core.tools.artifacts import (
+        build_inline_artifact,
         format_tool_result_for_observation,
         markdown_reference_for_artifact,
     )
 
-    dead = {"file_id": SANDBOX_MINTED_FILE_ID, "filename": "report.docx"}
-    assert markdown_reference_for_artifact(dead) is None
+    # The production shape: _register_sandbox_outputs always emits file_refs
+    # beside artifacts, and the observation renders both.
+    dead_ref = {
+        "file_id": SANDBOX_MINTED_FILE_ID,
+        "filename": "report.docx",
+        "mime_type": "application/vnd.openxmlformats-officedocument",
+        "markdown_link": f"[report.docx](file:{SANDBOX_MINTED_FILE_ID})",
+        "download_url": f"/api/files/download/{SANDBOX_MINTED_FILE_ID}",
+        "file_path": "/w/output/report.docx",
+        "size": 99,
+    }
+    assert markdown_reference_for_artifact(dead_ref) is None
 
     observation = format_tool_result_for_observation(
-        "execute_python_code", {"success": True, "artifacts": [dead]}
+        "execute_python_code",
+        {
+            "success": True,
+            "file_refs": [dead_ref],
+            "artifacts": [build_inline_artifact(dead_ref)],
+            "generated_files": ["report.docx"],
+        },
     )
     assert SANDBOX_MINTED_FILE_ID not in observation
-    assert f"file:{SANDBOX_MINTED_FILE_ID}" not in observation
+    assert "download_url" not in observation
+    assert "markdown_link" not in observation
     # Still announced: silence is what made an agent rewrite a real document.
     assert "report.docx" in observation
-    assert WORKSPACE_OUTPUT_FILES_TOOL_NAME in observation
+    assert "registration did not complete" in observation
 
-    live = {"file_id": "6f1c9e6c-0000-4000-8000-000000000000", "filename": "ok.docx"}
-    assert (
-        markdown_reference_for_artifact(live) == "[ok.docx](file:%s)" % live["file_id"]
+    live_id = "6f1c9e6c-0000-4000-8000-000000000000"
+    live_ref = dict(
+        dead_ref, file_id=live_id, markdown_link=f"[report.docx](file:{live_id})"
     )
+    assert markdown_reference_for_artifact(live_ref) == live_ref["markdown_link"]
+    live_observation = format_tool_result_for_observation(
+        "execute_python_code",
+        {"success": True, "file_refs": [live_ref], "artifacts": [live_ref]},
+    )
+    assert live_id in live_observation
+    assert "markdown_link" in live_observation
 
 
 def test_resolving_a_sandbox_id_stops_before_the_database(tmp_path, monkeypatch):
