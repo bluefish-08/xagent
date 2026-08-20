@@ -17,9 +17,10 @@ from typing import Any, Mapping, Optional, Type, cast
 import cloudpickle  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
-from ......config import get_sandbox_host_project_root
+from ......config import SANDBOX_TOOL_RUNNER, get_sandbox_host_project_root
 from ......sandbox.base import Sandbox
 from .....workspace import TaskWorkspace
+from ....artifacts import build_generated_file_metadata, build_inline_artifact
 from ..base import AbstractBaseTool, ToolMetadata
 from ..function import FunctionTool
 from .sandbox_config import (
@@ -263,6 +264,7 @@ class SandboxedToolWrapper(AbstractBaseTool):
         self._allow_users = getattr(target_tool, "_allow_users", None)
 
         self._execution_spec, reconstruction_target = self._resolve_execution_spec()
+        self._reconstruction_target = reconstruction_target
 
         # Extract and serialize init params for sandbox reconstruction
         init_params = _extract_init_params(reconstruction_target)
@@ -304,7 +306,7 @@ class SandboxedToolWrapper(AbstractBaseTool):
 
     def _build_execution_env(self) -> dict[str, str]:
         """Build per-exec environment variables (scoped to this process, not the sandbox)."""
-        env = {"PYTHONPATH": SANDBOX_SRC_ROOT}
+        env = {"PYTHONPATH": SANDBOX_SRC_ROOT, SANDBOX_TOOL_RUNNER: "1"}
 
         for env_var in self._env_vars:
             value = os.getenv(env_var)
@@ -400,6 +402,59 @@ class SandboxedToolWrapper(AbstractBaseTool):
         return asyncio.run(self.run_json_async(args))
 
     async def run_json_async(self, args: Mapping[str, Any]) -> Any:
+        """Execute the tool in the sandbox, then register its files here."""
+        result = await self._run_json_in_sandbox(args)
+        return await self._register_sandbox_outputs(result)
+
+    async def _register_sandbox_outputs(self, result: Any) -> Any:
+        """Mint usable file_ids for sandbox-produced files.
+
+        The sandbox has no database credentials, so a file_id minted in there
+        names no real record. Refs the host cannot re-register keep the sandbox
+        entry: a dropped artifact reads as "nothing was generated", which is
+        what makes an agent overwrite a real file to obtain a usable id.
+        """
+        workspace = getattr(self._reconstruction_target, "_workspace", None)
+        if workspace is None or not isinstance(result, dict):
+            return result
+        original_refs = [
+            ref for ref in result.get("file_refs") or [] if isinstance(ref, dict)
+        ]
+        if not original_refs:
+            return result
+
+        paths = [
+            str(ref["file_path"])
+            for ref in original_refs
+            if ref.get("file_path") and Path(str(ref["file_path"])).is_file()
+        ]
+        if not paths:
+            return result
+
+        rebuilt = await asyncio.to_thread(
+            build_generated_file_metadata,
+            workspace=workspace,
+            file_paths=paths,
+        )
+        rebuilt_by_path = {
+            str(ref["file_path"]): ref
+            for ref in rebuilt["file_refs"]
+            if ref.get("file_path")
+        }
+        if not rebuilt_by_path:
+            return result
+
+        merged = [
+            rebuilt_by_path.get(str(ref.get("file_path")), ref) for ref in original_refs
+        ]
+        result["file_refs"] = merged
+        result["artifacts"] = [build_inline_artifact(ref) for ref in merged]
+        result["generated_files"] = [
+            str(ref["filename"]) for ref in merged if ref.get("filename")
+        ]
+        return result
+
+    async def _run_json_in_sandbox(self, args: Mapping[str, Any]) -> Any:
         """Execute tool asynchronously in sandbox"""
 
         # Generate unique result file name
