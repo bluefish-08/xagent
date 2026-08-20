@@ -7,6 +7,16 @@ from urllib.parse import quote, unquote, urlsplit
 
 WORKSPACE_OUTPUT_FILES_TOOL_NAME = "get_workspace_output_files"
 
+# Minted inside the sandbox runner, which reaches no database. Unlike
+# ``internal-``, nothing in any process can resolve one: the host re-registers
+# these after the call, and a survivor means that re-registration failed.
+SANDBOX_FILE_ID_PREFIX = "sandbox-"
+
+
+def is_sandbox_local_file_id(file_id: str | None) -> bool:
+    return bool(file_id) and str(file_id).startswith(SANDBOX_FILE_ID_PREFIX)
+
+
 _FINAL_DELIVERABLE_FILE_LOOKUP_INSTRUCTIONS = f"""If a generated final deliverable exists but no trusted file_id remains in the current
 context, call {WORKSPACE_OUTPUT_FILES_TOOL_NAME} once before finalizing. Match the exact
 deliverable path and filename, then use only a returned non-null file_id and render [filename](file:file_id)

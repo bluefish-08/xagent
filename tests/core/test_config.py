@@ -271,18 +271,28 @@ class TestEnvironmentVariableConstants:
     def test_sandbox_tool_runner_constant(self):
         assert SANDBOX_TOOL_RUNNER == "XAGENT_SANDBOX_TOOL_RUNNER"
 
-    def test_in_sandbox_tool_runner_defaults_to_false(self, monkeypatch):
-        monkeypatch.delenv(SANDBOX_TOOL_RUNNER, raising=False)
+    def test_in_sandbox_tool_runner_defaults_to_false(self):
         assert in_sandbox_tool_runner() is False
 
-    def test_in_sandbox_tool_runner_env_override(self, monkeypatch):
-        monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
-        assert in_sandbox_tool_runner() is True
-
-    def test_in_sandbox_tool_runner_rejects_falsy_spellings(self, monkeypatch):
-        for value in ("0", "false", "no", "off", ""):
+    def test_in_sandbox_tool_runner_reads_the_env_at_process_start(self, monkeypatch):
+        for value, expected in (
+            ("1", True),
+            ("true", True),
+            ("yes", True),
+            ("on", True),
+            ("0", False),
+            ("false", False),
+            ("no", False),
+            ("off", False),
+            ("", False),
+        ):
             monkeypatch.setenv(SANDBOX_TOOL_RUNNER, value)
-            assert in_sandbox_tool_runner() is False
+            assert config._get_bool_env(SANDBOX_TOOL_RUNNER, False) is expected
+
+    def test_in_sandbox_tool_runner_ignores_later_env_mutation(self, monkeypatch):
+        """Agent-authored code runs late; it must not flip the whole process."""
+        monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
+        assert in_sandbox_tool_runner() is False
 
     def test_lancedb_path_constant(self):
         assert LANCEDB_PATH == "LANCEDB_PATH"

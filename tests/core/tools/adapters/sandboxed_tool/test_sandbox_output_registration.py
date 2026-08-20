@@ -15,8 +15,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import xagent.config as xagent_config
 from tests.core.tools.adapters.sandboxed_tool.conftest import FakeBaseTool
-from xagent.config import SANDBOX_TOOL_RUNNER
+from xagent.core.file_ref import WORKSPACE_OUTPUT_FILES_TOOL_NAME
 from xagent.core.file_storage.factory import (
     get_unscoped_file_storage,
     get_user_file_storage,
@@ -118,6 +119,16 @@ def test_unreachable_sandbox_paths_are_left_untouched(tmp_path):
     assert result["file_refs"][0]["file_id"] == SANDBOX_MINTED_FILE_ID
 
 
+def _enter_sandbox_runner_mode(monkeypatch) -> None:
+    """Enter sandbox-runner mode the way the process itself does.
+
+    The marker is snapshotted at import, so setting the env var here would be
+    ignored — which is exactly the property that keeps agent code from
+    flipping host registration.
+    """
+    monkeypatch.setattr(xagent_config, "_IN_SANDBOX_TOOL_RUNNER", True)
+
+
 def test_register_files_inside_sandbox_runner_never_touches_the_database(
     tmp_path, monkeypatch
 ):
@@ -130,14 +141,14 @@ def test_register_files_inside_sandbox_runner_never_touches_the_database(
         raise AssertionError("sandbox runner must not reach the metadata store")
 
     monkeypatch.setattr(TaskWorkspace, "_register_files_locked", _fail)
-    monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
+    _enter_sandbox_runner_mode(monkeypatch)
 
     assert (
         workspace.register_file(str(target), file_id="requested-id") == "requested-id"
     )
     assert workspace.register_file(str(target)) == "requested-id"
 
-    monkeypatch.delenv(SANDBOX_TOOL_RUNNER)
+    monkeypatch.setattr(xagent_config, "_IN_SANDBOX_TOOL_RUNNER", False)
     with pytest.raises(AssertionError):
         workspace.register_file(str(target))
 
@@ -187,6 +198,47 @@ def test_partially_visible_refs_keep_the_sandbox_entry(tmp_path):
     assert artifact_ids[1] == "guest-only-id"
 
 
+def test_a_surviving_sandbox_id_is_never_offered_to_the_model_as_a_link(tmp_path):
+    """A sandbox id means registration failed; a file: link for it 404s."""
+    from xagent.core.tools.artifacts import (
+        format_tool_result_for_observation,
+        markdown_reference_for_artifact,
+    )
+
+    dead = {"file_id": SANDBOX_MINTED_FILE_ID, "filename": "report.docx"}
+    assert markdown_reference_for_artifact(dead) is None
+
+    observation = format_tool_result_for_observation(
+        "execute_python_code", {"success": True, "artifacts": [dead]}
+    )
+    assert SANDBOX_MINTED_FILE_ID not in observation
+    assert f"file:{SANDBOX_MINTED_FILE_ID}" not in observation
+    # Still announced: silence is what made an agent rewrite a real document.
+    assert "report.docx" in observation
+    assert WORKSPACE_OUTPUT_FILES_TOOL_NAME in observation
+
+    live = {"file_id": "6f1c9e6c-0000-4000-8000-000000000000", "filename": "ok.docx"}
+    assert (
+        markdown_reference_for_artifact(live) == "[ok.docx](file:%s)" % live["file_id"]
+    )
+
+
+def test_resolving_a_sandbox_id_stops_before_the_database(tmp_path, monkeypatch):
+    workspace = TaskWorkspace("test_sandbox_resolve", str(tmp_path))
+    calls = []
+
+    # A spy, not a raise: resolve_file_id swallows exceptions from this block,
+    # so a raising fake would pass with the short-circuit deleted.
+    def _spy(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("no database in this test")
+
+    monkeypatch.setattr("xagent.core.storage.manager.create_db_session", _spy)
+
+    assert workspace.resolve_file_id(SANDBOX_MINTED_FILE_ID) is None
+    assert calls == []
+
+
 def test_failed_host_registration_keeps_the_sandbox_metadata(tmp_path, monkeypatch):
     workspace = TaskWorkspace("test_sandbox_failed_host", str(tmp_path))
     generated = workspace.output_dir / "report.docx"
@@ -229,7 +281,7 @@ def test_sandbox_runner_reuses_one_prefixed_id_per_path(tmp_path, monkeypatch):
     target = workspace.output_dir / "note.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("hello")
-    monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
+    _enter_sandbox_runner_mode(monkeypatch)
 
     first = workspace.register_file(str(target))
     assert first.startswith(SANDBOX_FILE_ID_PREFIX)

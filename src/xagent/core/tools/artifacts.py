@@ -6,7 +6,12 @@ import logging
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..file_ref import build_workspace_file_ref, guess_mime_type
+from ..file_ref import (
+    WORKSPACE_OUTPUT_FILES_TOOL_NAME,
+    build_workspace_file_ref,
+    guess_mime_type,
+    is_sandbox_local_file_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +114,7 @@ def build_inline_artifact(file_ref: dict[str, Any]) -> dict[str, str]:
 
 def markdown_reference_for_artifact(artifact: dict[str, Any]) -> str | None:
     file_id = artifact.get("file_id")
-    if not file_id:
+    if not file_id or is_sandbox_local_file_id(file_id):
         return None
 
     filename = str(artifact.get("filename") or "artifact")
@@ -170,6 +175,17 @@ def _format_artifact_lines(artifacts: list[Any]) -> list[str]:
         filename = artifact.get("filename") or "generated image"
         markdown_ref = markdown_reference_for_artifact(artifact)
         if not markdown_ref:
+            lines.append(
+                "\n".join(
+                    [
+                        f"- {filename}",
+                        "  file_id: unavailable, registration did not complete",
+                        "  The file exists; call "
+                        f"{WORKSPACE_OUTPUT_FILES_TOOL_NAME} for a usable "
+                        "file_id. Do not rewrite the file to obtain one.",
+                    ]
+                )
+            )
             continue
         artifact_type = str(artifact.get("type") or "").lower()
         markdown_label = (

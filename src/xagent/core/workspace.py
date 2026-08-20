@@ -35,7 +35,11 @@ from ..config import (
     in_sandbox_tool_runner,
 )
 from .execution_scope import validate_scope_component
-from .file_ref import parse_file_id_ref
+from .file_ref import (
+    SANDBOX_FILE_ID_PREFIX,
+    is_sandbox_local_file_id,
+    parse_file_id_ref,
+)
 from .file_storage.keys import build_user_key_prefix
 
 if TYPE_CHECKING:
@@ -46,10 +50,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-# Marks an id minted inside the sandbox runner, mirroring the ``internal-``
-# prefix: neither names a durable UploadedFile row.
-SANDBOX_FILE_ID_PREFIX = "sandbox-"
 
 DEFAULT_USER_FILE_LIST_LIMIT = 50
 
@@ -1301,6 +1301,13 @@ class TaskWorkspace:
             logger.warning(
                 "resolve_file_id: Process-local internal file is unavailable in "
                 "this process or has expired: %s",
+                file_id,
+            )
+            return None
+        if is_sandbox_local_file_id(file_id):
+            logger.warning(
+                "resolve_file_id: Sandbox-minted id never reached the database, so "
+                "host re-registration failed for it: %s",
                 file_id,
             )
             return None

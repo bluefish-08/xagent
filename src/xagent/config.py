@@ -2601,18 +2601,24 @@ def get_sandbox_host_project_root() -> Path | None:
     return None
 
 
+# Read once at import, never per call: the sandbox runner inherits this marker
+# before it imports anything, while agent-authored code runs late and must not
+# be able to flip host registration into sandbox mode process-wide.
+_IN_SANDBOX_TOOL_RUNNER = _get_bool_env(SANDBOX_TOOL_RUNNER, False)
+
+
 def in_sandbox_tool_runner() -> bool:
     """Return whether this process is the sandbox tool runner.
 
     Priority:
-    1. XAGENT_SANDBOX_TOOL_RUNNER environment variable
+    1. XAGENT_SANDBOX_TOOL_RUNNER as it stood at process start
     2. False, the host process default
 
     Returns:
         True when running inside the sandbox, where no database or object
         storage credentials are available.
     """
-    return _get_bool_env(SANDBOX_TOOL_RUNNER, False)
+    return _IN_SANDBOX_TOOL_RUNNER
 
 
 def get_sandbox_host_storage_root() -> Path | None:
