@@ -265,13 +265,11 @@ class SshDownloadTool(_SshTransferTool):
 
 def _numeric_task_id(task_id: Any) -> int | None:
     """Extract the DB task id from the workspace-scoped id the tool config
-    hands us (``"web_task_30"`` -> 30).
+    hands us (``"web_task_30"`` -> 30); anything else is "no task".
 
-    Strict prefix match, never a trailing-digit search: a delegated sub-agent
-    (``agent_7_a1b2cd34``) or a REST preview (``preview_ab12cd34``) would
-    otherwise yield the uuid suffix's trailing digits as somebody else's task
-    id, and the caller resolves the owner scope from whatever row that hits.
-    Anything not of this exact shape is "no task" (fail closed)."""
+    Strict prefix match, never a trailing-digit search: ``agent_7_a1b2cd34``
+    would otherwise yield 34 -- an unrelated task, whose owner the caller then
+    resolves the SSH bindings against."""
     if task_id is None:
         return None
     normalized = str(task_id).strip()

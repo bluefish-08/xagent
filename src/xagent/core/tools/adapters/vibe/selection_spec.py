@@ -172,12 +172,9 @@ class ToolSelectionSpec(ABC):
     def admits_binding_authorized(self) -> bool:
         """Whether ``BINDING_AUTHORIZED_CATEGORIES`` ride along this spec.
 
-        Such a category is granted by a per-agent binding the creator
-        enforces itself, so it is admitted alongside a real user category
-        selection. It must NOT be granted to a spec whose only selection is
-        an internal injection (empty ``categories`` + ``name_allowlist``,
-        i.e. the unconfigured workforce manager), which is scoped to its
-        worker tools.
+        True only alongside a real user category selection: a spec whose
+        only selection is an internal injection (the unconfigured workforce
+        manager's worker tools) stays scoped to that injection.
         """
 
     @abstractmethod
@@ -676,9 +673,8 @@ class _SpecByCategories(ToolSelectionSpec):
             ``"mcp"`` admits all MCP tools, etc.; DB-backed Custom API
             tools are loaded only for scoped ``mcp:<server>`` connectors);
           - a tool in a ``BINDING_AUTHORIZED_CATEGORIES`` category is
-            admitted whenever :meth:`admits_binding_authorized` holds (its
-            per-agent binding is the opt-in and the category can never be
-            selected);
+            admitted per :meth:`admits_binding_authorized` -- its per-agent
+            binding is the opt-in, since the category is never selectable;
           - otherwise a tool whose ``metadata.source_server`` matches a
             scoped server in ``mcp_servers`` is admitted. ``source_server``
             is the normalized originating-server identity set once at

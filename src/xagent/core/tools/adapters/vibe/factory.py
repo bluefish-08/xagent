@@ -221,10 +221,10 @@ class ToolRegistry:
         When ``config.get_tool_selection_spec()`` returns a spec,
         creators whose declared categories don't intersect
         ``spec.categories`` are skipped at the registry level (no
-        creator call, no I/O) -- except a creator declaring only
-        ``BINDING_AUTHORIZED_CATEGORIES``, which the spec admits
-        alongside any real category selection. Creators with no declared categories
-        (dynamic ones: MCP / Custom API / Image / Audio) are always
+        creator call, no I/O) -- except a creator declaring a
+        ``BINDING_AUTHORIZED_CATEGORIES`` category, dispatched per
+        ``spec.admits_binding_authorized()``. Creators with no declared
+        categories (dynamic ones: MCP / Custom API / Image / Audio) are always
         dispatched and are responsible for
         short-circuiting internally based on the spec.
 
@@ -246,8 +246,8 @@ class ToolRegistry:
         for creator, declared_cats, selection_gate in cls._tool_creators:
             # Registry-level skip: declared categories known and no
             # intersection with the spec's allowed categories. The helper
-            # keeps both exceptions (published-agent workforce injection and
-            # binding-authorized categories) in one place.
+            # keeps both exceptions (published-agent, binding-authorized)
+            # in one place.
             if not cls._should_run_creator(declared_cats, spec, selection_gate):
                 continue
             try:
