@@ -421,6 +421,12 @@ class SandboxedToolWrapper(AbstractBaseTool):
 
     @staticmethod
     def _resolved_ref_key(ref: Mapping[str, Any]) -> str | None:
+        """Merge key for every ref, registrable or not.
+
+        Deliberately not _host_output_key: that one decides what the host may
+        persist, so it rejects symlinks and paths outside the output tree.
+        Applying those checks here would drop guest-only refs from the merge.
+        """
         raw = ref.get("file_path")
         if not raw:
             return None

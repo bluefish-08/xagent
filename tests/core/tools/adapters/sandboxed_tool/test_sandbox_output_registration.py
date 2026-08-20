@@ -560,6 +560,13 @@ def durable_workspace(monkeypatch, tmp_path):
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     monkeypatch.setattr("xagent.core.storage.manager.create_db_session", SessionLocal)
+    # _create_registration_session prefers the web session factory and only falls
+    # back to create_db_session on RuntimeError, so patching one is not enough:
+    # any earlier test in the process that ran configure_db leaves _SessionLocal
+    # set, and registration would silently use that database instead of this one.
+    monkeypatch.setattr(
+        "xagent.web.models.database.get_session_local", lambda: SessionLocal
+    )
     monkeypatch.setenv("XAGENT_FILE_STORAGE_URI", (tmp_path / "objects").as_uri())
     get_unscoped_file_storage.cache_clear()
 
