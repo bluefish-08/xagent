@@ -224,3 +224,84 @@ def test_sandbox_runner_reuses_one_prefixed_id_per_path(tmp_path, monkeypatch):
     assert first.startswith(SANDBOX_FILE_ID_PREFIX)
     assert workspace.register_file(str(target)) == first
     assert workspace.get_file_id_from_path(str(target)) == first
+
+
+def test_symlinked_guest_spelling_still_merges(tmp_path):
+    """A guest mount keeps the unresolved spelling; the merge must still match."""
+    real_base = tmp_path / "real"
+    real_base.mkdir()
+    linked_base = tmp_path / "linked"
+    linked_base.symlink_to(real_base, target_is_directory=True)
+
+    workspace = TaskWorkspace("test_sandbox_symlink", str(real_base))
+    generated = workspace.output_dir / "report.docx"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_bytes(b"PK\x03\x04 report")
+
+    guest_path = str(linked_base / generated.relative_to(real_base.resolve()))
+    assert guest_path != str(generated)
+
+    wrapper = SandboxedToolWrapper(
+        _FakeGeneratingTool(workspace=workspace),
+        _make_sandbox(
+            {
+                "success": True,
+                "generated_files": ["report.docx"],
+                "file_refs": [
+                    {
+                        "file_id": SANDBOX_MINTED_FILE_ID,
+                        "filename": "report.docx",
+                        "file_path": guest_path,
+                    }
+                ],
+                "artifacts": [],
+            }
+        ),
+    )
+
+    result = asyncio.run(wrapper.run_json_async({}))
+
+    assert result["file_refs"][0]["file_id"] != SANDBOX_MINTED_FILE_ID
+
+
+def test_regenerated_output_is_re_registered(tmp_path, monkeypatch):
+    """A second run over the same path must re-stage, not reuse the old bytes."""
+    workspace = TaskWorkspace("test_sandbox_regenerate", str(tmp_path))
+    generated = workspace.output_dir / "report.docx"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+
+    registered: list[str] = []
+    original_register_file = TaskWorkspace.register_file
+
+    def _counting_register_file(self, file_path, *args, **kwargs):
+        registered.append(str(file_path))
+        return original_register_file(self, file_path, *args, **kwargs)
+
+    monkeypatch.setattr(TaskWorkspace, "register_file", _counting_register_file)
+
+    def _run(payload_bytes: bytes):
+        generated.write_bytes(payload_bytes)
+        wrapper = SandboxedToolWrapper(
+            _FakeGeneratingTool(workspace=workspace),
+            _make_sandbox(
+                {
+                    "success": True,
+                    "generated_files": ["report.docx"],
+                    "file_refs": [
+                        {
+                            "file_id": SANDBOX_MINTED_FILE_ID,
+                            "filename": "report.docx",
+                            "file_path": str(generated),
+                        }
+                    ],
+                    "artifacts": [],
+                }
+            ),
+        )
+        return asyncio.run(wrapper.run_json_async({}))
+
+    _run(b"PK\x03\x04 draft")
+    second = _run(b"PK\x03\x04 revised and longer")
+
+    assert len(registered) == 2
+    assert second["file_refs"][0]["size"] == generated.stat().st_size

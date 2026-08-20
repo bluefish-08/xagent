@@ -415,6 +415,33 @@ class SandboxedToolWrapper(AbstractBaseTool):
             )
             return result
 
+    @staticmethod
+    def _resolved_ref_key(ref: Mapping[str, Any]) -> str | None:
+        raw = ref.get("file_path")
+        if not raw:
+            return None
+        try:
+            return str(Path(str(raw)).resolve())
+        except OSError:
+            return None
+
+    @staticmethod
+    def _reregister_on_host(workspace: Any, paths: list[str]) -> dict[str, Any]:
+        """Re-stage sandbox outputs on the host, then describe them.
+
+        ``register_file`` is called explicitly: a regenerated file already
+        carries an id, and ``build_workspace_file_ref`` would short-circuit on
+        it and leave the previous generation's bytes as the served version.
+        """
+        for path in paths:
+            try:
+                workspace.register_file(path)
+            except Exception:
+                logger.warning(
+                    "Host-side re-registration failed for %s", path, exc_info=True
+                )
+        return build_generated_file_metadata(workspace=workspace, file_paths=paths)
+
     async def _register_sandbox_outputs(self, result: Any) -> Any:
         """Mint usable file_ids for sandbox-produced files.
 
@@ -438,23 +465,25 @@ class SandboxedToolWrapper(AbstractBaseTool):
         if not original_refs:
             return result
 
+        # Merge on resolved paths: a guest mount point deliberately keeps the
+        # unresolved spelling, while FileRefs carry the resolved one.
         paths = [
-            str(ref["file_path"])
-            for ref in original_refs
-            if ref.get("file_path") and Path(str(ref["file_path"])).is_file()
+            key
+            for key in (self._resolved_ref_key(ref) for ref in original_refs)
+            if key and Path(key).is_file()
         ]
         if not paths:
             return result
 
         rebuilt = await asyncio.to_thread(
-            build_generated_file_metadata,
-            workspace=workspace,
-            file_paths=paths,
+            self._reregister_on_host,
+            workspace,
+            paths,
         )
         rebuilt_by_path = {
-            str(ref["file_path"]): ref
+            key: ref
             for ref in rebuilt["file_refs"]
-            if ref.get("file_path")
+            if (key := self._resolved_ref_key(ref))
         }
         if not rebuilt_by_path:
             return result
@@ -462,7 +491,8 @@ class SandboxedToolWrapper(AbstractBaseTool):
         # Both sandboxed executors keep artifacts 1:1 with file_refs, so the
         # rebuild below is lossless for them and only for them.
         merged = [
-            rebuilt_by_path.get(str(ref.get("file_path")), ref) for ref in original_refs
+            rebuilt_by_path.get(self._resolved_ref_key(ref) or "", ref)
+            for ref in original_refs
         ]
         result["file_refs"] = merged
         result["artifacts"] = [build_inline_artifact(ref) for ref in merged]

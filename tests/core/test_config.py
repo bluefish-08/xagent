@@ -279,6 +279,11 @@ class TestEnvironmentVariableConstants:
         monkeypatch.setenv(SANDBOX_TOOL_RUNNER, "1")
         assert in_sandbox_tool_runner() is True
 
+    def test_in_sandbox_tool_runner_rejects_falsy_spellings(self, monkeypatch):
+        for value in ("0", "false", "no", "off", ""):
+            monkeypatch.setenv(SANDBOX_TOOL_RUNNER, value)
+            assert in_sandbox_tool_runner() is False
+
     def test_lancedb_path_constant(self):
         assert LANCEDB_PATH == "LANCEDB_PATH"
 

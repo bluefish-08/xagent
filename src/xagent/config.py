@@ -2612,7 +2612,7 @@ def in_sandbox_tool_runner() -> bool:
         True when running inside the sandbox, where no database or object
         storage credentials are available.
     """
-    return bool(os.getenv(SANDBOX_TOOL_RUNNER))
+    return _get_bool_env(SANDBOX_TOOL_RUNNER, False)
 
 
 def get_sandbox_host_storage_root() -> Path | None:
