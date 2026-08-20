@@ -386,6 +386,8 @@ class OpenAICompatibleLLM(BaseLLM):
                     # Only handle function tool calls, not custom tool calls
                     if hasattr(tool_call, "function"):
                         func = tool_call.function
+                        # Blank arguments pass through deliberately (#1501); the
+                        # repair contract lives in the pattern layer, not here.
                         args = func.arguments or ""
 
                         tool_calls.append(
@@ -705,6 +707,8 @@ class OpenAICompatibleLLM(BaseLLM):
                     # Only handle function tool calls, not custom tool calls
                     if hasattr(tool_call, "function"):
                         func = tool_call.function
+                        # Blank arguments pass through deliberately (#1501); the
+                        # repair contract lives in the pattern layer, not here.
                         args = func.arguments or ""
 
                         tool_calls.append(
@@ -1229,6 +1233,8 @@ class OpenAICompatibleLLM(BaseLLM):
             if accumulated_tool_calls:
                 tool_calls_list = list(accumulated_tool_calls.values())
 
+                # Blank accumulated arguments pass through deliberately (#1501);
+                # the repair contract lives in the pattern layer, not here.
                 return StreamChunk(
                     type=ChunkType.TOOL_CALL,
                     tool_calls=tool_calls_list,

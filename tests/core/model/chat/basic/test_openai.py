@@ -1230,9 +1230,9 @@ class TestOpenAILLM:
     ):
         """Providers send `""` for parameterless calls; patterns repair the rest.
 
-        Passed through rather than normalized to `"{}"`: the blank string is what
-        the patterns' retry paths key on. `None` coerces to `""`; whitespace-only
-        passes through unchanged.
+        Passed through rather than normalized to `"{}"`: the blank string is
+        what auto's and the DAG plan generator's retry paths key on. `None`
+        coerces to `""`; whitespace-only passes through unchanged.
         """
         llm = OpenAILLM(**openai_llm_config, abilities=["chat", "vision"])
         mock_tool_call_completion.choices[0].message.tool_calls[

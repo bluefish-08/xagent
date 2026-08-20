@@ -1625,7 +1625,7 @@ class ReActPattern(AgentPattern):
         if tool_name in self._control_tool_names():
             return {}
         if isinstance(payload, str) and not payload.strip():
-            # Nothing to preserve, and `input` is not a field a no-arg tool declares.
+            # Nothing to preserve, and `input` is not a field any work tool declares.
             return {}
         return {"input": payload}
 

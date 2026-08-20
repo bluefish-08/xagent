@@ -5925,15 +5925,11 @@ class NoArgTool:
         self.metadata = Metadata()
 
     def args_type(self) -> type[BaseModel]:
-        return _NoArgs
+        return EmptyArgs
 
     async def run_json_async(self, args: dict[str, Any]) -> Any:
         self.calls.append(args)
         return {"models": ["gpt-4o"]}
-
-
-class _NoArgs(BaseModel):
-    pass
 
 
 @pytest.mark.asyncio
@@ -5958,10 +5954,12 @@ async def test_react_runs_a_parameterless_tool_called_with_blank_arguments() -> 
 
 @pytest.mark.asyncio
 async def test_react_repairs_final_answer_called_with_blank_arguments() -> None:
-    """The #1501 production trace shape: streaming `final_answer` with `""`.
+    """Guards the `_empty_final_answer_call` repair retry, not `_fallback_arguments`.
 
-    `final_answer` is a control tool, so blank arguments short-circuit to the
-    `_empty_final_answer_call` guard, which spends the one repair retry.
+    `final_answer` is a control tool, so blank arguments are dropped by the
+    control-tool branch and never reach the blank-string branch this PR adds.
+    What is pinned here is that the resulting empty args still spend the one
+    repair retry instead of finalizing the run.
     """
 
     llm = StreamingEmptyFinalAnswerLLM(broken_arguments="")
