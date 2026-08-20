@@ -48,6 +48,11 @@ WRITE_FILE_TOOL = _tool_schema(
         "content": {"type": "string"},
     },
 )
+LIST_IMAGE_MODELS_TOOL = _tool_schema(
+    "list_image_models",
+    {},
+    additional_properties=False,
+)
 
 
 def test_deepseek_codec_rejects_serialized_tool_call_content() -> None:
@@ -205,6 +210,28 @@ def test_deepseek_codec_keeps_valid_tool_call() -> None:
     }
 
     assert normalize_deepseek_response(response, tools=[WRITE_FILE_TOOL]) is response
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n"])
+def test_deepseek_codec_keeps_blank_arguments_for_parameterless_tool(
+    blank: str,
+) -> None:
+    response = {
+        "type": "tool_call",
+        "tool_calls": [
+            {
+                "id": "call_list",
+                "type": "function",
+                "function": {"name": "list_image_models", "arguments": blank},
+            }
+        ],
+    }
+
+    assert (
+        normalize_deepseek_response(response, tools=[LIST_IMAGE_MODELS_TOOL])
+        is response
+    )
+    assert response["tool_calls"][0]["function"]["arguments"] == blank
 
 
 def test_deepseek_codec_repairs_complete_malformed_tool_arguments() -> None:

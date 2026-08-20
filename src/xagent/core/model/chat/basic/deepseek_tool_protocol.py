@@ -242,6 +242,8 @@ def _tool_call_violation(
         )
 
     arguments = function.get("arguments", {})
+    if isinstance(arguments, str) and not arguments.strip():
+        arguments = {}
     argument_details: dict[str, Any] | None = None
     if isinstance(arguments, str):
         original_arguments = arguments
