@@ -34,30 +34,6 @@ from .file_tool import (
 logger = logging.getLogger(__name__)
 
 
-# Text written into these containers yields a file that opens as garbage; only
-# the matching library can build them.
-BINARY_DOCUMENT_SUFFIXES = {
-    ".docx",
-    ".doc",
-    ".pptx",
-    ".ppt",
-    ".xlsx",
-    ".xls",
-    ".pdf",
-}
-
-
-def _reject_binary_document_write(file_path: str | Path) -> None:
-    suffix = Path(file_path).suffix.lower()
-    if suffix in BINARY_DOCUMENT_SUFFIXES:
-        raise ValueError(
-            f"Cannot write text into a {suffix} file: it is a binary container. "
-            "Generate it with the matching library (python-docx / python-pptx / "
-            "openpyxl / reportlab) inside execute_python_code, saving straight "
-            "to the workspace output directory; never re-write it as text here."
-        )
-
-
 def is_document_file(file_path: str) -> bool:
     """Check if file is a document format that requires special parsing."""
     document_extensions = {".pdf", ".docx", ".xlsx", ".xls", ".csv", ".md"}
@@ -373,7 +349,6 @@ class WorkspaceFileOperations:
         )
 
         resolved_path = self._resolve_path(file_path, "output")
-        self._guard_write_target(file_path, resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         if create_dirs:
@@ -401,19 +376,6 @@ class WorkspaceFileOperations:
             **file_ref,
             "file_ref": file_ref,
         }
-
-    def _guard_write_target(self, file_path: str, resolved_path: Path) -> None:
-        """Reject binary-container writes, including through a file_id."""
-        _reject_binary_document_write(resolved_path)
-        if Path(str(file_path)).suffix:
-            return
-        # A file_id carries no suffix of its own, so check what it resolves to.
-        try:
-            registered = self.workspace.resolve_file_id(str(file_path).strip())
-        except Exception:
-            return
-        if registered is not None:
-            _reject_binary_document_write(registered)
 
     def _registered_write_result(self, file_path: Path) -> Dict[str, Any]:
         file_ref = build_workspace_file_ref(
@@ -522,7 +484,6 @@ class WorkspaceFileOperations:
     ) -> bool:
         """Append content to file in workspace"""
         resolved_path = self._resolve_path_with_search(file_path)
-        _reject_binary_document_write(resolved_path)
 
         if create_dirs:
             resolved_path.parent.mkdir(parents=True, exist_ok=True)
@@ -657,7 +618,6 @@ class WorkspaceFileOperations:
         from .file_tool import write_json_file as basic_write_json_file
 
         resolved_path = self._resolve_path(file_path, "output")
-        self._guard_write_target(file_path, resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         with self.workspace.auto_register_files():
@@ -700,7 +660,6 @@ class WorkspaceFileOperations:
         from .file_tool import write_csv_file as basic_write_csv_file
 
         resolved_path = self._resolve_path(file_path, "output")
-        self._guard_write_target(file_path, resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
         with self.workspace.auto_register_files():
@@ -798,7 +757,6 @@ class WorkspaceFileOperations:
 
         # Resolve the file path within the workspace
         resolved_path = self._resolve_path_with_search(file_path)
-        _reject_binary_document_write(resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         # Convert to string path for the basic edit_file function
@@ -833,7 +791,6 @@ class WorkspaceFileOperations:
 
         # Resolve the file path within the workspace
         resolved_path = self._resolve_path_with_search(file_path)
-        _reject_binary_document_write(resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         # Convert to string path for the basic find_and_replace function
