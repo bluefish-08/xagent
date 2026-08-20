@@ -11,8 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from sqlalchemy.orm import Session
+
 from xagent.web.jobs import trigger_tasks
-from xagent.web.models.background_job import BackgroundJob, BackgroundJobType
+from xagent.web.models.background_job import (
+    BackgroundJob,
+    BackgroundJobRef,
+    BackgroundJobType,
+)
 from xagent.web.models.database import get_session_local, init_db
 from xagent.web.models.user import User
 from xagent.web.services.workforce_runtime import WorkforceRunPauseTarget
@@ -21,6 +27,16 @@ from xagent.web.services.workforce_runtime import WorkforceRunPauseTarget
 def _init_test_db(path: Path):
     init_db(f"sqlite:///{path}")
     return get_session_local()
+
+
+def _job_ref(job) -> BackgroundJobRef:
+    return BackgroundJobRef(
+        id=str(job.id),
+        job_type=str(job.job_type),
+        payload=dict(job.payload or {}),
+        attempts=int(job.attempts or 0),
+        max_attempts=int(job.max_attempts or 1),
+    )
 
 
 def _create_user(db, username: str = "trigger-scan-test") -> User:
@@ -63,9 +79,10 @@ def test_handle_trigger_scan_reaps_stale_preview_workforce_runs(
     db.commit()
     db.refresh(job)
 
-    result = trigger_tasks.handle_trigger_scan(db, job)
+    result = trigger_tasks.handle_trigger_scan(_job_ref(job))
 
-    reap_mock.assert_called_once_with(db)
+    reap_mock.assert_called_once()
+    assert isinstance(reap_mock.call_args[0][0], Session)
     assert dispatch_calls == [([pause_target], "preview-reap")]
     assert result["reaped_preview_run_pause_dispatches"] == 1
 
@@ -96,8 +113,9 @@ def test_handle_trigger_scan_skips_dispatch_when_nothing_reaped(
     db.commit()
     db.refresh(job)
 
-    result = trigger_tasks.handle_trigger_scan(db, job)
+    result = trigger_tasks.handle_trigger_scan(_job_ref(job))
 
-    reap_mock.assert_called_once_with(db)
+    reap_mock.assert_called_once()
+    assert isinstance(reap_mock.call_args[0][0], Session)
     dispatch_mock.assert_not_called()
     assert result["reaped_preview_run_pause_dispatches"] == 0

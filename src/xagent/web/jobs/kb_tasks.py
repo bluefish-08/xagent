@@ -28,8 +28,8 @@ from ...core.tools.core.RAG_tools.pipelines.web_ingestion import (
 )
 from ...core.tools.core.RAG_tools.utils.user_scope import user_scope_context
 from ..config import get_upload_path
-from ..models.background_job import BackgroundJob
-from ..models.database import get_session_local
+from ..models.background_job import BackgroundJobRef
+from ..models.database import get_session_local, session_scope
 from ..models.uploaded_file import UploadedFile
 from ..models.user import User
 from ..services.background_jobs import update_job_progress
@@ -190,21 +190,23 @@ def _cleanup_failed_job_collection_metadata_after_api_ingest(
     )
 
 
-def handle_kb_ingest_document(db: Session, job: BackgroundJob) -> dict[str, Any]:
-    payload = dict(job.payload or {})
+def handle_kb_ingest_document(ref: BackgroundJobRef) -> dict[str, Any]:
+    payload = dict(ref.payload)
     ingestion_config = IngestionConfig.model_validate(payload["ingestion_config"])
     file_id = payload.get("file_id")
     target_path = payload.get("target_path")
     is_staged_input = bool(target_path)
-    progress_manager = BackgroundJobProgressManager(db, job)
+    progress_manager = BackgroundJobProgressManager(ref.id)
 
-    update_job_progress(db, job, message="Ingesting document")
-    if is_staged_input and not _is_staged_document_generation_latest(db, payload):
-        update_job_progress(db, job, message="Superseded by newer upload")
+    update_job_progress(ref.id, message="Ingesting document")
+    if is_staged_input and not _staged_generation_is_latest(payload):
+        update_job_progress(ref.id, message="Superseded by newer upload")
         return _superseded_staged_document_result(payload)
 
     def _assert_latest_generation() -> None:
-        if is_staged_input and not _is_staged_document_generation_latest(db, payload):
+        # Called from inside the ingestion body, which runs for as long as the
+        # document takes: it must not close over a session.
+        if is_staged_input and not _staged_generation_is_latest(payload):
             raise StagedDocumentIngestSuperseded(_SUPERSEDED_STAGED_INGEST_MESSAGE)
 
     try:
@@ -229,140 +231,155 @@ def handle_kb_ingest_document(db: Session, job: BackgroundJob) -> dict[str, Any]
             )
             result = api_result.result
     except StagedDocumentIngestSuperseded:
-        _cleanup_failed_staged_job_collection_metadata_if_current(
-            db,
-            payload,
-            context="background staged document superseded exception",
-        )
-        return _superseded_staged_document_result(payload)
-    except Exception:
-        if is_staged_input:
-            if int(job.attempts or 0) >= int(job.max_attempts or 1):
-                _cleanup_staged_document_input(payload)
+        with session_scope() as db:
             _cleanup_failed_staged_job_collection_metadata_if_current(
                 db,
                 payload,
-                context="background staged document ingest exception",
+                context="background staged document superseded exception",
             )
-        else:
-            _cleanup_failed_job_collection_metadata(
-                db,
-                payload,
-                context="background document ingest exception",
-            )
+        return _superseded_staged_document_result(payload)
+    except Exception:
+        with session_scope() as db:
+            if is_staged_input:
+                if ref.attempts >= ref.max_attempts:
+                    _cleanup_staged_document_input(payload)
+                _cleanup_failed_staged_job_collection_metadata_if_current(
+                    db,
+                    payload,
+                    context="background staged document ingest exception",
+                )
+            else:
+                _cleanup_failed_job_collection_metadata(
+                    db,
+                    payload,
+                    context="background document ingest exception",
+                )
         raise
 
     result_payload = result.model_dump(mode="json")
     if file_id:
         result_payload["file_id"] = file_id
-    if result.status in {"error", "partial"}:
-        if is_staged_input:
-            if _is_superseded_ingestion_result(result):
-                _cleanup_failed_staged_job_collection_metadata_if_current(
+
+    # Everything below is bookkeeping on a settled ingestion: no long waits, so
+    # one scope covers it.
+    with session_scope() as db:
+        if result.status in {"error", "partial"}:
+            if is_staged_input:
+                if _is_superseded_ingestion_result(result):
+                    _cleanup_failed_staged_job_collection_metadata_if_current(
+                        db,
+                        payload,
+                        context="background staged document superseded result",
+                    )
+                    return _superseded_staged_document_result(payload)
+                rollback_api_result = (
+                    _rollback_failed_staged_document_ingestion_if_current(
+                        db,
+                        payload,
+                        result,
+                        api_result=api_result,
+                    )
+                )
+                if rollback_api_result is False:
+                    _cleanup_failed_staged_job_collection_metadata_if_current(
+                        db,
+                        payload,
+                        context="background stale staged document ingest",
+                    )
+                    return _superseded_staged_document_result(payload)
+                api_result = rollback_api_result
+                _cleanup_failed_job_collection_metadata_after_api_ingest(
                     db,
                     payload,
-                    context="background staged document superseded result",
+                    api_result=api_result,
+                    context="background staged document ingest",
                 )
-                return _superseded_staged_document_result(payload)
-            rollback_api_result = _rollback_failed_staged_document_ingestion_if_current(
-                db,
-                payload,
-                result,
-                api_result=api_result,
-            )
-            if rollback_api_result is False:
-                _cleanup_failed_staged_job_collection_metadata_if_current(
+            else:
+                api_result = _rollback_failed_document_ingestion(
                     db,
                     payload,
-                    context="background stale staged document ingest",
+                    result,
+                    api_result=api_result,
                 )
-                return _superseded_staged_document_result(payload)
-            api_result = rollback_api_result
-            _cleanup_failed_job_collection_metadata_after_api_ingest(
-                db,
-                payload,
-                api_result=api_result,
-                context="background staged document ingest",
-            )
-        else:
-            api_result = _rollback_failed_document_ingestion(
-                db,
-                payload,
-                result,
-                api_result=api_result,
-            )
-            _cleanup_failed_job_collection_metadata_after_api_ingest(
-                db,
-                payload,
-                api_result=api_result,
-                context="background document ingest",
-            )
-        raise BackgroundJobHandlerError(
-            result.message,
-            result=result_payload,
-            retryable=False,
-        )
-    if is_staged_input:
-        if not _is_staged_document_generation_latest(db, payload):
-            _cleanup_failed_staged_job_collection_metadata_if_current(
-                db,
-                payload,
-                context="background stale staged document publish",
-            )
-            return _superseded_staged_document_result(payload)
-        try:
-            file_record = _publish_staged_document_ingestion(db, payload)
-            result_payload["file_id"] = str(file_record.file_id)
-        except StagedDocumentIngestSuperseded:
-            _cleanup_failed_staged_job_collection_metadata_if_current(
-                db,
-                payload,
-                context="background staged document publish superseded",
-            )
-            return _superseded_staged_document_result(payload)
-        except Exception as exc:  # noqa: BLE001
-            rollback_api_result = _rollback_failed_staged_document_ingestion_if_current(
-                db,
-                payload,
-                result,
-                api_result=api_result,
-            )
-            if rollback_api_result is False:
-                _cleanup_failed_staged_job_collection_metadata_if_current(
+                _cleanup_failed_job_collection_metadata_after_api_ingest(
                     db,
                     payload,
-                    context="background stale staged document publish rollback",
+                    api_result=api_result,
+                    context="background document ingest",
                 )
-                return _superseded_staged_document_result(payload)
-            api_result = rollback_api_result
-            _cleanup_failed_job_collection_metadata_after_api_ingest(
-                db,
-                payload,
-                api_result=api_result,
-                context="background staged document publish",
-                successful_documents=0,
-            )
             raise BackgroundJobHandlerError(
-                f"Document ingestion succeeded but publishing uploaded file failed: {exc}",
+                result.message,
                 result=result_payload,
                 retryable=False,
-            ) from exc
-    else:
-        _discard_ingest_backup(payload)
-    # Reaching here means exactly one document landed, so publish the config.
-    _save_job_collection_config_after_ingest(
-        db,
-        payload,
-        ingestion_config,
-        context="background document ingest",
-        documents_created=result.produced_documents,
-        result_payload=result_payload,
-    )
+            )
+        if is_staged_input:
+            if not _is_staged_document_generation_latest(db, payload):
+                _cleanup_failed_staged_job_collection_metadata_if_current(
+                    db,
+                    payload,
+                    context="background stale staged document publish",
+                )
+                return _superseded_staged_document_result(payload)
+            try:
+                file_record = _publish_staged_document_ingestion(db, payload)
+                result_payload["file_id"] = str(file_record.file_id)
+            except StagedDocumentIngestSuperseded:
+                _cleanup_failed_staged_job_collection_metadata_if_current(
+                    db,
+                    payload,
+                    context="background staged document publish superseded",
+                )
+                return _superseded_staged_document_result(payload)
+            except Exception as exc:  # noqa: BLE001
+                rollback_api_result = (
+                    _rollback_failed_staged_document_ingestion_if_current(
+                        db,
+                        payload,
+                        result,
+                        api_result=api_result,
+                    )
+                )
+                if rollback_api_result is False:
+                    _cleanup_failed_staged_job_collection_metadata_if_current(
+                        db,
+                        payload,
+                        context="background stale staged document publish rollback",
+                    )
+                    return _superseded_staged_document_result(payload)
+                api_result = rollback_api_result
+                _cleanup_failed_job_collection_metadata_after_api_ingest(
+                    db,
+                    payload,
+                    api_result=api_result,
+                    context="background staged document publish",
+                    successful_documents=0,
+                )
+                raise BackgroundJobHandlerError(
+                    f"Document ingestion succeeded but publishing uploaded file failed: {exc}",
+                    result=result_payload,
+                    retryable=False,
+                ) from exc
+        else:
+            _discard_ingest_backup(payload)
+        # Reaching here means exactly one document landed, so publish the config.
+        _save_job_collection_config_after_ingest(
+            db,
+            payload,
+            ingestion_config,
+            context="background document ingest",
+            documents_created=result.produced_documents,
+            result_payload=result_payload,
+        )
     return result_payload
 
 
-def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
-    payload = dict(job.payload or {})
+def _staged_generation_is_latest(payload: dict[str, Any]) -> bool:
+    with session_scope() as db:
+        return _is_staged_document_generation_latest(db, payload)
+
+
+def handle_kb_ingest_web(ref: BackgroundJobRef) -> dict[str, Any]:
+    payload = dict(ref.payload)
     crawl_config = WebCrawlConfig.model_validate(payload["crawl_config"])
     ingestion_config = IngestionConfig.model_validate(payload["ingestion_config"])
     user_id = int(payload["user_id"])
@@ -372,8 +389,7 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
 
     def _progress(message: str, completed: int, total: int) -> None:
         update_job_progress(
-            db,
-            job,
+            ref.id,
             message=message,
             completed=completed,
             total=total,
@@ -402,7 +418,7 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
         finally:
             db_session.close()
 
-    update_job_progress(db, job, message="Crawling website")
+    update_job_progress(ref.id, message="Crawling website")
     try:
         with user_scope_context(user_id=user_id, is_admin=is_admin):
             api_result = asyncio.run(
@@ -422,7 +438,8 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
             )
             result = api_result.result
     except Exception:
-        _cleanup_failed_web_collection_metadata_if_new(db, payload)
+        with session_scope() as db:
+            _cleanup_failed_web_collection_metadata_if_new(db, payload)
         raise
 
     from ..api.kb import _demote_empty_crawl_to_error
@@ -436,22 +453,23 @@ def handle_kb_ingest_web(db: Session, job: BackgroundJob) -> dict[str, Any]:
     crawled_nothing = result.status != crawl_status
     documents_created = int(result.documents_created or 0)
     result_payload = result.model_dump(mode="json")
-    # Partial crawls still leave real documents behind, so publish on any of them.
-    _save_job_collection_config_after_ingest(
-        db,
-        payload,
-        ingestion_config,
-        context="background web ingest",
-        documents_created=documents_created,
-        result_payload=result_payload,
-    )
-    if result.status in {"error", "partial"}:
-        _cleanup_failed_web_collection_metadata_if_new(
+    with session_scope() as db:
+        # Partial crawls still leave real documents behind, so publish on any of them.
+        _save_job_collection_config_after_ingest(
             db,
             payload,
-            api_result=api_result,
-            successful_documents=documents_created,
+            ingestion_config,
+            context="background web ingest",
+            documents_created=documents_created,
+            result_payload=result_payload,
         )
+        if result.status in {"error", "partial"}:
+            _cleanup_failed_web_collection_metadata_if_new(
+                db,
+                payload,
+                api_result=api_result,
+                successful_documents=documents_created,
+            )
     if result.status == "error":
         # A crawl that recorded no failures has nothing to retry: re-running it
         # re-crawls the whole site to reach the same empty result.

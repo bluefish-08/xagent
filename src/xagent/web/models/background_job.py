@@ -1,5 +1,6 @@
 import enum
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text
@@ -23,6 +24,22 @@ class BackgroundJobType(str, enum.Enum):
     KB_INGEST_WEB = "kb.ingest.web"
     TRIGGER_EVENT = "trigger.event"
     TRIGGER_SCAN = "trigger.scan"
+
+
+@dataclass(frozen=True)
+class BackgroundJobRef:
+    """Immutable snapshot of a job row, read once before the work starts.
+
+    Handlers receive values rather than an ORM instance so that no session
+    outlives a single operation: work that runs for hours must not hold a
+    transaction open across its idle gaps.
+    """
+
+    id: str
+    job_type: str
+    payload: dict[str, Any]
+    attempts: int
+    max_attempts: int
 
 
 class BackgroundJob(Base):  # type: ignore

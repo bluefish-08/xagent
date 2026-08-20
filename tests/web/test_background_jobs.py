@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import text
 
 from xagent.config import CELERY_BROKER_URL, CELERY_ENABLED
 from xagent.core.tools.core.RAG_tools.core.schemas import (
@@ -18,6 +19,7 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
 )
 from xagent.web.models.background_job import (
     BackgroundJob,
+    BackgroundJobRef,
     BackgroundJobStatus,
     BackgroundJobType,
 )
@@ -56,6 +58,17 @@ def _age_job(db, job, *, updated_at=None, started_at=None) -> None:
     )
     db.commit()
     db.expire_all()
+
+
+def _job_ref(job) -> BackgroundJobRef:
+    """Snapshot a persisted job row the way execute_background_job does."""
+    return BackgroundJobRef(
+        id=str(job.id),
+        job_type=str(job.job_type),
+        payload=dict(job.payload or {}),
+        attempts=int(job.attempts or 0),
+        max_attempts=int(job.max_attempts or 1),
+    )
 
 
 def _create_user(db, username: str = "background-job-test") -> User:
@@ -388,7 +401,7 @@ def test_kb_document_job_reads_staged_file_and_publishes_canonical(
             fake_run_document_ingestion,
         )
 
-        result = handle_kb_ingest_document(db, job)
+        result = handle_kb_ingest_document(_job_ref(job))
 
         assert captured["source_path"] == str(staged_file)
         assert captured["metadata_source_path"] == str(target_file)
@@ -499,7 +512,7 @@ def test_kb_document_job_full_worker_path_new_target_end_to_end(tmp_path, monkey
             },
         )
 
-        result = handle_kb_ingest_document(db, job)
+        result = handle_kb_ingest_document(_job_ref(job))
 
         # Ingestion succeeded end-to-end on the real pipeline.
         assert result["status"] == "success"
@@ -625,8 +638,8 @@ def test_kb_document_job_supersedes_older_generation_for_same_target(
             fake_run_document_ingestion,
         )
 
-        result_b = handle_kb_ingest_document(db, job_b)
-        result_a = handle_kb_ingest_document(db, job_a)
+        result_b = handle_kb_ingest_document(_job_ref(job_b))
+        result_a = handle_kb_ingest_document(_job_ref(job_a))
 
         assert result_b["file_id"] == file_id
         assert result_a["status"] == "superseded"
@@ -752,7 +765,7 @@ def test_kb_document_job_skips_canonical_rollback_when_generation_turns_stale(
             fail_rollback,
         )
 
-        result = handle_kb_ingest_document(db, job)
+        result = handle_kb_ingest_document(_job_ref(job))
 
         assert result["status"] == "superseded"
         assert result["published"] is False
@@ -828,7 +841,7 @@ def test_kb_document_job_existing_collection_failure_keeps_previous_config(
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_document(db, job)
+            handle_kb_ingest_document(_job_ref(job))
 
         metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
@@ -894,7 +907,7 @@ def test_kb_document_job_exception_keeps_previous_config_before_retry(
         )
 
         with pytest.raises(RuntimeError, match="transient failure"):
-            handle_kb_ingest_document(db, job)
+            handle_kb_ingest_document(_job_ref(job))
 
         assert staged_file.exists()
         metadata_store.save_collection_config.assert_not_awaited()
@@ -937,8 +950,7 @@ def test_background_job_progress_manager_mirrors_rag_progress(tmp_path, monkeypa
         )
 
         manager = BackgroundJobProgressManager(
-            db,
-            job,
+            str(job.id),
             delegate=Delegate(),
             throttle_seconds=0,
         )
@@ -1035,7 +1047,7 @@ def test_kb_web_job_cleans_new_collection_metadata_on_ingest_error(
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_web(db, job)
+            handle_kb_ingest_web(_job_ref(job))
 
         assert cleaned == [("web-kb", int(user.id))]
     finally:
@@ -1108,7 +1120,7 @@ def test_kb_web_job_keeps_new_collection_metadata_when_error_has_successful_docs
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_web(db, job)
+            handle_kb_ingest_web(_job_ref(job))
 
         assert cleaned == []
     finally:
@@ -1182,7 +1194,7 @@ def test_kb_web_job_keeps_new_collection_metadata_when_side_effects_may_remain(
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_web(db, job)
+            handle_kb_ingest_web(_job_ref(job))
 
         assert cleaned == []
     finally:
@@ -1253,7 +1265,7 @@ def test_kb_web_job_existing_collection_failure_keeps_previous_config(
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_web(db, job)
+            handle_kb_ingest_web(_job_ref(job))
 
         metadata_store.save_collection_config.assert_not_awaited()
         metadata_store.delete_collection_metadata.assert_not_awaited()
@@ -1321,7 +1333,7 @@ def test_kb_web_job_partial_publishes_new_config(tmp_path, monkeypatch):
             fake_run_web_ingestion,
         )
 
-        result = handle_kb_ingest_web(db, job)
+        result = handle_kb_ingest_web(_job_ref(job))
 
         assert result["status"] == "partial"
         saved = metadata_store.save_collection_config.await_args_list
@@ -1397,7 +1409,7 @@ def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
         with pytest.raises(
             BackgroundJobHandlerError, match="No pages were ingested"
         ) as excinfo:
-            handle_kb_ingest_web(db, job)
+            handle_kb_ingest_web(_job_ref(job))
 
         # Retrying re-crawls the whole site to reach the same empty result.
         assert excinfo.value.retryable is False
@@ -1604,14 +1616,13 @@ def test_registered_external_handler_receives_job(tmp_path):
 
         calls: list[str] = []
 
-        def handler(session, received):
-            assert session is db
+        def handler(received):
             calls.append(str(received.id))
             return {"status": "ok"}
 
         tasks_module.register_background_job_handler("kb.team.transfer", handler)
         try:
-            result = tasks_module._execute_job_handler(db, job)
+            result = tasks_module._execute_job_handler(_job_ref(job))
         finally:
             tasks_module._EXTRA_HANDLERS.pop("kb.team.transfer", None)
 
@@ -1635,7 +1646,7 @@ def test_jobs_package_exports_handler_registration_api():
 
     assert is_background_job_handler_registered("kb.team.transfer") is False
 
-    def handler(_session, _job):
+    def handler(_ref):
         return {"status": "ok"}
 
     register_background_job_handler("kb.team.transfer", handler)
@@ -1700,7 +1711,7 @@ def test_register_background_job_handler_rejects_builtin_job_type(replace):
     """
     from xagent.web.jobs import tasks as tasks_module
 
-    def handler(_session, _job):
+    def handler(_ref):
         return {"status": "shadowed"}
 
     for builtin in BackgroundJobType:
@@ -1731,7 +1742,7 @@ def test_unregistered_job_type_still_raises(tmp_path):
         with pytest.raises(
             BackgroundJobHandlerError, match="Unsupported background job type"
         ) as excinfo:
-            tasks_module._execute_job_handler(db, job)
+            tasks_module._execute_job_handler(_job_ref(job))
         # Typed as a handler error so execute_background_job classifies it as
         # permanent rather than falling through to the generic retry branch.
         assert excinfo.value.retryable is False
@@ -1830,7 +1841,7 @@ def test_registered_handler_retryable_error_flows_through_execute_background_job
 
     handler_calls: list[str] = []
 
-    def flaky_handler(session, received):
+    def flaky_handler(received):
         handler_calls.append(str(received.id))
         raise BackgroundJobHandlerError("transient downstream failure", retryable=True)
 
@@ -1948,7 +1959,7 @@ def test_kb_document_job_failed_new_collection_publishes_nothing_end_to_end(
         )
 
         with pytest.raises(BackgroundJobHandlerError):
-            handle_kb_ingest_document(db, job)
+            handle_kb_ingest_document(_job_ref(job))
 
         store = get_metadata_store()
         assert (
@@ -2040,7 +2051,7 @@ def test_kb_document_job_publishes_the_config_end_to_end(tmp_path, monkeypatch):
             },
         )
 
-        result = handle_kb_ingest_document(db, job)
+        result = handle_kb_ingest_document(_job_ref(job))
 
         assert result["status"] == "success"
         saved_config = asyncio.run(
@@ -2054,5 +2065,319 @@ def test_kb_document_job_publishes_the_config_end_to_end(tmp_path, monkeypatch):
         # have to be in it once the documents landed.
         assert saved_config is not None
         assert '"chunk_size":1234' in saved_config
+    finally:
+        db.close()
+
+
+def _track_open_transactions(engine) -> dict[str, int]:
+    """Count transactions the engine has begun but not yet ended.
+
+    This is the observable form of "idle in transaction": a session that
+    commits and then re-reads leaves a transaction open with no statement
+    running, and Postgres eventually terminates that connection.
+    """
+    from sqlalchemy import event
+
+    state = {"open": 0, "peak": 0}
+
+    @event.listens_for(engine, "begin")
+    def _begin(conn):  # noqa: ANN001, ANN202
+        state["open"] += 1
+        state["peak"] = max(state["peak"], state["open"])
+
+    @event.listens_for(engine, "commit")
+    def _commit(conn):  # noqa: ANN001, ANN202
+        state["open"] = max(0, state["open"] - 1)
+
+    @event.listens_for(engine, "rollback")
+    def _rollback(conn):  # noqa: ANN001, ANN202
+        state["open"] = max(0, state["open"] - 1)
+
+    return state
+
+
+def test_job_handler_runs_with_no_open_transaction(tmp_path, monkeypatch):
+    """No DB transaction may span the handler body.
+
+    A web ingestion runs for hours between progress updates. Any transaction
+    left open across that gap is killed by the server's
+    idle_in_transaction_session_timeout, after which even the bookkeeping that
+    would record the failure cannot run.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+    from xagent.web.models.database import get_engine
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-no-open-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "no-open-txn")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.no_open_txn",
+            payload={"collection": "kb1"},
+        )
+        db.commit()
+
+        observed: list[int] = []
+        tracker = _track_open_transactions(get_engine())
+
+        def handler(ref):  # noqa: ANN001, ANN202
+            observed.append(tracker["open"])
+            return {"status": "ok"}
+
+        job_id = str(job.id)
+        # Release the test session's own connection first: enqueue_background_job
+        # runs in the request process, not the worker, and its commit/refresh
+        # would otherwise show up as this worker's open transaction.
+        db.rollback()
+
+        tasks_module.register_background_job_handler("kb.team.no_open_txn", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id]).get()
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.no_open_txn", None)
+
+        assert observed == [0], (
+            f"a transaction was open while the handler ran: {observed}"
+        )
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_job_progress_updates_leave_no_open_transaction(tmp_path, monkeypatch):
+    """Progress updates must not re-open a transaction after committing."""
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+    from xagent.web.models.database import get_engine
+    from xagent.web.services.background_jobs import update_job_progress
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-progress-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "progress-txn")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.progress_txn",
+            payload={"collection": "kb1"},
+        )
+        db.commit()
+
+        after_each_update: list[int] = []
+        seen_messages: list[str] = []
+        tracker = _track_open_transactions(get_engine())
+
+        def handler(ref):  # noqa: ANN001, ANN202
+            for i in range(3):
+                update_job_progress(ref.id, message=f"page {i}", completed=i, total=3)
+                after_each_update.append(tracker["open"])
+                # Each short session must have committed: a reader that opens
+                # afterwards has to see the write.
+                probe = SessionLocal()
+                try:
+                    row = (
+                        probe.query(BackgroundJob)
+                        .filter(BackgroundJob.id == ref.id)
+                        .first()
+                    )
+                    seen_messages.append(str(row.progress.get("message")))
+                finally:
+                    probe.close()
+            return {"status": "ok"}
+
+        job_id = str(job.id)
+        db.rollback()
+
+        tasks_module.register_background_job_handler("kb.team.progress_txn", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id]).get()
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.progress_txn", None)
+
+        assert after_each_update == [0, 0, 0], (
+            f"progress updates left a transaction open: {after_each_update}"
+        )
+        assert seen_messages == ["page 0", "page 1", "page 2"]
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_failure_is_recorded_even_when_handler_poisons_its_own_session(
+    tmp_path, monkeypatch
+):
+    """Terminal bookkeeping must not share a session with the failed work.
+
+    The original defect was second-order: the work session died, and the
+    exception handler then tried to record the failure on that same dead
+    session, so the row stayed `running` with no error and max_attempts never
+    applied.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+    from xagent.web.models.database import session_scope
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-poisoned.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "poisoned-session")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.poisoned",
+            payload={"collection": "kb1"},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        def handler(ref):  # noqa: ANN001, ANN202
+            # Kill the connection under the session doing the work, exactly as a
+            # server-side disconnect does, then fail out of it.
+            with session_scope() as work:
+                work.execute(text("SELECT 1"))
+                work.connection().invalidate()
+                raise RuntimeError("ingestion died mid-run")
+
+        tasks_module.register_background_job_handler("kb.team.poisoned", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.poisoned", None)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert "ingestion died mid-run" in str(row.error_message)
+        assert row.finished_at is not None
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_repeated_failures_stop_at_max_attempts(tmp_path, monkeypatch):
+    """A job that keeps failing must reach a terminal state, not loop forever.
+
+    Reaching FAILED is what takes the job out of requeue_stale_background_jobs'
+    reach; a row stuck at `running` is picked up again on every scan.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-max-attempts.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "max-attempts")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.always_fails",
+            payload={"collection": "kb1"},
+            max_attempts=2,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        calls: list[str] = []
+
+        def handler(ref):  # noqa: ANN001, ANN202
+            calls.append(ref.id)
+            raise RuntimeError("permanent boom")
+
+        tasks_module.register_background_job_handler("kb.team.always_fails", handler)
+        try:
+            for _ in range(5):
+                db.expire_all()
+                current = (
+                    db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+                )
+                if current.status in {
+                    BackgroundJobStatus.FAILED.value,
+                    BackgroundJobStatus.SUCCEEDED.value,
+                }:
+                    break
+                db.rollback()
+                tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.always_fails", None)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert int(row.attempts) == 2, f"attempts overran max_attempts: {row.attempts}"
+        assert len(calls) == 2
+
+        # A terminal row is no longer stale-requeue material.
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=0)
+        assert job_id not in {str(j.id) for j in requeued}
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_progress_update_failure_does_not_propagate(tmp_path):
+    """Progress is telemetry: a failed write must not fail the caller.
+
+    The web ingestion path calls this from inside per-page processing, before
+    the page's own try block, so a raised exception here failed the page.
+    """
+    from xagent.web.services.background_jobs import update_job_progress
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-progress-best-effort.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "progress-best-effort")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.progress_best_effort",
+            payload={},
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        # A job row that no longer exists is the cheap stand-in for any write
+        # failure: the call must return normally either way.
+        update_job_progress("does-not-exist", message="gone")
+
+        # And the real row still updates.
+        update_job_progress(job_id, message="page 1", completed=1, total=2)
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.progress["message"] == "page 1"
     finally:
         db.close()

@@ -6,10 +6,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy.orm import Session
-
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
 from ..models.background_job import BackgroundJob
+from ..models.database import session_scope
 from ..services.background_jobs import update_job_progress
 
 logger = logging.getLogger(__name__)
@@ -49,14 +48,12 @@ class BackgroundJobProgressManager:
 
     def __init__(
         self,
-        db: Session,
-        job: BackgroundJob,
+        job_id: str,
         *,
         delegate: Any | None = None,
         throttle_seconds: float = 0.5,
     ) -> None:
-        self.db = db
-        self.job = job
+        self.job_id = job_id
         self.delegate = delegate if delegate is not None else get_progress_manager()
         self.throttle_seconds = throttle_seconds
         self._last_mirror_at = 0.0
@@ -170,9 +167,7 @@ class BackgroundJobProgressManager:
             extra["overall_progress"] = overall_progress
         if metadata is not None:
             existing_metadata = {}
-            current_progress: dict[str, Any] = {}
-            if isinstance(self.job.progress, dict):
-                current_progress = self.job.progress
+            current_progress = self._current_progress()
             raw_existing_metadata = current_progress.get("metadata")
             if isinstance(raw_existing_metadata, dict):
                 existing_metadata = dict(raw_existing_metadata)
@@ -186,19 +181,27 @@ class BackgroundJobProgressManager:
             existing_metadata.update(merged_metadata)
             extra["metadata"] = existing_metadata
 
+        update_job_progress(
+            self.job_id,
+            message=message,
+            completed=completed,
+            total=total,
+            extra=extra,
+        )
+        self._last_mirror_at = now
+
+    def _current_progress(self) -> dict[str, Any]:
         try:
-            update_job_progress(
-                self.db,
-                self.job,
-                message=message,
-                completed=completed,
-                total=total,
-                extra=extra,
-            )
-            self._last_mirror_at = now
+            with session_scope() as db:
+                job = (
+                    db.query(BackgroundJob)
+                    .filter(BackgroundJob.id == self.job_id)
+                    .first()
+                )
+                if job is not None and isinstance(job.progress, dict):
+                    return dict(job.progress)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Failed to mirror RAG progress to background job %s: %s",
-                self.job.id,
-                exc,
+                "Failed to read progress for background job %s: %s", self.job_id, exc
             )
+        return {}

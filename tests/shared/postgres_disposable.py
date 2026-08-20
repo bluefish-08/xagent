@@ -136,6 +136,55 @@ def disposable_database_factory(
             )
 
 
+@contextmanager
+def disposable_database_url(
+    prefix: str,
+    *,
+    settings: dict[str, str] | None = None,
+) -> Iterator[str]:
+    """Mint one disposable database and yield its connection URL.
+
+    The engine-returning factory above cannot serve callers that must hand a
+    URL to application code (``configure_db``) rather than drive an engine
+    themselves. ``settings`` are applied with ALTER DATABASE SET, so every
+    connection the application opens inherits them -- which is how a test can
+    impose a short ``idle_in_transaction_session_timeout``.
+    """
+    base_url = os.getenv("XAGENT_TEST_POSTGRES_URL")
+    if not base_url:
+        pytest.skip("XAGENT_TEST_POSTGRES_URL is not set")
+
+    def _admin_connection():
+        conn = psycopg2.connect(**psycopg2_kwargs(base_url))
+        conn.autocommit = True
+        return conn
+
+    dbname = f"{prefix}_{uuid.uuid4().hex[:10]}"
+    admin_conn = _admin_connection()
+    try:
+        admin_conn.cursor().execute(f'CREATE DATABASE "{dbname}"')
+        for key, value in (settings or {}).items():
+            admin_conn.cursor().execute(
+                f'ALTER DATABASE "{dbname}" SET {key} = %s', (value,)
+            )
+    finally:
+        admin_conn.close()
+
+    parsed = make_url(base_url).set(database=dbname)
+    try:
+        yield parsed.render_as_string(hide_password=False)
+    finally:
+        admin_conn = _admin_connection()
+        try:
+            admin_conn.cursor().execute(
+                f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = '{dbname}' AND pid <> pg_backend_pid()"
+            )
+            admin_conn.cursor().execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+        finally:
+            admin_conn.close()
+
+
 def load_migration_module(path: Path, name: str = "migration_under_test") -> ModuleType:
     """Load the Alembic revision module at ``path`` under ``name`` without
     going through the revision chain or requiring it be importable as a

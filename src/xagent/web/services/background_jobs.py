@@ -19,6 +19,7 @@ from ..models.background_job import (
     BackgroundJobStatus,
     BackgroundJobType,
 )
+from ..models.database import session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -229,40 +230,59 @@ def list_background_jobs(
     )
 
 
-def mark_job_running(db: Session, job: BackgroundJob) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.RUNNING.value)
-    setattr(job, "attempts", int(job.attempts or 0) + 1)
-    setattr(job, "started_at", datetime.now(timezone.utc))
-    setattr(job, "error_message", None)
-    setattr(job, "progress", {"message": "Running", "completed": 0, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+def mark_job_running(job_id: str) -> int:
+    """Claim the job for this attempt and return the new attempt count.
+
+    Returns the incremented ``attempts`` rather than the ORM row: the session
+    closes here, so a returned instance would be detached.
+    """
+    with session_scope() as db:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        attempts = int(job.attempts or 0) + 1
+        setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+        setattr(job, "attempts", attempts)
+        setattr(job, "started_at", datetime.now(timezone.utc))
+        setattr(job, "error_message", None)
+        setattr(job, "progress", {"message": "Running", "completed": 0, "total": 1})
+        db.add(job)
+        return attempts
 
 
 def update_job_progress(
-    db: Session,
-    job: BackgroundJob,
+    job_id: str,
     *,
     message: str,
     completed: int | None = None,
     total: int | None = None,
     extra: dict[str, Any] | None = None,
-) -> BackgroundJob:
-    progress = dict(job.progress or {})
-    progress["message"] = message
-    if completed is not None:
-        progress["completed"] = completed
-    if total is not None:
-        progress["total"] = total
-    if extra:
-        progress.update(extra)
-    setattr(job, "progress", progress)
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+) -> None:
+    """Record job progress. Telemetry only -- never fails the caller.
+
+    Progress is not job state: a job that cannot report progress is still
+    making progress. The web ingestion path calls this from inside per-page
+    processing, so a raised exception here would fail the page.
+    """
+    try:
+        with session_scope() as db:
+            job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+            if job is None:
+                return
+            progress = dict(job.progress or {})
+            progress["message"] = message
+            if completed is not None:
+                progress["completed"] = completed
+            if total is not None:
+                progress["total"] = total
+            if extra:
+                progress.update(extra)
+            setattr(job, "progress", progress)
+            db.add(job)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to update progress for background job %s: %s", job_id, exc
+        )
 
 
 def requeue_stale_background_jobs(
@@ -382,36 +402,38 @@ def requeue_stale_background_jobs(
     return requeued
 
 
-def mark_job_succeeded(
-    db: Session,
-    job: BackgroundJob,
-    *,
-    result: dict[str, Any] | None = None,
-) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
-    setattr(job, "result", result)
-    setattr(job, "error_message", None)
-    setattr(job, "finished_at", datetime.now(timezone.utc))
-    setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+def mark_job_succeeded(job_id: str, *, result: dict[str, Any] | None = None) -> None:
+    with session_scope() as db:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
+        setattr(job, "result", result)
+        setattr(job, "error_message", None)
+        setattr(job, "finished_at", datetime.now(timezone.utc))
+        setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
+        db.add(job)
 
 
 def mark_job_failed(
-    db: Session,
-    job: BackgroundJob,
+    job_id: str,
     *,
     error_message: str,
     result: dict[str, Any] | None = None,
-) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.FAILED.value)
-    setattr(job, "error_message", error_message)
-    setattr(job, "result", result)
-    setattr(job, "finished_at", datetime.now(timezone.utc))
-    setattr(job, "progress", {"message": error_message, "completed": 0, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+) -> None:
+    """Record the terminal failure on a session of its own.
+
+    This must not share a session with the work that failed: a poisoned
+    session would take the failure record down with it, leaving the row
+    ``running`` forever and bypassing ``max_attempts``.
+    """
+    with session_scope() as db:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        setattr(job, "status", BackgroundJobStatus.FAILED.value)
+        setattr(job, "error_message", error_message)
+        setattr(job, "result", result)
+        setattr(job, "finished_at", datetime.now(timezone.utc))
+        setattr(job, "progress", {"message": error_message, "completed": 0, "total": 1})
+        db.add(job)

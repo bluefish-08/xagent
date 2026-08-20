@@ -1783,8 +1783,7 @@ async def _enqueue_background_job_or_503_async(
         check_worker=False,
     ):
         mark_job_failed(
-            db,
-            job,
+            str(job.id),
             error_message="Background job queue is unavailable",
         )
         raise HTTPException(
@@ -1813,8 +1812,7 @@ async def _enqueue_background_job_or_503_async(
         return job
     except Exception as exc:  # noqa: BLE001
         mark_job_failed(
-            db,
-            job,
+            str(job.id),
             error_message=f"Background job queue is unavailable: {exc}",
         )
         raise HTTPException(

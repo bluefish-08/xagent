@@ -1,6 +1,7 @@
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Iterator
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import Connection, make_url
@@ -55,6 +56,33 @@ def get_db() -> Generator[Session, None, None]:
     db = _SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    """Open a session for one unit of work, then commit and close it.
+
+    Long-running work must not hold a session open across its idle gaps: the
+    default ``expire_on_commit=True`` re-reads expired attributes after every
+    commit, which re-opens a transaction that then sits idle until the next
+    commit. Postgres terminates such a connection once
+    ``idle_in_transaction_session_timeout`` elapses, and every later statement
+    on that session fails -- including the bookkeeping meant to record the
+    failure. Callers that span minutes or hours use one scope per operation.
+    """
+    if _SessionLocal is None:
+        raise RuntimeError(
+            "Session Local is not initialized. Call configure_db() or init_db() first."
+        )
+    db = _SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
