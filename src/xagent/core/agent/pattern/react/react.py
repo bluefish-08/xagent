@@ -1586,8 +1586,8 @@ class ReActPattern(AgentPattern):
             except json.JSONDecodeError:
                 logger.warning(
                     "ReAct tool call %s returned malformed JSON arguments "
-                    "(%d chars); dropping them for control tools and passing "
-                    "them through as `input` otherwise.",
+                    "(%d chars); dropping them for control tools and blank "
+                    "payloads, passing anything else through as `input`.",
                     tool_name or "<unknown>",
                     len(arguments),
                 )
@@ -1607,10 +1607,10 @@ class ReActPattern(AgentPattern):
     ) -> dict[str, Any]:
         """Wrap unusable tool arguments, or drop them for control tools.
 
-        Work tools tolerate an opaque ``input`` passthrough, so they keep the
-        payload. Control tools drop it, because ``input`` is never a field any of
-        them declares: carrying it forward only disguises the loss as a populated
-        arguments object.
+        Work tools tolerate an opaque ``input`` passthrough, so they keep a
+        non-blank payload. Control tools drop it, because ``input`` is never a
+        field any of them declares: carrying it forward only disguises the loss
+        as a populated arguments object.
 
         For ``final_answer`` dropping it is also load-bearing. That tool owns the
         run's only user-visible exit, so a payload smuggled through as ``input``
@@ -1623,6 +1623,9 @@ class ReActPattern(AgentPattern):
         """
 
         if tool_name in self._control_tool_names():
+            return {}
+        if isinstance(payload, str) and not payload.strip():
+            # Nothing to preserve, and `input` is not a field a no-arg tool declares.
             return {}
         return {"input": payload}
 
