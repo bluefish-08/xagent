@@ -33,6 +33,10 @@ from xagent.web.models.user import User
 
 SANDBOX_MINTED_FILE_ID = "sandbox-only-file-id"
 
+# A workspace name without a task id parses to task_id=None, so should_persist is
+# False: every test here except the durable_workspace ones asserts that ids and
+# metadata changed, not that anything reached the database or object storage.
+
 
 @sandbox_config()
 class _FakeGeneratingTool(FakeBaseTool):
@@ -543,15 +547,8 @@ def test_a_symlink_inside_output_is_not_registered(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def mock_workspace_db():
-    """Opt out of the autouse stub so registration reaches a real database."""
-    yield
-
-
-@pytest.fixture
-def durable_workspace(monkeypatch, tmp_path, mock_workspace_db):
+def durable_workspace(monkeypatch, tmp_path):
     """A workspace whose register_file creates real rows and storage objects."""
-    del mock_workspace_db
     # StaticPool: host registration runs in a worker thread, and a per-thread
     # connection would open a second, empty in-memory database.
     engine = create_engine(
