@@ -45,6 +45,11 @@ AGENT_CONFIG_UNASSIGNABLE_CATEGORIES: frozenset[str] = frozenset(
     {ToolCategory.OTHER.value, ToolCategory.AGENT.value}
 )
 
+# Categories granted by a per-agent binding the creator enforces itself. The
+# tool-list endpoint cannot enumerate them, so they never reach a saved
+# ``tool_categories`` and must not be gated on it.
+BINDING_AUTHORIZED_CATEGORIES: frozenset[str] = frozenset({ToolCategory.SSH.value})
+
 
 class ToolMetadata(BaseModel):
     name: str

@@ -22,7 +22,7 @@ from .....config import get_uploads_dir
 from .....core.task_runtime import FILE_OPERATION_ACCESS_VERSION_KEY
 from .....core.workspace import TaskWorkspace
 from ...core.knowledge_base_scope import KnowledgeBaseScopeError
-from .base import AbstractBaseTool, Tool
+from .base import BINDING_AUTHORIZED_CATEGORIES, AbstractBaseTool, Tool
 from .config import (
     BaseToolConfig,
     MCPFailurePolicy,
@@ -200,6 +200,10 @@ class ToolRegistry:
 
         if selection_gate == "published_agent":
             return spec.includes_published_agent()
+
+        if declared_cats <= BINDING_AUTHORIZED_CATEGORIES:
+            # NONE is still an explicit zero-tools decision.
+            return spec.is_by_categories()
 
         if selection_gate == "mcp":
             # ``mcp:<server>`` scopes land in ``mcp_servers`` only, leaving

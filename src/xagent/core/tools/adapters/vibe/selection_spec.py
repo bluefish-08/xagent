@@ -53,7 +53,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Set
 
-from .base import AGENT_CONFIG_UNASSIGNABLE_CATEGORIES
+from .base import (
+    AGENT_CONFIG_UNASSIGNABLE_CATEGORIES,
+    BINDING_AUTHORIZED_CATEGORIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -695,7 +698,7 @@ class _SpecByCategories(ToolSelectionSpec):
             category = str(tool.metadata.category.value)
 
             # Plain category admit (categories holds only plain names).
-            if category in self.categories:
+            if category in self.categories or category in BINDING_AUTHORIZED_CATEGORIES:
                 names.add(tool_name)
                 continue
 

@@ -2354,3 +2354,44 @@ def test_spec_wants_mcp_only_for_explicit_mcp_selection():
     for spec, expected in specs:
         assert should_load_mcp_server_configs(spec) is expected
         assert _spec_wants_mcp(spec) is expected
+
+
+def test_ssh_tools_survive_a_selection_that_never_names_ssh() -> None:
+    """``ssh`` never reaches a saved ``tool_categories`` (the tool-list
+    endpoint cannot enumerate SSH tools), so filtering on it would leave every
+    configured agent without the tools its target binding grants."""
+    from xagent.core.tools.adapters.vibe.selection_spec import ToolSelectionSpec
+
+    result = ToolSelectionSpec.from_raw(
+        tool_categories=["basic"]
+    ).compute_allowed_names(
+        [
+            _mock_tool("calculator", "basic"),
+            _mock_tool("ssh_execute", "ssh"),
+            _mock_tool("file_read", "file"),
+        ],
+    )
+    assert sorted(result or []) == ["calculator", "ssh_execute"]
+
+
+def test_explicit_zero_tools_still_rejects_ssh() -> None:
+    """NONE is a deliberate "this agent runs with zero tools" decision and
+    outranks the binding."""
+    from xagent.core.tools.adapters.vibe.selection_spec import ToolSelectionSpec
+
+    result = ToolSelectionSpec.from_raw(tool_categories=[]).compute_allowed_names(
+        [_mock_tool("ssh_execute", "ssh")],
+    )
+    assert result == frozenset()
+
+
+def test_should_run_creator_runs_ssh_for_any_configured_selection() -> None:
+    """The SSH creator gates on the target binding itself, so a selection that
+    never names ``ssh`` must still dispatch it -- zero-tools must not."""
+    from xagent.core.tools.adapters.vibe.factory import ToolRegistry
+
+    declared = frozenset({"ssh"})
+    basic_only = ToolSelectionSpec.from_raw(tool_categories=["basic"])
+    assert ToolRegistry._should_run_creator(declared, basic_only, None) is True
+    zero_tools = ToolSelectionSpec.from_raw(tool_categories=[])
+    assert ToolRegistry._should_run_creator(declared, zero_tools, None) is False
