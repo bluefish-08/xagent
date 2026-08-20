@@ -565,6 +565,50 @@ async def test_deepseek_stream_forwards_accumulated_valid_tool_calls() -> None:
     )
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\n"])
+@pytest.mark.asyncio
+async def test_deepseek_stream_keeps_blank_arguments_for_parameterless_tool(
+    blank: str,
+) -> None:
+    """Blank arguments must survive both of the stream adapter's gates.
+
+    The mid-stream gate skips them (`_arguments_are_ready_for_validation` is
+    False for a non-`{...}` string), so the end-of-stream check is the one that
+    reaches `_tool_call_violation` -- the production path behind #1501.
+    """
+
+    async def source() -> AsyncIterator[StreamChunk]:
+        yield StreamChunk(
+            type=ChunkType.TOOL_CALL,
+            tool_calls=[
+                {
+                    "index": 0,
+                    "id": "call_list",
+                    "type": "function",
+                    "function": {
+                        "name": "list_image_models",
+                        "arguments": blank,
+                    },
+                }
+            ],
+            finish_reason="tool_calls",
+        )
+        yield StreamChunk(type=ChunkType.END, finish_reason="tool_calls")
+
+    chunks = [
+        chunk
+        async for chunk in adapt_deepseek_stream(
+            source(),
+            tools=[LIST_IMAGE_MODELS_TOOL],
+        )
+    ]
+
+    assert not any(chunk.is_protocol_error() for chunk in chunks)
+    tool_chunks = [chunk for chunk in chunks if chunk.is_tool_call()]
+    assert tool_chunks
+    assert tool_chunks[-1].tool_calls[0]["function"]["arguments"] == blank
+
+
 @pytest.mark.asyncio
 async def test_deepseek_stream_repairs_complete_malformed_tool_arguments() -> None:
     async def source() -> AsyncIterator[StreamChunk]:
