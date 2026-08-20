@@ -47,7 +47,7 @@ BINARY_DOCUMENT_SUFFIXES = {
 }
 
 
-def _reject_binary_document_write(file_path: str) -> None:
+def _reject_binary_document_write(file_path: str | Path) -> None:
     suffix = Path(file_path).suffix.lower()
     if suffix in BINARY_DOCUMENT_SUFFIXES:
         raise ValueError(
@@ -365,7 +365,6 @@ class WorkspaceFileOperations:
         create_dirs: bool = True,
     ) -> Dict[str, Any]:
         """Write file content in workspace"""
-        _reject_binary_document_write(file_path)
         logger.debug(
             "write_file called with file_path: %s, content_length: %d, workspace_id: %s",
             file_path,
@@ -374,6 +373,7 @@ class WorkspaceFileOperations:
         )
 
         resolved_path = self._resolve_path(file_path, "output")
+        _reject_binary_document_write(resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         if create_dirs:
@@ -508,8 +508,8 @@ class WorkspaceFileOperations:
         create_dirs: bool = True,
     ) -> bool:
         """Append content to file in workspace"""
-        _reject_binary_document_write(file_path)
         resolved_path = self._resolve_path_with_search(file_path)
+        _reject_binary_document_write(resolved_path)
 
         if create_dirs:
             resolved_path.parent.mkdir(parents=True, exist_ok=True)
@@ -771,7 +771,6 @@ class WorkspaceFileOperations:
         backup: bool = False,
     ) -> EditResult:
         """Precise file editing in workspace"""
-        _reject_binary_document_write(file_path)
         logger.debug(
             "edit_file called with file_path: %s, operations_count: %d, workspace_id: %s",
             file_path,
@@ -784,6 +783,7 @@ class WorkspaceFileOperations:
 
         # Resolve the file path within the workspace
         resolved_path = self._resolve_path_with_search(file_path)
+        _reject_binary_document_write(resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         # Convert to string path for the basic edit_file function
@@ -806,7 +806,6 @@ class WorkspaceFileOperations:
         backup: bool = False,
     ) -> EditResult:
         """Find and replace text content in workspace"""
-        _reject_binary_document_write(file_path)
         logger.debug(
             "find_and_replace called with file_path: %s, pattern: %s, workspace_id: %s",
             file_path,
@@ -819,6 +818,7 @@ class WorkspaceFileOperations:
 
         # Resolve the file path within the workspace
         resolved_path = self._resolve_path_with_search(file_path)
+        _reject_binary_document_write(resolved_path)
         logger.debug("Resolved path: %s", resolved_path)
 
         # Convert to string path for the basic find_and_replace function

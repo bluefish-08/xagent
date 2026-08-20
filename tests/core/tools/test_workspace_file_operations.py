@@ -1702,12 +1702,33 @@ class TestWorkspaceFileOperations:
                 ops.write_file(name, "Placeholder - real binary written elsewhere")
             assert not (workspace.output_dir / name).exists()
 
+        existing = workspace.output_dir / "draft.docx"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_bytes(b"PK\x03\x04 real docx")
+
         with pytest.raises(ValueError, match="binary container"):
             ops.append_file("draft.docx", "more text")
         with pytest.raises(ValueError, match="binary container"):
             ops.edit_file("draft.docx", [])
         with pytest.raises(ValueError, match="binary container"):
             ops.find_and_replace("draft.docx", "TODO", "Q3")
+        assert existing.read_bytes() == b"PK\x03\x04 real docx"
+
+    def test_binary_document_guard_sees_through_a_file_id(self, tmp_path):
+        """A file_id carries no suffix; the guard must check the resolved path."""
+        workspace = TaskWorkspace("test_binary_guard_file_id", str(tmp_path))
+        ops = WorkspaceFileOperations(workspace)
+
+        target = workspace.output_dir / "contract.docx"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"PK\x03\x04 real docx")
+        file_id = workspace.register_file(str(target))
+
+        with pytest.raises(ValueError, match="binary container"):
+            ops.append_file(file_id, "more text")
+        with pytest.raises(ValueError, match="binary container"):
+            ops.find_and_replace(file_id, "TODO", "Q3")
+        assert target.read_bytes() == b"PK\x03\x04 real docx"
 
 
 if __name__ == "__main__":
