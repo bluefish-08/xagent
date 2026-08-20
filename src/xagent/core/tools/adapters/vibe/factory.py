@@ -201,7 +201,7 @@ class ToolRegistry:
         if selection_gate == "published_agent":
             return spec.includes_published_agent()
 
-        if declared_cats <= BINDING_AUTHORIZED_CATEGORIES:
+        if declared_cats & BINDING_AUTHORIZED_CATEGORIES:
             # NONE is still an explicit zero-tools decision.
             return spec.is_by_categories()
 

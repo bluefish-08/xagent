@@ -2395,3 +2395,8 @@ def test_should_run_creator_runs_ssh_for_any_configured_selection() -> None:
     assert ToolRegistry._should_run_creator(declared, basic_only, None) is True
     zero_tools = ToolSelectionSpec.from_raw(tool_categories=[])
     assert ToolRegistry._should_run_creator(declared, zero_tools, None) is False
+
+    # A creator declaring ssh alongside an unselected category still runs;
+    # its non-ssh tools are dropped by the name filter, not by this gate.
+    mixed = frozenset({"ssh", "browser"})
+    assert ToolRegistry._should_run_creator(mixed, basic_only, None) is True
