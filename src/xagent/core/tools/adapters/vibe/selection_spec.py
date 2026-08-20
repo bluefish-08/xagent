@@ -169,6 +169,18 @@ class ToolSelectionSpec(ABC):
         """Whether the Published Agent delegation creators should run."""
 
     @abstractmethod
+    def admits_binding_authorized(self) -> bool:
+        """Whether ``BINDING_AUTHORIZED_CATEGORIES`` ride along this spec.
+
+        Such a category is granted by a per-agent binding the creator
+        enforces itself, so it is admitted alongside a real user category
+        selection. It must NOT be granted to a spec whose only selection is
+        an internal injection (empty ``categories`` + ``name_allowlist``,
+        i.e. the unconfigured workforce manager), which is scoped to its
+        worker tools.
+        """
+
+    @abstractmethod
     def scoped_mcp_servers(self) -> Optional[frozenset[str]]:
         """Pre-build MCP server restriction for the MCP creator.
 
@@ -389,6 +401,8 @@ class ToolSelectionSpec(ABC):
         # through ``is_by_categories()`` narrowing in modern setups,
         # but the duck-typed attribute access is also safe here.
         categories: frozenset[str] = getattr(self, "categories", frozenset())
+        if cat in BINDING_AUTHORIZED_CATEGORIES:
+            return self.admits_binding_authorized()
         return cat in categories
 
 
@@ -466,6 +480,9 @@ class _SpecAll(ToolSelectionSpec):
             return False
         return True
 
+    def admits_binding_authorized(self) -> bool:
+        return True
+
     def scoped_mcp_servers(self) -> Optional[frozenset[str]]:
         # ALL mode: MCP selected without restriction -> initialize every
         # server. (``includes_mcp()`` already honors the legacy
@@ -515,6 +532,9 @@ class _SpecNone(ToolSelectionSpec):
         return False
 
     def includes_published_agent(self) -> bool:
+        return False
+
+    def admits_binding_authorized(self) -> bool:
         return False
 
     def scoped_mcp_servers(self) -> Optional[frozenset[str]]:
@@ -626,6 +646,11 @@ class _SpecByCategories(ToolSelectionSpec):
             return False
         return "agent" in self.categories or bool(self.published_agent_ids)
 
+    def admits_binding_authorized(self) -> bool:
+        # Empty ``categories`` means the only selection is an internal
+        # injection (workforce manager worker tools), not a user opt-in.
+        return bool(self.categories)
+
     def scoped_mcp_servers(self) -> Optional[frozenset[str]]:
         # Parent/child rule, identical to what compute_allowed_names applies
         # post-build: the plain "mcp" parent admits every server, so it means
@@ -650,6 +675,10 @@ class _SpecByCategories(ToolSelectionSpec):
           - a tool whose category ∈ ``categories`` is admitted (plain
             ``"mcp"`` admits all MCP tools, etc.; DB-backed Custom API
             tools are loaded only for scoped ``mcp:<server>`` connectors);
+          - a tool in a ``BINDING_AUTHORIZED_CATEGORIES`` category is
+            admitted whenever :meth:`admits_binding_authorized` holds (its
+            per-agent binding is the opt-in and the category can never be
+            selected);
           - otherwise a tool whose ``metadata.source_server`` matches a
             scoped server in ``mcp_servers`` is admitted. ``source_server``
             is the normalized originating-server identity set once at
@@ -698,7 +727,10 @@ class _SpecByCategories(ToolSelectionSpec):
             category = str(tool.metadata.category.value)
 
             # Plain category admit (categories holds only plain names).
-            if category in self.categories or category in BINDING_AUTHORIZED_CATEGORIES:
+            if category in self.categories or (
+                category in BINDING_AUTHORIZED_CATEGORIES
+                and self.admits_binding_authorized()
+            ):
                 names.add(tool_name)
                 continue
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
@@ -265,17 +264,22 @@ class SshDownloadTool(_SshTransferTool):
 
 
 def _numeric_task_id(task_id: Any) -> int | None:
-    """Extract the DB task id. The tool config hands us a workspace-scoped
-    string like ``"web_task_30"`` (or a non-task id like ``"tools_list"``),
-    not the bare integer primary key."""
+    """Extract the DB task id from the workspace-scoped id the tool config
+    hands us (``"web_task_30"`` -> 30).
+
+    Strict prefix match, never a trailing-digit search: a delegated sub-agent
+    (``agent_7_a1b2cd34``) or a REST preview (``preview_ab12cd34``) would
+    otherwise yield the uuid suffix's trailing digits as somebody else's task
+    id, and the caller resolves the owner scope from whatever row that hits.
+    Anything not of this exact shape is "no task" (fail closed)."""
     if task_id is None:
         return None
-    # Assumption: the DB id is the trailing integer of the workspace-scoped id
-    # (``web_task_30`` → 30); ids with no trailing digits (``tools_list``) are
-    # intentionally treated as "no task". If the id format ever grows an
-    # internal number this trailing-match would need revisiting.
-    match = re.search(r"(\d+)$", str(task_id))
-    return int(match.group(1)) if match else None
+    normalized = str(task_id).strip()
+    for prefix in ("web_task_", "task_"):
+        if normalized.startswith(prefix):
+            value = normalized.removeprefix(prefix)
+            return int(value) if value.isdecimal() else None
+    return int(normalized) if normalized.isdecimal() else None
 
 
 def _agent_id_for_task(session_factory: Any, numeric_task_id: int | None) -> int | None:

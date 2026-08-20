@@ -2357,11 +2357,9 @@ def test_spec_wants_mcp_only_for_explicit_mcp_selection():
 
 
 def test_ssh_tools_survive_a_selection_that_never_names_ssh() -> None:
-    """``ssh`` never reaches a saved ``tool_categories`` (the tool-list
-    endpoint cannot enumerate SSH tools), so filtering on it would leave every
-    configured agent without the tools its target binding grants."""
-    from xagent.core.tools.adapters.vibe.selection_spec import ToolSelectionSpec
-
+    """``ssh`` is never selectable in the builder's category picker (the
+    tool-list endpoint cannot enumerate SSH tools), so filtering on it would
+    leave every configured agent without the tools its binding grants."""
     result = ToolSelectionSpec.from_raw(
         tool_categories=["basic"]
     ).compute_allowed_names(
@@ -2374,29 +2372,53 @@ def test_ssh_tools_survive_a_selection_that_never_names_ssh() -> None:
     assert sorted(result or []) == ["calculator", "ssh_execute"]
 
 
-def test_explicit_zero_tools_still_rejects_ssh() -> None:
-    """NONE is a deliberate "this agent runs with zero tools" decision and
-    outranks the binding."""
-    from xagent.core.tools.adapters.vibe.selection_spec import ToolSelectionSpec
+def test_unconfigured_workforce_manager_stays_worker_tools_only() -> None:
+    """The binding rides along a real category selection only.
 
-    result = ToolSelectionSpec.from_raw(tool_categories=[]).compute_allowed_names(
-        [_mock_tool("ssh_execute", "ssh")],
+    An unconfigured workforce manager is BY_CATEGORIES with EMPTY categories
+    plus a worker-tool ``name_allowlist`` -- an internal injection, not a user
+    opt-in -- so it must keep the worker-tools-only invariant even when the
+    manager agent itself carries an SSH binding.
+    """
+    spec = ToolSelectionSpec.from_raw(
+        tool_categories=None,
+        published_agent_ids=[7],
+        name_allowlist={"ask_agent_worker1"},
+        extras_only_when_unconfigured=True,
     )
-    assert result == frozenset()
+    assert spec.is_by_categories() and spec.categories == frozenset()
+
+    result = spec.compute_allowed_names(
+        [_mock_tool("ask_agent_worker1", "agent"), _mock_tool("ssh_execute", "ssh")],
+    )
+    assert result == frozenset({"ask_agent_worker1"})
+    assert ToolRegistry._should_run_creator(frozenset({"ssh"}), spec, None) is False, (
+        "an injection-only spec must not dispatch the SSH creator either"
+    )
 
 
 def test_should_run_creator_runs_ssh_for_any_configured_selection() -> None:
     """The SSH creator gates on the target binding itself, so a selection that
     never names ``ssh`` must still dispatch it -- zero-tools must not."""
-    from xagent.core.tools.adapters.vibe.factory import ToolRegistry
-
     declared = frozenset({"ssh"})
     basic_only = ToolSelectionSpec.from_raw(tool_categories=["basic"])
     assert ToolRegistry._should_run_creator(declared, basic_only, None) is True
     zero_tools = ToolSelectionSpec.from_raw(tool_categories=[])
     assert ToolRegistry._should_run_creator(declared, zero_tools, None) is False
 
-    # A creator declaring ssh alongside an unselected category still runs;
-    # its non-ssh tools are dropped by the name filter, not by this gate.
+    # A creator declaring ssh alongside an unselected category still runs, and
+    # the name filter -- not this gate -- drops its non-ssh tools.
     mixed = frozenset({"ssh", "browser"})
     assert ToolRegistry._should_run_creator(mixed, basic_only, None) is True
+    assert basic_only.compute_allowed_names(
+        [_mock_tool("ssh_execute", "ssh"), _mock_tool("browser_open", "browser")],
+    ) == frozenset({"ssh_execute"})
+
+
+def test_includes_category_agrees_with_the_other_two_gates_on_ssh() -> None:
+    """Third gate parity: a future caller asking ``includes_category("ssh")``
+    must get the same answer the dispatch and name filters give."""
+    assert ToolSelectionSpec.from_raw(tool_categories=["basic"]).includes_category(
+        "ssh"
+    )
+    assert not ToolSelectionSpec.from_raw(tool_categories=[]).includes_category("ssh")

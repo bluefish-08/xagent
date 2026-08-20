@@ -244,6 +244,14 @@ def test_numeric_task_id_parses_workspace_prefixed_id() -> None:
     assert _numeric_task_id(None) is None
 
 
+def test_numeric_task_id_rejects_ids_that_merely_end_in_digits() -> None:
+    # A trailing-digit search would read the uuid suffix as somebody else's
+    # task id, and the caller derives the owner scope from whatever row it hits.
+    assert _numeric_task_id("agent_7_a1b2cd34") is None
+    assert _numeric_task_id("preview_ab12cd34") is None
+    assert _numeric_task_id("web_task_30x") is None
+
+
 @pytest.fixture
 def task_db(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ssh-tools.db'}")
