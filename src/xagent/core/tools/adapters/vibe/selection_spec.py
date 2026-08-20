@@ -644,9 +644,10 @@ class _SpecByCategories(ToolSelectionSpec):
         return "agent" in self.categories or bool(self.published_agent_ids)
 
     def admits_binding_authorized(self) -> bool:
-        # Empty ``categories`` means the only selection is an internal
-        # injection (workforce manager worker tools), not a user opt-in.
-        return bool(self.categories)
+        # A connector-only selection (``mcp:<server>`` -> mcp_servers, empty
+        # categories) is still a user opt-in; only a pure name_allowlist
+        # injection (workforce manager worker tools) is not.
+        return bool(self.categories or self.mcp_servers)
 
     def scoped_mcp_servers(self) -> Optional[frozenset[str]]:
         # Parent/child rule, identical to what compute_allowed_names applies

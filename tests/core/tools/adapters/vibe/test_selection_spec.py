@@ -2372,6 +2372,22 @@ def test_ssh_tools_survive_a_selection_that_never_names_ssh() -> None:
     assert sorted(result or []) == ["calculator", "ssh_execute"]
 
 
+def test_connector_only_selection_still_gets_its_ssh_tools() -> None:
+    """A ``mcp:<server>``-only selection lands in ``mcp_servers`` with empty
+    ``categories`` -- still a user opt-in, so the binding rides along."""
+    spec = ToolSelectionSpec.from_raw(tool_categories=["mcp:gmail"])
+    assert spec.categories == frozenset() and spec.mcp_servers == frozenset({"gmail"})
+
+    result = spec.compute_allowed_names(
+        [
+            _mock_tool("mcp_gmail_send", "mcp", source_server="gmail"),
+            _mock_tool("ssh_execute", "ssh"),
+        ],
+    )
+    assert result == frozenset({"mcp_gmail_send", "ssh_execute"})
+    assert ToolRegistry._should_run_creator(frozenset({"ssh"}), spec, None) is True
+
+
 def test_unconfigured_workforce_manager_stays_worker_tools_only() -> None:
     """The binding rides along a real category selection only.
 

@@ -201,9 +201,6 @@ class ToolRegistry:
         if selection_gate == "published_agent":
             return spec.includes_published_agent()
 
-        if declared_cats & BINDING_AUTHORIZED_CATEGORIES:
-            return spec.admits_binding_authorized()
-
         if selection_gate == "mcp":
             # ``mcp:<server>`` scopes land in ``mcp_servers`` only, leaving
             # ``categories`` without ``"mcp"``. Dispatch must read the spec's
@@ -211,6 +208,11 @@ class ToolRegistry:
             # and a server scope) rather than the category intersection below,
             # or a server-only spec would skip the MCP creator entirely.
             return spec.includes_mcp()
+
+        # After the gates above: a creator carrying both a gate and a
+        # binding-authorized category must honour its gate first.
+        if declared_cats & BINDING_AUTHORIZED_CATEGORIES:
+            return spec.admits_binding_authorized()
 
         return bool(declared_cats & spec.categories)
 
