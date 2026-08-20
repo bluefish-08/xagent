@@ -1692,6 +1692,23 @@ class TestWorkspaceFileOperations:
         assert info.image_format is None
         assert info.image_mode is None
 
+    def test_write_file_rejects_binary_document_suffixes(self, tmp_path):
+        """Text writes must not produce corrupt .docx/.pptx/.xlsx/.pdf files."""
+        workspace = TaskWorkspace("test_binary_guard", str(tmp_path))
+        ops = WorkspaceFileOperations(workspace)
+
+        for name in ("draft.docx", "deck.PPTX", "book.xlsx", "report.pdf"):
+            with pytest.raises(ValueError, match="binary container"):
+                ops.write_file(name, "Placeholder - real binary written elsewhere")
+            assert not (workspace.output_dir / name).exists()
+
+        with pytest.raises(ValueError, match="binary container"):
+            ops.append_file("draft.docx", "more text")
+        with pytest.raises(ValueError, match="binary container"):
+            ops.edit_file("draft.docx", [])
+        with pytest.raises(ValueError, match="binary container"):
+            ops.find_and_replace("draft.docx", "TODO", "Q3")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

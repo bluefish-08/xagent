@@ -34,6 +34,30 @@ from .file_tool import (
 logger = logging.getLogger(__name__)
 
 
+# Text written into these containers yields a file that opens as garbage; only
+# the matching library can build them.
+BINARY_DOCUMENT_SUFFIXES = {
+    ".docx",
+    ".doc",
+    ".pptx",
+    ".ppt",
+    ".xlsx",
+    ".xls",
+    ".pdf",
+}
+
+
+def _reject_binary_document_write(file_path: str) -> None:
+    suffix = Path(file_path).suffix.lower()
+    if suffix in BINARY_DOCUMENT_SUFFIXES:
+        raise ValueError(
+            f"Cannot write text into a {suffix} file: it is a binary container. "
+            "Generate it with the matching library (python-docx / python-pptx / "
+            "openpyxl / reportlab) inside execute_python_code, saving straight "
+            "to the workspace output directory; never re-write it as text here."
+        )
+
+
 def is_document_file(file_path: str) -> bool:
     """Check if file is a document format that requires special parsing."""
     document_extensions = {".pdf", ".docx", ".xlsx", ".xls", ".csv", ".md"}
@@ -341,6 +365,7 @@ class WorkspaceFileOperations:
         create_dirs: bool = True,
     ) -> Dict[str, Any]:
         """Write file content in workspace"""
+        _reject_binary_document_write(file_path)
         logger.debug(
             "write_file called with file_path: %s, content_length: %d, workspace_id: %s",
             file_path,
@@ -483,6 +508,7 @@ class WorkspaceFileOperations:
         create_dirs: bool = True,
     ) -> bool:
         """Append content to file in workspace"""
+        _reject_binary_document_write(file_path)
         resolved_path = self._resolve_path_with_search(file_path)
 
         if create_dirs:
@@ -745,6 +771,7 @@ class WorkspaceFileOperations:
         backup: bool = False,
     ) -> EditResult:
         """Precise file editing in workspace"""
+        _reject_binary_document_write(file_path)
         logger.debug(
             "edit_file called with file_path: %s, operations_count: %d, workspace_id: %s",
             file_path,
@@ -779,6 +806,7 @@ class WorkspaceFileOperations:
         backup: bool = False,
     ) -> EditResult:
         """Find and replace text content in workspace"""
+        _reject_binary_document_write(file_path)
         logger.debug(
             "find_and_replace called with file_path: %s, pattern: %s, workspace_id: %s",
             file_path,
