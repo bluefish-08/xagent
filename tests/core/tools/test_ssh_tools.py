@@ -472,6 +472,43 @@ def test_agent_id_for_task_rejects_a_task_owned_by_another_user(task_db) -> None
     assert _agent_id_for_task(task_db, int(task.id), int(intruder.id)) is None
 
 
+async def test_binding_authorized_creator_emits_nothing_without_a_binding(
+    task_db,
+) -> None:
+    """The contract behind ``BINDING_AUTHORIZED_CATEGORIES``: admission is
+    unconditional at the selection gates, so the creator itself must refuse to
+    emit anything for an agent with no bound target."""
+    from xagent.core.tools.adapters.vibe import ssh_tools
+    from xagent.core.tools.adapters.vibe.base import BINDING_AUTHORIZED_CATEGORIES
+    from xagent.web.services.ssh_runtime import set_ssh_target_provider_hook
+
+    assert BINDING_AUTHORIZED_CATEGORIES == frozenset({"ssh"}), (
+        "a new member needs the same no-authorization-no-tools proof"
+    )
+
+    db = task_db()
+    try:
+        owner = _new_user(db, "owner")
+        agent = _new_agent(db, int(owner.id))
+        task = _new_task(db, int(owner.id), agent_id=int(agent.id))
+    finally:
+        db.close()
+
+    provider = _RecordingTargetProvider()  # no bound targets
+    set_ssh_target_provider_hook(lambda _sf: provider)
+    config = SimpleNamespace(
+        get_session_factory=lambda: task_db,
+        get_user_id=lambda: int(owner.id),
+        get_task_id=lambda: f"web_task_{int(task.id)}",
+        get_workspace_config=lambda: None,
+    )
+    try:
+        assert await ssh_tools.create_ssh_tools(config) == []
+        assert provider.list_calls == 1
+    finally:
+        set_ssh_target_provider_hook(None)
+
+
 async def test_create_ssh_tools_emits_nothing_for_a_delegated_sub_agent(
     task_db,
 ) -> None:
