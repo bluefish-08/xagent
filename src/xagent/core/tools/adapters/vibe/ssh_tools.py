@@ -273,14 +273,15 @@ def _numeric_task_id(task_id: Any) -> int | None:
     if task_id is None:
         return None
     normalized = str(task_id).strip()
-    for prefix in ("web_task_", "task_"):
-        if normalized.startswith(prefix):
-            value = normalized.removeprefix(prefix)
-            return int(value) if value.isdecimal() else None
+    if normalized.startswith("web_task_"):
+        value = normalized.removeprefix("web_task_")
+        return int(value) if value.isdecimal() else None
     return int(normalized) if normalized.isdecimal() else None
 
 
-def _agent_id_for_task(session_factory: Any, numeric_task_id: int | None) -> int | None:
+def _agent_id_for_task(
+    session_factory: Any, numeric_task_id: int | None, owner_user_id: int
+) -> int | None:
     if numeric_task_id is None:
         return None
     from .....web.models.agent import AgentStatus
@@ -291,6 +292,16 @@ def _agent_id_for_task(session_factory: Any, numeric_task_id: int | None) -> int
     with tool_session_scope(session_factory) as db:
         task = db.query(Task).filter(Task.id == numeric_task_id).first()
         if task is None:
+            return None
+        # Every caller derives both ids from the same task, so a mismatch means
+        # a mis-wired config -- refuse rather than bind another owner's targets.
+        if int(task.user_id) != owner_user_id:
+            logger.warning(
+                "ssh tools: task %s is owned by %s, not the executing user %s",
+                numeric_task_id,
+                task.user_id,
+                owner_user_id,
+            )
             return None
         candidate_id = task.agent_id
         if candidate_id is None:
@@ -380,7 +391,7 @@ async def create_ssh_tools(config: Any) -> list[AbstractBaseTool]:
         logger.error("ssh tools: provider does not implement SshSecretStore; skipping")
         return []
     numeric_task_id = _numeric_task_id(task_id)
-    agent_id = _agent_id_for_task(session_factory, numeric_task_id)
+    agent_id = _agent_id_for_task(session_factory, numeric_task_id, int(user_id))
     if agent_id is None:
         logger.info("ssh tools: skip (unresolved agent_id for task_id=%r)", task_id)
         return []

@@ -212,7 +212,7 @@ class ToolRegistry:
         # After the gates above: a creator carrying both a gate and a
         # binding-authorized category must honour its gate first.
         if declared_cats & BINDING_AUTHORIZED_CATEGORIES:
-            return spec.admits_binding_authorized()
+            return spec.includes_binding_authorized()
 
         return bool(declared_cats & spec.categories)
 
@@ -225,7 +225,7 @@ class ToolRegistry:
         ``spec.categories`` are skipped at the registry level (no
         creator call, no I/O) -- except a creator declaring a
         ``BINDING_AUTHORIZED_CATEGORIES`` category, dispatched per
-        ``spec.admits_binding_authorized()``. Creators with no declared
+        ``spec.includes_binding_authorized()``. Creators with no declared
         categories (dynamic ones: MCP / Custom API / Image / Audio) are always
         dispatched and are responsible for
         short-circuiting internally based on the spec.

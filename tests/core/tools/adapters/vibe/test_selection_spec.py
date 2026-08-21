@@ -2431,6 +2431,37 @@ def test_should_run_creator_runs_ssh_for_any_configured_selection() -> None:
     ) == frozenset({"ssh_execute"})
 
 
+def test_selecting_ssh_explicitly_matches_omitting_it() -> None:
+    """``ssh`` is not selectable in the picker, so the binding -- not the
+    category list -- is the authority: an agent with a binding gets the same
+    tools whether the saved list names ``ssh`` or not. Removing it from an
+    already-saved list is therefore a no-op today; a real opt-out means
+    dropping the binding (or its own switch, out of scope here).
+    """
+    tools = [_mock_tool("calculator", "basic"), _mock_tool("ssh_execute", "ssh")]
+    with_ssh = ToolSelectionSpec.from_raw(tool_categories=["basic", "ssh"])
+    without_ssh = ToolSelectionSpec.from_raw(tool_categories=["basic"])
+
+    assert with_ssh.compute_allowed_names(tools) == without_ssh.compute_allowed_names(
+        tools
+    )
+    declared = frozenset({"ssh"})
+    assert ToolRegistry._should_run_creator(
+        declared, with_ssh, None
+    ) is ToolRegistry._should_run_creator(declared, without_ssh, None)
+
+
+def test_published_agent_scope_alone_is_not_an_injection() -> None:
+    """Only the injection-only shape (worker tool names, nothing selectable)
+    is denied -- a spec scoped by ``published_agent_ids`` alone is not it."""
+    spec = ToolSelectionSpec.from_raw(
+        tool_categories=None,
+        published_agent_ids=[7],
+        extras_only_when_unconfigured=True,
+    )
+    assert spec.is_by_categories() and spec.includes_binding_authorized()
+
+
 def test_includes_category_agrees_with_the_other_two_gates_on_ssh() -> None:
     """Third gate parity: a future caller asking ``includes_category("ssh")``
     must get the same answer the dispatch and name filters give."""
