@@ -1,5 +1,6 @@
 """Tests for core data schemas."""
 
+import json
 from datetime import datetime
 
 import pytest
@@ -23,6 +24,7 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
     IndexOperation,
     IndexStatus,
     IndexType,
+    IngestionConfig,
     ParseDocumentRequest,
     ParseDocumentResponse,
     ParsedParagraph,
@@ -1432,6 +1434,50 @@ class TestCollectionInfo:
         assert storage_data["documents"] == 5
         assert storage_data["processed_documents"] == 3
         assert storage_data["ingestion_config"] == ""
+
+    def test_collection_info_to_storage_populated_ingestion_config(self):
+        """A populated ingestion_config must serialize, enum fields included."""
+        collection = CollectionInfo(
+            name="test_collection",
+            ingestion_config=IngestionConfig(
+                parse_method=ParseMethod.PYPDF,
+                chunk_strategy=ChunkStrategy.MARKDOWN,
+            ),
+        )
+
+        payload = json.loads(collection.to_storage()["ingestion_config"])
+
+        assert payload["parse_method"] == "pypdf"
+        assert payload["chunk_strategy"] == "markdown"
+
+    def test_collection_info_to_storage_keeps_datetimes_native(self):
+        """LanceDB timestamp columns need datetimes, not ISO strings."""
+        collection = CollectionInfo(
+            name="test_collection",
+            ingestion_config=IngestionConfig(parse_method=ParseMethod.PYPDF),
+        )
+
+        storage_data = collection.to_storage()
+
+        assert isinstance(storage_data["created_at"], datetime)
+        assert isinstance(storage_data["updated_at"], datetime)
+        assert isinstance(storage_data["last_accessed_at"], datetime)
+
+    def test_collection_info_storage_round_trip_restores_enums(self):
+        """from_storage(to_storage()) hands the enum members back."""
+        collection = CollectionInfo(
+            name="test_collection",
+            ingestion_config=IngestionConfig(
+                parse_method=ParseMethod.PYPDF,
+                chunk_strategy=ChunkStrategy.MARKDOWN,
+            ),
+        )
+
+        restored = CollectionInfo.from_storage(collection.to_storage())
+
+        assert restored.ingestion_config is not None
+        assert restored.ingestion_config.parse_method is ParseMethod.PYPDF
+        assert restored.ingestion_config.chunk_strategy is ChunkStrategy.MARKDOWN
 
     def test_collection_info_immutability_by_default(self):
         """Test that CollectionInfo is immutable by default after creation."""

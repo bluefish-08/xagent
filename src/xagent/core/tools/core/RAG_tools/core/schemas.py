@@ -1537,9 +1537,10 @@ class CollectionInfo(BaseModel):
         # Do not persist owners; they are computed from user_id when listing
         data["owners"] = "[]"
 
-        # Serialize ingestion_config if present
-        if data.get("ingestion_config"):
-            data["ingestion_config"] = json.dumps(data["ingestion_config"])
+        # Serialize ingestion_config if present. pydantic's JSON mode, not
+        # json.dumps: the config carries enum fields the plain encoder rejects.
+        if self.ingestion_config is not None:
+            data["ingestion_config"] = self.ingestion_config.model_dump_json()
         else:
             # Use empty string sentinel instead of None to prevent LanceDB non-null schema errors
             data["ingestion_config"] = LANCEDB_NULL_STR_SENTINEL
