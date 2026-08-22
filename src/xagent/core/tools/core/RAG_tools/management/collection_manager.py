@@ -328,6 +328,39 @@ class CollectionManager:
         async with lock, _collection_thread_guard(collection.name):
             await self._save_collection_with_retry(collection)
 
+    async def save_collection_fields(
+        self, collection: CollectionInfo, owned_fields: tuple[str, ...]
+    ) -> None:
+        """Merge only ``owned_fields`` onto the stored row, re-read under the lock.
+
+        For callers holding a snapshot read long before the write: the storage
+        merge overwrites every column, so writing the whole snapshot back would
+        roll back anything a concurrent writer changed in between. The re-read
+        happens inside the same lock hold as the write, and an unchanged row is
+        not written at all. Falls back to inserting ``collection`` whole when no
+        row exists yet.
+        """
+        lock = _get_collection_lock(collection.name)
+
+        async with lock, _collection_thread_guard(collection.name):
+            try:
+                stored = await self._get_metadata_store().get_collection(
+                    collection.name
+                )
+            except Exception as exc:
+                logger.debug(
+                    "No stored row for '%s', inserting whole: %s", collection.name, exc
+                )
+                await self._save_collection_with_retry(collection)
+                return
+
+            merged = stored.model_copy(
+                update={field: getattr(collection, field) for field in owned_fields}
+            )
+            if merged == stored:
+                return
+            await self._save_collection_with_retry(merged)
+
     async def delete_collection_metadata(
         self,
         collection_name: str,
@@ -1269,10 +1302,9 @@ def resolve_effective_embedding_model_sync(
 
     Logic:
     1. If collection is initialized, use its bound model ID.
-    2. Else if collection ingestion_config stores an embedding model, use it.
-    3. Else if existing embedding tables can be inferred for this collection, use that.
-    4. Else if config provides an embedding model, use it.
-    5. If none are available, raise ValueError.
+    2. Else if existing embedding tables can be inferred for this collection, use that.
+    3. Else if config provides an embedding model, use it.
+    4. If none are available, raise ValueError.
 
     Args:
         collection_name: Name of the collection
@@ -1303,11 +1335,6 @@ def _resolve_effective_embedding_model_sync_impl(
         collection_info = get_collection_sync(collection_name)
 
         bound_model_id = _normalize_model_id(collection_info.embedding_model_id)
-        indexed_model_id = _normalize_model_id(
-            collection_info.ingestion_config.embedding_model_id
-            if collection_info.ingestion_config is not None
-            else None
-        )
 
         if collection_info.is_initialized and bound_model_id:
             if config_model_id and config_model_id != bound_model_id:
@@ -1319,22 +1346,6 @@ def _resolve_effective_embedding_model_sync_impl(
                     bound_model_id,
                 )
             return bound_model_id
-
-        if indexed_model_id:
-            if config_model_id and config_model_id != indexed_model_id:
-                logger.warning(
-                    "Config embedding_model_id '%s' overridden by "
-                    "collection '%s' ingestion config model '%s'",
-                    config_model_id,
-                    collection_name,
-                    indexed_model_id,
-                )
-            logger.info(
-                "Collection '%s' using ingestion config embedding_model_id '%s'",
-                collection_name,
-                indexed_model_id,
-            )
-            return indexed_model_id
 
         inferred_model_id: Optional[str] = None
         inferred_dimension: Optional[int] = None
@@ -1411,6 +1422,19 @@ async def rebuild_collection_metadata() -> None:
     Use this to migrate existing data when collection_metadata table is missing or outdated.
     """
     await _get_maintenance_compatibility_facade().rebuild_collection_metadata()
+
+
+# What the rebuild recomputes from the tables and may therefore overwrite. The
+# rest of the listed row is echoed from a pre-loop snapshot and must not be
+# written back. The embedding binding is appended only when it was inferred.
+_REBUILD_OWNED_FIELDS = (
+    "documents",
+    "parses",
+    "chunks",
+    "embeddings",
+    "processed_documents",
+    "document_names",
+)
 
 
 async def _rebuild_collection_metadata_impl() -> None:
@@ -1504,23 +1528,28 @@ async def _rebuild_collection_metadata_impl() -> None:
 
                         break
 
-            # Only overwrite what was actually inferred. save_collection
-            # merges with when_matched_update_all, so writing None for a
-            # collection with no embeddings yet would erase the binding it
-            # already has. Until now the enum TypeError below aborted the
-            # whole row, which is why this never surfaced.
+            # A model without its dimension would still satisfy
+            # CollectionInfo.is_initialized while leaving the previous, possibly
+            # incompatible, dimension in place: bind the pair or neither.
             embedding_updates: dict[str, Any] = {}
-            if embedding_model_id is not None:
+            if embedding_model_id is not None and embedding_dimension is not None:
                 embedding_updates["embedding_model_id"] = embedding_model_id
-            if embedding_dimension is not None:
                 embedding_updates["embedding_dimension"] = embedding_dimension
-            updated_collection = (
+            elif embedding_model_id is not None:
+                logger.warning(
+                    "Collection '%s' embedding table gave model '%s' with no "
+                    "dimension; leaving the stored binding untouched",
+                    collection.name,
+                    embedding_model_id,
+                )
+            candidate = (
                 collection.model_copy(update=embedding_updates)
                 if embedding_updates
                 else collection
             )
 
-            # Use the async save_collection method through sync wrapper
-            _sync_wrapper(collection_manager.save_collection)(updated_collection)
+            _sync_wrapper(collection_manager.save_collection_fields)(
+                candidate, _REBUILD_OWNED_FIELDS + tuple(embedding_updates)
+            )
         except Exception as e:
             logger.error("Failed to rebuild collection '%s': %s", collection.name, e)

@@ -1,5 +1,7 @@
 """Tests for collection manager functionality."""
 
+import asyncio
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from xagent.core.tools.core.RAG_tools.core.schemas import (
     CollectionInfo,
     IngestionConfig,
+    ParseMethod,
 )
 from xagent.core.tools.core.RAG_tools.management.collection_manager import (
     CollectionManager,
@@ -421,10 +424,10 @@ class TestResolveEffectiveEmbeddingModel:
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager.get_collection_sync"
     )
-    def test_ingestion_config_model_used_when_bound_model_missing(
+    def test_ingestion_config_model_does_not_outrank_the_caller(
         self, mock_get_collection: Mock, _mock_mark: Mock
     ) -> None:
-        """Collection ingestion config should supply the search embedding model."""
+        """An attached config is tenant-scoped, so it never wins the resolution."""
         mock_get_collection.return_value = CollectionInfo(
             name="test_collection",
             embedding_model_id=None,
@@ -433,10 +436,10 @@ class TestResolveEffectiveEmbeddingModel:
         )
 
         resolved = resolve_effective_embedding_model_sync(
-            "test_collection", config_model_id=None
+            "test_collection", config_model_id="caller-embed"
         )
 
-        assert resolved == "kb-index-embed"
+        assert resolved == "caller-embed"
 
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager.mark_collection_accessed_sync"
@@ -444,10 +447,10 @@ class TestResolveEffectiveEmbeddingModel:
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager.get_collection_sync"
     )
-    def test_none_placeholder_does_not_override_ingestion_config_model(
+    def test_ingestion_config_model_is_not_a_fallback_source(
         self, mock_get_collection: Mock, _mock_mark: Mock
     ) -> None:
-        """Tool placeholder values should still fall back to the indexed model."""
+        """With no bound model and no caller config there is nothing to resolve."""
         mock_get_collection.return_value = CollectionInfo(
             name="test_collection",
             embedding_model_id=None,
@@ -455,11 +458,10 @@ class TestResolveEffectiveEmbeddingModel:
             ingestion_config=IngestionConfig(embedding_model_id="kb-index-embed"),
         )
 
-        resolved = resolve_effective_embedding_model_sync(
-            "test_collection", config_model_id="none"
-        )
-
-        assert resolved == "kb-index-embed"
+        with pytest.raises(ValueError, match="not initialized"):
+            resolve_effective_embedding_model_sync(
+                "test_collection", config_model_id="none"
+            )
 
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager._sync_wrapper"
@@ -538,31 +540,46 @@ class TestResolveEffectiveEmbeddingModel:
 # --- rebuild_collection_metadata Tests (Issue #14) ---
 
 
-@patch(
-    "xagent.core.tools.core.RAG_tools.management.collection_manager.get_vector_index_store"
-)
-@patch("xagent.core.tools.core.RAG_tools.management.collections")
-@pytest.mark.asyncio
-async def test_rebuild_keeps_a_binding_it_could_not_infer(
-    mock_collections_module, mock_get_vector_store, monkeypatch
+def _run_rebuild_capturing_writes(
+    monkeypatch, listed, *, table_names, row_counts=0, vector_dimension=None
 ):
-    """A collection with no embeddings must keep the binding it already has.
+    """Run the rebuild against a mocked vector store, capturing what it writes.
 
-    The inference block is skipped when ``embeddings == 0``, and
-    ``save_collection`` merges with when_matched_update_all, so passing the
-    un-inferred Nones through would blank the stored model. The enum TypeError
-    in ``to_storage`` used to abort the row before it landed, which is why this
-    never surfaced.
+    Returns the ``(candidate, owned_fields)`` pairs handed to
+    ``save_collection_fields`` -- the fields the rebuild claims to own.
     """
     from types import SimpleNamespace
 
-    from xagent.core.tools.core.RAG_tools.core.schemas import (
-        CollectionInfo,
-        IngestionConfig,
-        ParseMethod,
-    )
     from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+    from xagent.core.tools.core.RAG_tools.management import collections
 
+    async def mock_list_collections(**kwargs):
+        return SimpleNamespace(status="success", collections=[listed])
+
+    mock_vector_store = Mock()
+    mock_vector_store.list_table_names.return_value = table_names
+    mock_vector_store.count_rows_or_zero.return_value = row_counts
+    mock_vector_store.get_vector_dimension.return_value = vector_dimension
+
+    writes: list[tuple[Any, tuple[str, ...]]] = []
+
+    async def capture(collection, owned_fields):
+        writes.append((collection, owned_fields))
+
+    monkeypatch.setattr(collections, "list_collections", mock_list_collections)
+    monkeypatch.setattr(cm, "get_vector_index_store", lambda: mock_vector_store)
+    monkeypatch.setattr(cm.collection_manager, "save_collection_fields", capture)
+
+    asyncio.run(cm.rebuild_collection_metadata())
+    return writes
+
+
+def test_rebuild_does_not_claim_a_binding_it_could_not_infer(monkeypatch):
+    """With no embeddings there is nothing to infer, so nothing to overwrite.
+
+    The storage merge overwrites every column it is given, so claiming the
+    embedding fields here would blank the binding the row already has.
+    """
     listed = CollectionInfo(
         name="bound_collection",
         embedding_model_id="text-embedding-v4",
@@ -572,27 +589,63 @@ async def test_rebuild_keeps_a_binding_it_could_not_infer(
         ingestion_config=IngestionConfig(parse_method=ParseMethod.PYPDF),
     )
 
-    async def mock_list_collections(**kwargs):
-        return SimpleNamespace(status="success", collections=[listed])
+    writes = _run_rebuild_capturing_writes(
+        monkeypatch, listed, table_names=["documents", "chunks"]
+    )
 
-    mock_collections_module.list_collections = mock_list_collections
+    assert len(writes) == 1
+    _, owned_fields = writes[0]
+    assert "embedding_model_id" not in owned_fields
+    assert "embedding_dimension" not in owned_fields
 
-    mock_vector_store = Mock()
-    mock_get_vector_store.return_value = mock_vector_store
-    mock_vector_store.list_table_names.return_value = ["documents", "chunks"]
 
-    saved = []
+def test_rebuild_leaves_the_binding_alone_when_the_dimension_is_unknown(monkeypatch):
+    """A model without its dimension is not a usable pair, so bind neither.
 
-    async def capture(collection):
-        saved.append(collection)
+    ``get_vector_dimension`` legitimately returns None for a variable-length or
+    unreadable schema; writing only the model id would leave the previous,
+    possibly incompatible, dimension in place while ``is_initialized`` reports
+    the collection fully bound.
+    """
+    listed = CollectionInfo(
+        name="legacy_collection",
+        embedding_model_id="old-model",
+        embedding_dimension=1536,
+        embeddings=12,
+    )
 
-    monkeypatch.setattr(cm.collection_manager, "save_collection", capture)
+    writes = _run_rebuild_capturing_writes(
+        monkeypatch,
+        listed,
+        table_names=["embeddings_unmapped_tag"],
+        row_counts=1,
+        vector_dimension=None,
+    )
 
-    await cm.rebuild_collection_metadata()
+    assert len(writes) == 1
+    _, owned_fields = writes[0]
+    assert "embedding_model_id" not in owned_fields
+    assert "embedding_dimension" not in owned_fields
 
-    assert len(saved) == 1
-    assert saved[0].embedding_model_id == "text-embedding-v4"
-    assert saved[0].embedding_dimension == 1024
+
+def test_rebuild_claims_the_binding_when_both_halves_are_known(monkeypatch):
+    """The pair is complete, so the rebuild owns and overwrites both columns."""
+    listed = CollectionInfo(name="legacy_collection", embeddings=12)
+
+    writes = _run_rebuild_capturing_writes(
+        monkeypatch,
+        listed,
+        table_names=["embeddings_unmapped_tag"],
+        row_counts=1,
+        vector_dimension=768,
+    )
+
+    assert len(writes) == 1
+    candidate, owned_fields = writes[0]
+    assert "embedding_model_id" in owned_fields
+    assert "embedding_dimension" in owned_fields
+    assert candidate.embedding_model_id == "unmapped-tag"
+    assert candidate.embedding_dimension == 768
 
 
 class TestRebuildCollectionMetadata:
