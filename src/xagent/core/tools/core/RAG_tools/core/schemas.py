@@ -1430,8 +1430,6 @@ class CollectionInfo(BaseModel):
         description="Whether to skip configuration validation during ingestion. Use with caution.",
     )
 
-    # 📝 Transient tenant-scoped ingestion config -- never persisted here;
-    # attached at list time from the collection_config table.
     ingestion_config: Optional[IngestionConfig] = Field(
         default=None,
         description=(
@@ -1485,9 +1483,7 @@ class CollectionInfo(BaseModel):
             data["extra_metadata"] = json.loads(data["extra_metadata"])
         if isinstance(data.get("document_names"), str):
             data["document_names"] = json.loads(data["document_names"])
-        # Owner-neutral row (keyed by name alone), so it can never hydrate a
-        # config that belongs to one (collection, user_id). Callers get theirs
-        # from collection_config at list time.
+        # Owner-neutral row: a config found here belongs to someone else.
         data["ingestion_config"] = None
         # Owners are not stored; they are derived at list time from user_id. Ignore stored value.
         if "owners" in data:
@@ -1541,9 +1537,7 @@ class CollectionInfo(BaseModel):
         # Do not persist owners; they are computed from user_id when listing
         data["owners"] = "[]"
 
-        # Never persisted: this row is keyed by name alone, and an ingestion
-        # config belongs to one (collection, user_id) and may carry a
-        # credential. Empty string, not None: the column is non-null.
+        # Empty string, not None: the column is non-null.
         data["ingestion_config"] = LANCEDB_NULL_STR_SENTINEL
 
         if data.get("embedding_model_id") is None:
