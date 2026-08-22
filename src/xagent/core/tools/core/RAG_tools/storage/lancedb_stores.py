@@ -1604,7 +1604,13 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # is all-or-nothing, so the panic takes the vector index merge down
             # with it. A rebuild leaves nothing unindexed, so the merge becomes
             # a no-op -- and measures cheaper than the merge it replaces.
-            self._rebuild_fts_index(table, table_name)
+            try:
+                self._rebuild_fts_index(table, table_name)
+            except Exception as exc:  # noqa: BLE001
+                # Must not take optimize down with it: compaction and version
+                # pruning run before the index step and are what reclaim the
+                # disk, so losing them costs more than a stale FTS index.
+                logger.warning("FTS rebuild failed for %s: %s", table_name, exc)
             table.optimize(cleanup_older_than=cleanup_older_than)
             # Pruning drops the versions cached handles point at, same reason
             # the delete paths invalidate after mutating a table.
@@ -1623,15 +1629,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         Guarded because ``compact_tables`` routes documents, parses, chunks and
         ingestion_runs through the same path and only embeddings carries FTS.
         """
-        try:
-            has_fts = any(
-                idx.index_type == "FTS" and "text" in idx.columns
-                for idx in table.list_indices()
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not list indices for %s: %s", table_name, exc)
-            return
-
+        has_fts = any(
+            idx.index_type == "FTS" and "text" in idx.columns
+            for idx in table.list_indices()
+        )
         if not has_fts:
             return
 

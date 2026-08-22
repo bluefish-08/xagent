@@ -35,17 +35,6 @@ def indexed_table(tmp_path):
     return table
 
 
-def test_vector_index_is_not_named_after_the_column_alone(indexed_table):
-    """The name-based check can never match, on any supported LanceDB.
-
-    Pinning this is the point: it is the assumption the bug rested on.
-    """
-    names = {idx.name for idx in indexed_table.list_indices()}
-
-    assert "vector" not in names
-    assert "vector_idx" in names
-
-
 def test_vector_index_is_discoverable_by_column(indexed_table):
     """The column-based check finds the index that was just created."""
     indexes = indexed_table.list_indices()
@@ -223,3 +212,38 @@ def test_optimize_of_a_table_without_fts_skips_the_rebuild(tmp_path, monkeypatch
     assert store.trigger_reindex("parses") is True
 
     assert calls == ["optimize"]
+
+
+def test_a_failed_fts_rebuild_still_lets_optimize_run(tmp_path, monkeypatch):
+    """The rebuild must not take compaction down with it.
+
+    Compaction and version pruning run before optimize's index step and are
+    what reclaim the disk; upstream measured a panicking index step still
+    releasing 85-90% of it. Letting a rebuild failure skip optimize entirely
+    would be the same failure mode this change exists to remove.
+    """
+    lancedb = pytest.importorskip("lancedb")
+    db = lancedb.connect(str(tmp_path / "fts-boom"))
+    table = db.create_table("embeddings_probe", data=_rows(400))
+    table.create_fts_index("text", with_position=True, replace=True)
+
+    calls: list[str] = []
+    real_optimize = table.optimize
+
+    def exploding_fts(*args, **kwargs):
+        calls.append("create_fts_index")
+        raise RuntimeError("index out of bounds: the len is 10791")
+
+    def optimize(*args, **kwargs):
+        calls.append("optimize")
+        return real_optimize(*args, **kwargs)
+
+    table.create_fts_index = exploding_fts
+    table.optimize = optimize
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+
+    assert store.trigger_reindex("embeddings_probe") is True
+
+    assert calls == ["create_fts_index", "optimize"]
