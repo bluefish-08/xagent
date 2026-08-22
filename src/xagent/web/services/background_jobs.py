@@ -359,9 +359,10 @@ def requeue_stale_background_jobs(
     if not stale_jobs:
         return requeued
 
+    # No post-commit refresh anywhere below: reading an expired attribute
+    # reopens a transaction that then stays open until the next commit -- on
+    # return, or across the broker call.
     db.commit()
-    for job in stale_jobs:
-        db.refresh(job)
 
     if not get_celery_enabled():
         return stale_jobs
@@ -374,37 +375,43 @@ def requeue_stale_background_jobs(
             )
             db.add(job)
         db.commit()
-        for job in stale_jobs:
-            db.refresh(job)
         return stale_jobs
 
     from ..jobs.tasks import execute_background_job
 
+    dispatch_targets = [
+        (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
+    ]
     for job in stale_jobs:
         setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
         db.add(job)
     db.commit()
-    for job in stale_jobs:
-        db.refresh(job)
 
-    for job in stale_jobs:
+    task_ids: dict[str, str] = {}
+    dispatch_errors: dict[str, str] = {}
+    for job_id, queue in dispatch_targets:
         try:
             async_result = execute_background_job.apply_async(
-                args=[job.id],
-                queue=str(job.queue or QUEUE_DEFAULT),
+                args=[job_id],
+                queue=queue,
             )
-            setattr(job, "celery_task_id", async_result.id)
-            requeued.append(job)
+            task_ids[job_id] = async_result.id
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to requeue stale background job %s", job.id)
+            logger.exception("Failed to requeue stale background job %s", job_id)
+            dispatch_errors[job_id] = str(exc)
+
+    for job in stale_jobs:
+        job_id = str(job.id)
+        error = dispatch_errors.get(job_id)
+        if error is None:
+            setattr(job, "celery_task_id", task_ids.get(job_id))
+        else:
             setattr(job, "status", BackgroundJobStatus.PENDING.value)
-            setattr(job, "error_message", f"Failed to requeue stale job: {exc}")
-            requeued.append(job)
+            setattr(job, "error_message", f"Failed to requeue stale job: {error}")
+        requeued.append(job)
         db.add(job)
 
     db.commit()
-    for job in requeued:
-        db.refresh(job)
 
     return requeued
 

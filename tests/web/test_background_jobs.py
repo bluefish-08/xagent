@@ -2436,3 +2436,125 @@ def test_enqueue_failure_records_the_failure_without_holding_a_transaction(
         assert row.status == BackgroundJobStatus.FAILED.value
     finally:
         db.close()
+
+
+def test_requeue_dispatches_to_broker_with_no_open_transaction(tmp_path, monkeypatch):
+    """The stale-job scan must not hold a read transaction across apply_async.
+
+    A slow or unreachable broker blocks per job while the session sits idle in
+    transaction, which is exactly what the server terminates. The task ids are
+    persisted afterwards, in a write that starts once the broker is done.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.models.database import get_engine
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="requeue-txn")
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        job_ids: list[str] = []
+        for index in range(2):
+            job = create_background_job(
+                db,
+                user_id=int(user.id),
+                job_type=BackgroundJobType.KB_INGEST_WEB,
+                payload={"collection": f"kb{index}"},
+            )
+            setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+            db.add(job)
+            db.commit()
+            _age_job(db, job, updated_at=old, started_at=old)
+            job_ids.append(str(job.id))
+        db.rollback()
+
+        tracker = _track_open_transactions(get_engine())
+        observed: list[int] = []
+
+        class _Result:
+            def __init__(self, task_id: str) -> None:
+                self.id = task_id
+
+        def fake_apply_async(*, args, queue):  # noqa: ANN001, ANN202
+            observed.append(tracker["open"])
+            return _Result(f"task-{args[0]}")
+
+        monkeypatch.setattr(
+            tasks_module.execute_background_job, "apply_async", fake_apply_async
+        )
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert observed == [0, 0], (
+            f"a transaction was open while the broker was called: {observed}"
+        )
+        assert tracker["open"] == 0, "requeue returned with a transaction still open"
+        assert sorted(str(item.id) for item in requeued) == sorted(job_ids)
+        db.expire_all()
+        for job_id in job_ids:
+            row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+            assert row.celery_task_id == f"task-{job_id}"
+            assert row.status == BackgroundJobStatus.ENQUEUED.value
+    finally:
+        db.close()
+
+
+def test_requeue_records_broker_failure_per_job(tmp_path, monkeypatch):
+    """A broker that rejects one job leaves that row PENDING with the reason."""
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-broker-fail.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="requeue-broker-fail")
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        job_ids: list[str] = []
+        for index in range(2):
+            job = create_background_job(
+                db,
+                user_id=int(user.id),
+                job_type=BackgroundJobType.KB_INGEST_WEB,
+                payload={"collection": f"kb{index}"},
+            )
+            setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+            db.add(job)
+            db.commit()
+            _age_job(db, job, updated_at=old, started_at=old)
+            job_ids.append(str(job.id))
+        db.rollback()
+
+        doomed = job_ids[0]
+
+        class _Result:
+            def __init__(self, task_id: str) -> None:
+                self.id = task_id
+
+        def fake_apply_async(*, args, queue):  # noqa: ANN001, ANN202
+            if args[0] == doomed:
+                raise RuntimeError("broker unreachable")
+            return _Result(f"task-{args[0]}")
+
+        monkeypatch.setattr(
+            tasks_module.execute_background_job, "apply_async", fake_apply_async
+        )
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert sorted(str(item.id) for item in requeued) == sorted(job_ids)
+        db.expire_all()
+        failed = db.query(BackgroundJob).filter(BackgroundJob.id == doomed).first()
+        assert failed.status == BackgroundJobStatus.PENDING.value
+        assert failed.celery_task_id is None
+        assert "broker unreachable" in str(failed.error_message)
+
+        other = db.query(BackgroundJob).filter(BackgroundJob.id == job_ids[1]).first()
+        assert other.status == BackgroundJobStatus.ENQUEUED.value
+        assert other.celery_task_id == f"task-{job_ids[1]}"
+    finally:
+        db.close()
