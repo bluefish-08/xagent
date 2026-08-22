@@ -448,7 +448,8 @@ class CollectionManager:
                 ("collection_locked", pa.bool_()),
                 ("allow_mixed_parse_methods", pa.bool_()),
                 ("skip_config_validation", pa.bool_()),
-                ("ingestion_config", pa.string()),  # JSON string
+                # Schema-only; not maintained (tenant config lives in collection_config)
+                ("ingestion_config", pa.string()),
                 ("created_at", pa.timestamp("us")),
                 ("updated_at", pa.timestamp("us")),
                 ("last_accessed_at", pa.timestamp("us")),

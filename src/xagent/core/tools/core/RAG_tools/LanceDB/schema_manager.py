@@ -666,6 +666,7 @@ def ensure_collection_metadata_table(conn: DBConnection) -> None:
             pa.field("collection_locked", pa.bool_()),
             pa.field("allow_mixed_parse_methods", pa.bool_()),
             pa.field("skip_config_validation", pa.bool_()),
+            # Schema-only; tenant config lives in collection_config.
             pa.field("ingestion_config", pa.string()),
             pa.field("created_at", pa.timestamp("us")),
             pa.field("updated_at", pa.timestamp("us")),

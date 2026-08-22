@@ -427,6 +427,7 @@ class LanceDBMetadataStore(MetadataStore):
                 ("collection_locked", pa.bool_()),
                 ("allow_mixed_parse_methods", pa.bool_()),
                 ("skip_config_validation", pa.bool_()),
+                # Schema-only compat column; tenant config lives in collection_config.
                 ("ingestion_config", pa.string()),
                 ("created_at", pa.timestamp("us")),
                 ("updated_at", pa.timestamp("us")),
