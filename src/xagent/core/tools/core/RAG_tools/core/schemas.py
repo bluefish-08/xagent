@@ -1538,13 +1538,13 @@ class CollectionInfo(BaseModel):
         # Do not persist owners; they are computed from user_id when listing
         data["owners"] = "[]"
 
-        # Serialize ingestion_config if present. pydantic's JSON mode, not
-        # json.dumps: the config carries enum fields the plain encoder rejects.
-        if self.ingestion_config is not None:
-            data["ingestion_config"] = self.ingestion_config.model_dump_json()
-        else:
-            # Use empty string sentinel instead of None to prevent LanceDB non-null schema errors
-            data["ingestion_config"] = LANCEDB_NULL_STR_SENTINEL
+        # Never persisted here. This row is keyed by name alone, while an
+        # ingestion config belongs to one (collection, user_id) and may carry
+        # an embedding_api_key -- writing it would hand one tenant's model
+        # binding and credential to every same-named collection. The
+        # collection_config table owns that data; this column stays empty.
+        # Empty string, not None: the LanceDB schema is non-null.
+        data["ingestion_config"] = LANCEDB_NULL_STR_SENTINEL
 
         if data.get("embedding_model_id") is None:
             data["embedding_model_id"] = LANCEDB_NULL_STR_SENTINEL

@@ -1435,8 +1435,12 @@ class TestCollectionInfo:
         assert storage_data["processed_documents"] == 3
         assert storage_data["ingestion_config"] == ""
 
-    def test_collection_info_to_storage_populated_ingestion_config(self):
-        """A populated ingestion_config must serialize, enum fields included."""
+    def test_to_storage_does_not_persist_a_populated_ingestion_config(self):
+        """This row is keyed by name alone, so tenant config cannot live in it.
+
+        Serializing it used to raise TypeError on the enum fields, which is the
+        only reason the cross-tenant write never happened.
+        """
         collection = CollectionInfo(
             name="test_collection",
             ingestion_config=IngestionConfig(
@@ -1445,10 +1449,25 @@ class TestCollectionInfo:
             ),
         )
 
-        payload = json.loads(collection.to_storage()["ingestion_config"])
+        storage_data = collection.to_storage()
 
-        assert payload["parse_method"] == "pypdf"
-        assert payload["chunk_strategy"] == "markdown"
+        assert storage_data["ingestion_config"] == ""
+
+    def test_to_storage_never_persists_an_embedding_api_key(self):
+        """A credential must not reach an owner-neutral row."""
+        collection = CollectionInfo(
+            name="test_collection",
+            ingestion_config=IngestionConfig(
+                parse_method=ParseMethod.PYPDF,
+                embedding_api_key="sk-not-a-real-key",
+                embedding_model_id="tenant-a-model",
+            ),
+        )
+
+        serialized = json.dumps(collection.to_storage(), default=str)
+
+        assert "sk-not-a-real-key" not in serialized
+        assert "tenant-a-model" not in serialized
 
     def test_collection_info_to_storage_keeps_datetimes_native(self):
         """LanceDB timestamp columns need datetimes, not ISO strings."""
@@ -1463,8 +1482,8 @@ class TestCollectionInfo:
         assert isinstance(storage_data["updated_at"], datetime)
         assert isinstance(storage_data["last_accessed_at"], datetime)
 
-    def test_collection_info_storage_round_trip_restores_enums(self):
-        """from_storage(to_storage()) hands the enum members back."""
+    def test_storage_round_trip_carries_no_ingestion_config(self):
+        """What went in as tenant config must not come back out of this row."""
         collection = CollectionInfo(
             name="test_collection",
             ingestion_config=IngestionConfig(
@@ -1475,9 +1494,7 @@ class TestCollectionInfo:
 
         restored = CollectionInfo.from_storage(collection.to_storage())
 
-        assert restored.ingestion_config is not None
-        assert restored.ingestion_config.parse_method is ParseMethod.PYPDF
-        assert restored.ingestion_config.chunk_strategy is ChunkStrategy.MARKDOWN
+        assert restored.ingestion_config is None
 
     def test_collection_info_immutability_by_default(self):
         """Test that CollectionInfo is immutable by default after creation."""
