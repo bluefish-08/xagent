@@ -49,6 +49,20 @@ def psycopg2_kwargs(base_url: str, dbname: str | None = None) -> dict[str, objec
     }
 
 
+def _admin_connection(base_url: str):
+    conn = psycopg2.connect(**psycopg2_kwargs(base_url))
+    conn.autocommit = True
+    return conn
+
+
+def _create_disposable_database(base_url: str, dbname: str) -> None:
+    admin_conn = _admin_connection(base_url)
+    try:
+        admin_conn.cursor().execute(f'CREATE DATABASE "{dbname}"')
+    finally:
+        admin_conn.close()
+
+
 @contextmanager
 def disposable_database_factory(
     prefix: str,
@@ -67,20 +81,11 @@ def disposable_database_factory(
     if not base_url:
         pytest.skip("XAGENT_TEST_POSTGRES_URL is not set")
 
-    def _admin_connection():
-        conn = psycopg2.connect(**psycopg2_kwargs(base_url))
-        conn.autocommit = True
-        return conn
-
     minted: list[tuple[str, sa.engine.Engine]] = []
 
     def _make(tag: str) -> sa.engine.Engine:
         dbname = f"{prefix}_{tag}_{uuid.uuid4().hex[:10]}"
-        admin_conn = _admin_connection()
-        try:
-            admin_conn.cursor().execute(f'CREATE DATABASE "{dbname}"')
-        finally:
-            admin_conn.close()
+        _create_disposable_database(base_url, dbname)
 
         connect_kwargs = psycopg2_kwargs(base_url, dbname)
 
@@ -108,7 +113,7 @@ def disposable_database_factory(
         undropped: list[str] = []
         if minted:
             try:
-                admin_conn = _admin_connection()
+                admin_conn = _admin_connection(base_url)
             except Exception as exc:
                 raise RuntimeError(
                     "cannot reach the PostgreSQL server to drop the "
@@ -134,6 +139,57 @@ def disposable_database_factory(
                 "disposable databases left behind on the server; drop them "
                 "by hand: " + "; ".join(undropped)
             )
+
+
+@contextmanager
+def disposable_database_url(
+    prefix: str,
+    *,
+    settings: dict[str, str] | None = None,
+) -> Iterator[str]:
+    """Mint one disposable database and yield its connection URL.
+
+    The engine-returning factory above cannot serve callers that must hand a
+    URL to application code (``configure_db``) rather than drive an engine
+    themselves. ``settings`` are applied with ALTER DATABASE SET, so every
+    connection the application opens inherits them -- which is how a test can
+    impose a short ``idle_in_transaction_session_timeout``.
+    """
+    base_url = os.getenv("XAGENT_TEST_POSTGRES_URL")
+    if not base_url:
+        pytest.skip("XAGENT_TEST_POSTGRES_URL is not set")
+
+    dbname = f"{prefix}_{uuid.uuid4().hex[:10]}"
+    _create_disposable_database(base_url, dbname)
+
+    # Everything after CREATE DATABASE runs under the drop below, so a failing
+    # ALTER cannot leave the database behind.
+    try:
+        admin_conn = _admin_connection(base_url)
+        try:
+            for key, value in (settings or {}).items():
+                admin_conn.cursor().execute(
+                    f'ALTER DATABASE "{dbname}" SET {key} = %s', (value,)
+                )
+        finally:
+            admin_conn.close()
+
+        yield (
+            make_url(base_url)
+            .set(database=dbname)
+            .render_as_string(hide_password=False)
+        )
+    finally:
+        admin_conn = _admin_connection(base_url)
+        try:
+            admin_conn.cursor().execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (dbname,),
+            )
+            admin_conn.cursor().execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+        finally:
+            admin_conn.close()
 
 
 def load_migration_module(path: Path, name: str = "migration_under_test") -> ModuleType:
