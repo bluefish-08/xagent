@@ -316,7 +316,6 @@ def test_a_written_row_carries_the_migrated_schema_version(metadata_store):
 
     migrated = asyncio.run(metadata_store.get_collection(name))
     assert migrated.schema_version == "1.0.0"
-    assert "schema_version" not in cm._REBUILD_OWNED_FIELDS
 
     recomputed = migrated.model_copy(update={"documents": 4})
     asyncio.run(

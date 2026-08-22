@@ -97,12 +97,13 @@ async def _collection_thread_guard(collection_name: str) -> AsyncIterator[None]:
 
 # Collections whose embedding table yielded a model but no dimension, so the
 # binding was never persisted: without this the resolver rescans every
-# embeddings_* table on every ingest and search, forever.
+# embeddings_* table on every ingest and search, forever. No invalidation
+# path in-process; a later-readable dimension is retried after restart.
 _UNPERSISTABLE_INFERRED_MODELS: dict[str, str] = {}
 
 
 def reset_locks_for_testing() -> None:
-    """Clear in-memory collection locks for test isolation."""
+    """Clear in-memory collection locks and the negative inference cache."""
     with _collection_locks_lock:
         _collection_locks.clear()
     with _collection_thread_locks_guard:
