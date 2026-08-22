@@ -1442,7 +1442,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
                 # Check existing indexes
                 indexes = table.list_indices()
-                has_vector_index = any(idx.name == "vector" for idx in indexes)
+                # Match by column, as the FTS checks in this file do. LanceDB
+                # names the index after its column (``vector_idx``), so a check
+                # on the bare column name never matched and every call rebuilt.
+                has_vector_index = any("vector" in idx.columns for idx in indexes)
 
                 if not has_vector_index:
                     # Create index with recommended type
@@ -1595,6 +1598,13 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 cleanup_older_than = timedelta(
                     days=DEFAULT_INDEX_POLICY.version_retention_days
                 )
+            # Rebuild FTS in full before optimize merges it incrementally.
+            # That merge panics on indices written by older FTS writers
+            # (lance-format/lance#8310, still open), and optimize's index step
+            # is all-or-nothing, so the panic takes the vector index merge down
+            # with it. A rebuild leaves nothing unindexed, so the merge becomes
+            # a no-op -- and measures cheaper than the merge it replaces.
+            self._rebuild_fts_index(table, table_name)
             table.optimize(cleanup_older_than=cleanup_older_than)
             # Pruning drops the versions cached handles point at, same reason
             # the delete paths invalidate after mutating a table.
@@ -1606,6 +1616,28 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             return False
         finally:
             _safe_close_table(table)
+
+    def _rebuild_fts_index(self, table: Any, table_name: str) -> None:
+        """Rebuild the FTS index, if this table has one.
+
+        Guarded because ``compact_tables`` routes documents, parses, chunks and
+        ingestion_runs through the same path and only embeddings carries FTS.
+        """
+        try:
+            has_fts = any(
+                idx.index_type == "FTS" and "text" in idx.columns
+                for idx in table.list_indices()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not list indices for %s: %s", table_name, exc)
+            return
+
+        if not has_fts:
+            return
+
+        fts_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
+        table.create_fts_index("text", replace=True, **fts_params)
+        logger.info("Rebuilt FTS index for %s before optimize", table_name)
 
     def should_compact(
         self, table_name: str, policy: Optional[IndexPolicy] = None
