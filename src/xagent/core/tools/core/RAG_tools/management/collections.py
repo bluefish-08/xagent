@@ -923,11 +923,8 @@ async def _list_collections_impl(
                     info = _build_collection_info(
                         collection,
                         metadata_info=existing_metadata_info,
-                        ingestion_config=(
-                            existing_metadata_info.ingestion_config
-                            if existing_metadata_info
-                            else None
-                        ),
+                        # Always None: from_storage drops the tenant-scoped config.
+                        ingestion_config=None,
                         processed_documents=stats[collection]["parses"],
                         timestamp_now=realtime_timestamp,
                     )
