@@ -78,7 +78,11 @@ def _reject_legacy_handler_signature(job_type: str, handler: Any) -> None:
     worker import, which is where a downstream distribution can still react.
     """
     try:
-        params = list(inspect.signature(handler).parameters.values())
+        # follow_wrapped=False: a @functools.wraps shim around a legacy handler
+        # otherwise reports the wrapped function's two parameters and is refused.
+        params = list(
+            inspect.signature(handler, follow_wrapped=False).parameters.values()
+        )
     except (TypeError, ValueError):
         # Some C callables expose no signature; let execution surface any
         # mismatch rather than refuse a handler that may well be valid.
@@ -102,8 +106,8 @@ def _reject_legacy_handler_signature(job_type: str, handler: Any) -> None:
         raise ValueError(
             f"Background job handler for {job_type} takes {len(required)} required "
             "arguments; handlers now receive one BackgroundJobRef. The (db, job) "
-            "signature was removed so no Session outlives a single operation -- "
-            "read what you need from the ref and open your own short session."
+            "signature was removed because the worker holds no session across "
+            "the handler body -- open your own short session per operation."
         )
 
 

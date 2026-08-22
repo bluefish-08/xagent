@@ -30,8 +30,8 @@ class BackgroundJobType(str, enum.Enum):
 class BackgroundJobRef:
     """Immutable snapshot of a job row, read once before the work starts.
 
-    Handlers receive values rather than an ORM instance so that no session
-    outlives a single operation: work that runs for hours must not hold a
+    Handlers receive values rather than an ORM instance so the worker holds no
+    session across the handler body: work that runs for hours must not hold a
     transaction open across its idle gaps.
     """
 

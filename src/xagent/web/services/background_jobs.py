@@ -381,9 +381,8 @@ def requeue_stale_background_jobs(
         (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
     ]
 
-    # apply_async is broker I/O and can block for as long as the broker takes.
-    # Nothing may be read from the session until it returns, or the refresh
-    # above reopens a transaction that then sits idle across that call.
+    # expire_on_commit means the snapshot above reopened a transaction to reread
+    # job.id; drop it before apply_async, which blocks on broker I/O.
     db.rollback()
 
     task_ids: dict[str, str] = {}

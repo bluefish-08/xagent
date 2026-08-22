@@ -2029,6 +2029,20 @@ def test_register_background_job_handler_replace_overrides_existing(tmp_path):
         tasks_module._EXTRA_HANDLERS.pop("kb.team.transfer", None)
 
 
+def _wraps_legacy_shim():
+    """A ref-only handler wrapping a legacy ``(db, job)`` implementation."""
+    import functools
+
+    def legacy(db, job):
+        return {"status": "legacy"}
+
+    @functools.wraps(legacy)
+    def shim(ref):
+        return {"status": "ok"}
+
+    return shim
+
+
 def test_register_background_job_handler_rejects_legacy_two_arg_handler():
     """The removed ``(db, job)`` shape must be refused where it can be fixed.
 
@@ -2056,10 +2070,17 @@ def test_register_background_job_handler_rejects_legacy_two_arg_handler():
         pytest.param(lambda ref, *, retries=0: {"status": "ok"}, id="keyword-default"),
         pytest.param(lambda ref, unused=None: {"status": "ok"}, id="optional-second"),
         pytest.param(lambda *args: {"status": "ok"}, id="var-positional"),
+        pytest.param(_wraps_legacy_shim(), id="functools-wraps-shim"),
     ],
 )
 def test_register_background_job_handler_accepts_ref_only_shapes(handler):
-    """Only a second *required* positional means the old contract."""
+    """Only a second *required* positional means the old contract.
+
+    The wraps shim is the standard downstream migration: keep the ``(db, job)``
+    body, wrap it. ``inspect.signature`` follows ``__wrapped__`` by default and
+    reports the wrapped two parameters, so refusing it would break the worker
+    at import for the very code that did migrate.
+    """
     from xagent.web.jobs import tasks as tasks_module
 
     tasks_module.register_background_job_handler("kb.team.ref_shape", handler)

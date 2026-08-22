@@ -63,9 +63,8 @@ def _collection_existed_before(payload: dict[str, Any]) -> bool:
 def _get_job_user(payload: dict[str, Any], *, context: str) -> User | None:
     """Read the job's user on a scope of its own and hand back a detached row.
 
-    Expunged rather than expired, so the caller can read the loaded columns with
-    no transaction open while it does its external metadata/vector work; any
-    column that was not loaded raises instead of reading silently stale.
+    Expunged rather than expired, so the caller can read the columns with no
+    transaction open while it does its external metadata/vector work.
     """
     user_id = int(payload["user_id"])
     with session_scope() as db:
