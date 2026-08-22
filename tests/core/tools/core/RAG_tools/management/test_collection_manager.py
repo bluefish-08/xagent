@@ -544,6 +544,13 @@ class TestResolveEffectiveEmbeddingModel:
         assert resolved == "legacy-index-embed"
         mock_save.assert_not_called()
 
+        # Nothing was persisted, so without a cached negative this hot path
+        # rescans every embeddings_* table on every ingest and search.
+        assert resolve_effective_embedding_model_sync("legacy_collection") == (
+            "legacy-index-embed"
+        )
+        assert mock_infer.call_count == 1
+
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager._sync_wrapper"
     )
