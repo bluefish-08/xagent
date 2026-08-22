@@ -1528,6 +1528,7 @@ class CollectionInfo(BaseModel):
                 "storage_user_id",
                 "can_edit",
                 "can_delete",
+                "ingestion_config",
             }
         )
 
