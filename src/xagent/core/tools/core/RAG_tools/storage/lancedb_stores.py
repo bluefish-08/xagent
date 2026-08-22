@@ -1598,12 +1598,8 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 cleanup_older_than = timedelta(
                     days=DEFAULT_INDEX_POLICY.version_retention_days
                 )
-            # Rebuild FTS in full before optimize merges it incrementally.
-            # That merge panics on indices written by older FTS writers
-            # (lance-format/lance#8310, still open), and optimize's index step
-            # is all-or-nothing, so the panic takes the vector index merge down
-            # with it. A rebuild leaves nothing unindexed, so the merge becomes
-            # a no-op -- and measures cheaper than the merge it replaces.
+            # Must precede optimize: its incremental FTS merge is reported to
+            # panic on older-writer indices, taking the index step down (lance#8310).
             try:
                 self._rebuild_fts_index(table, table_name)
             except Exception as exc:  # noqa: BLE001
