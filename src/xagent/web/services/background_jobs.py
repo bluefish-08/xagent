@@ -253,10 +253,7 @@ def mark_job_running(job_id: str) -> int | None:
         )
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
-        if job.status in (
-            BackgroundJobStatus.CANCELLED.value,
-            BackgroundJobStatus.SUCCEEDED.value,
-        ):
+        if job.status in TERMINAL_JOB_STATUSES:
             return None
         attempts = int(job.attempts or 0) + 1
         setattr(job, "status", BackgroundJobStatus.RUNNING.value)
@@ -359,6 +356,12 @@ def requeue_stale_background_jobs(
     if not stale_jobs:
         return requeued
 
+    # Snapshot dispatch identities while the attributes are still loaded --
+    # after the commit each read would lazy-load on a reopened transaction.
+    dispatch_targets = [
+        (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
+    ]
+
     # No post-commit refresh anywhere below: reading an expired attribute
     # reopens a transaction. Every such read below is closed by the commit
     # that follows it; none spans the broker call or the return.
@@ -379,9 +382,6 @@ def requeue_stale_background_jobs(
 
     from ..jobs.tasks import execute_background_job
 
-    dispatch_targets = [
-        (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
-    ]
     for job in stale_jobs:
         setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
         db.add(job)

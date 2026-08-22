@@ -172,6 +172,9 @@ def _settled_job_result(job_id: str) -> dict[str, Any]:
         if job is not None and job.status == BackgroundJobStatus.SUCCEEDED.value:
             logger.info("Skipping already completed background job %s", job_id)
             return dict(job.result or {"status": "succeeded"})
+        if job is not None and job.status == BackgroundJobStatus.FAILED.value:
+            logger.info("Skipping already failed background job %s", job_id)
+            return dict(job.result or {"status": "failed"})
     logger.info("Skipping cancelled background job %s", job_id)
     return {"status": "cancelled"}
 

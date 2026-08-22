@@ -2273,6 +2273,45 @@ def test_claim_refuses_a_job_that_was_cancelled(tmp_path):
         db.close()
 
 
+def test_claim_refuses_a_job_that_already_failed(tmp_path):
+    """FAILED is terminal too: a duplicate delivery must not re-run the job.
+
+    Re-claiming would increment attempts past max_attempts and run the handler
+    once more after the failure was recorded.
+    """
+    from xagent.web.services.background_jobs import mark_job_running
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-claim-failed.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "claim-failed")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.failed",
+            payload={},
+        )
+        setattr(job, "status", BackgroundJobStatus.FAILED.value)
+        setattr(job, "result", {"status": "failed", "detail": "boom"})
+        db.add(job)
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        assert mark_job_running(job_id) is None
+
+        from xagent.web.jobs.tasks import _settled_job_result
+
+        assert _settled_job_result(job_id) == {"status": "failed", "detail": "boom"}
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert int(row.attempts or 0) == 0
+    finally:
+        db.close()
+
+
 def test_cancelled_job_is_skipped_without_running_the_handler(tmp_path, monkeypatch):
     monkeypatch.setenv(CELERY_ENABLED, "true")
     monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
