@@ -7,9 +7,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
-from ..models.background_job import BackgroundJob
 from ..models.database import session_scope
-from ..services.background_jobs import update_job_progress
+from ..services.background_jobs import get_background_job, update_job_progress
 
 logger = logging.getLogger(__name__)
 
@@ -193,11 +192,7 @@ class BackgroundJobProgressManager:
     def _current_progress(self) -> dict[str, Any]:
         try:
             with session_scope() as db:
-                job = (
-                    db.query(BackgroundJob)
-                    .filter(BackgroundJob.id == self.job_id)
-                    .first()
-                )
+                job = get_background_job(db, self.job_id)
                 if job is not None and isinstance(job.progress, dict):
                     return dict(job.progress)
         except Exception as exc:  # noqa: BLE001

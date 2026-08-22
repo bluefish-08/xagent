@@ -204,7 +204,7 @@ def enqueue_background_job(db: Session, job: BackgroundJob) -> BackgroundJob:
 
 
 def get_background_job(db: Session, job_id: str) -> BackgroundJob | None:
-    return db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+    return db.get(BackgroundJob, job_id)
 
 
 def list_background_jobs(
@@ -237,7 +237,7 @@ def mark_job_running(job_id: str) -> int:
     closes here, so a returned instance would be detached.
     """
     with session_scope() as db:
-        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        job = get_background_job(db, job_id)
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         attempts = int(job.attempts or 0) + 1
@@ -266,7 +266,7 @@ def update_job_progress(
     """
     try:
         with session_scope() as db:
-            job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+            job = get_background_job(db, job_id)
             if job is None:
                 return
             progress = dict(job.progress or {})
@@ -404,7 +404,7 @@ def requeue_stale_background_jobs(
 
 def mark_job_succeeded(job_id: str, *, result: dict[str, Any] | None = None) -> None:
     with session_scope() as db:
-        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        job = get_background_job(db, job_id)
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
@@ -428,7 +428,7 @@ def mark_job_failed(
     ``running`` forever and bypassing ``max_attempts``.
     """
     with session_scope() as db:
-        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        job = get_background_job(db, job_id)
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         setattr(job, "status", BackgroundJobStatus.FAILED.value)

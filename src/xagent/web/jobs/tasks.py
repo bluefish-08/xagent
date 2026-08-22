@@ -5,13 +5,13 @@ from collections.abc import Callable
 from typing import Any
 
 from ..models.background_job import (
-    BackgroundJob,
     BackgroundJobRef,
     BackgroundJobStatus,
     BackgroundJobType,
 )
 from ..models.database import get_optional_session_local, init_db, session_scope
 from ..services.background_jobs import (
+    get_background_job,
     mark_job_failed,
     mark_job_running,
     mark_job_succeeded,
@@ -114,7 +114,7 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
     _ensure_db_initialized()
 
     with session_scope() as db:
-        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        job = get_background_job(db, job_id)
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         if job.status == BackgroundJobStatus.CANCELLED.value:
@@ -168,7 +168,7 @@ def _mark_job_for_retry(
     generic path leaves it untouched.
     """
     with session_scope() as db:
-        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        job = get_background_job(db, job_id)
         if job is None:
             return
         setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)

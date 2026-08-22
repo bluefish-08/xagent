@@ -59,11 +59,7 @@ def handle_trigger_event(ref: BackgroundJobRef) -> dict[str, Any]:
         from ..models.trigger import AgentTrigger
 
         with session_scope() as db:
-            trigger = (
-                db.query(AgentTrigger)
-                .filter(AgentTrigger.id == int(trigger_id))
-                .first()
-            )
+            trigger = db.get(AgentTrigger, int(trigger_id))
             if trigger is None:
                 raise ValueError(f"Trigger not found: {trigger_id}")
             run, created = prepare_trigger_run(
