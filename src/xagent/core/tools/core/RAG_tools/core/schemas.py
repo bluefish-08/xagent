@@ -1430,10 +1430,15 @@ class CollectionInfo(BaseModel):
         description="Whether to skip configuration validation during ingestion. Use with caution.",
     )
 
-    # 📝 Stored Ingestion Config
+    # 📝 Transient tenant-scoped ingestion config -- never persisted here;
+    # attached at list time from the collection_config table.
     ingestion_config: Optional[IngestionConfig] = Field(
         default=None,
-        description="Default ingestion configuration for the collection.",
+        description=(
+            "Tenant-scoped ingestion configuration for one (collection, user_id). "
+            "Transient: excluded from to_storage() and dropped by from_storage(), "
+            "because the collection_metadata row is keyed by name alone."
+        ),
     )
 
     # 🕒 Timestamps
@@ -1480,12 +1485,10 @@ class CollectionInfo(BaseModel):
             data["extra_metadata"] = json.loads(data["extra_metadata"])
         if isinstance(data.get("document_names"), str):
             data["document_names"] = json.loads(data["document_names"])
-        if isinstance(data.get("ingestion_config"), str):
-            raw_ingestion_config = data["ingestion_config"].strip()
-            if raw_ingestion_config:
-                data["ingestion_config"] = json.loads(raw_ingestion_config)
-            else:
-                data["ingestion_config"] = None
+        # Owner-neutral row (keyed by name alone), so it can never hydrate a
+        # config that belongs to one (collection, user_id). Callers get theirs
+        # from collection_config at list time.
+        data["ingestion_config"] = None
         # Owners are not stored; they are derived at list time from user_id. Ignore stored value.
         if "owners" in data:
             data["owners"] = []
@@ -1538,12 +1541,9 @@ class CollectionInfo(BaseModel):
         # Do not persist owners; they are computed from user_id when listing
         data["owners"] = "[]"
 
-        # Never persisted here. This row is keyed by name alone, while an
-        # ingestion config belongs to one (collection, user_id) and may carry
-        # an embedding_api_key -- writing it would hand one tenant's model
-        # binding and credential to every same-named collection. The
-        # collection_config table owns that data; this column stays empty.
-        # Empty string, not None: the LanceDB schema is non-null.
+        # Never persisted: this row is keyed by name alone, and an ingestion
+        # config belongs to one (collection, user_id) and may carry a
+        # credential. Empty string, not None: the column is non-null.
         data["ingestion_config"] = LANCEDB_NULL_STR_SENTINEL
 
         if data.get("embedding_model_id") is None:

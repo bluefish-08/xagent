@@ -1389,8 +1389,25 @@ class TestCollectionInfo:
         assert collection.document_names == ["doc1.pdf", "doc2.md"]
         assert collection.collection_locked is True
         assert collection.extra_metadata == {"key": "value"}
-        assert collection.ingestion_config is not None
-        assert collection.ingestion_config.chunk_size == 512
+
+    def test_from_storage_drops_a_stored_ingestion_config(self):
+        """A current-version row skips migration, so from_storage must drop it.
+
+        The column is owner-neutral and can carry an embedding_api_key, and the
+        hydrated object feeds the embedding-model resolver.
+        """
+        collection = CollectionInfo.from_storage(
+            {
+                "name": "test_collection",
+                "schema_version": "1.0.0",
+                "ingestion_config": (
+                    '{"embedding_model_id": "tenant-a-model", '
+                    '"embedding_api_key": "sk-not-a-real-key"}'
+                ),
+            }
+        )
+
+        assert collection.ingestion_config is None
 
     def test_collection_info_from_storage_migration(self):
         """Test that from_storage handles migration automatically."""
