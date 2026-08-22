@@ -538,6 +538,63 @@ class TestResolveEffectiveEmbeddingModel:
 # --- rebuild_collection_metadata Tests (Issue #14) ---
 
 
+@patch(
+    "xagent.core.tools.core.RAG_tools.management.collection_manager.get_vector_index_store"
+)
+@patch("xagent.core.tools.core.RAG_tools.management.collections")
+@pytest.mark.asyncio
+async def test_rebuild_keeps_a_binding_it_could_not_infer(
+    mock_collections_module, mock_get_vector_store, monkeypatch
+):
+    """A collection with no embeddings must keep the binding it already has.
+
+    The inference block is skipped when ``embeddings == 0``, and
+    ``save_collection`` merges with when_matched_update_all, so passing the
+    un-inferred Nones through would blank the stored model. The enum TypeError
+    in ``to_storage`` used to abort the row before it landed, which is why this
+    never surfaced.
+    """
+    from types import SimpleNamespace
+
+    from xagent.core.tools.core.RAG_tools.core.schemas import (
+        CollectionInfo,
+        IngestionConfig,
+        ParseMethod,
+    )
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    listed = CollectionInfo(
+        name="bound_collection",
+        embedding_model_id="text-embedding-v4",
+        embedding_dimension=1024,
+        embeddings=0,
+        # What list_collections attaches from the collection_config table.
+        ingestion_config=IngestionConfig(parse_method=ParseMethod.PYPDF),
+    )
+
+    async def mock_list_collections(**kwargs):
+        return SimpleNamespace(status="success", collections=[listed])
+
+    mock_collections_module.list_collections = mock_list_collections
+
+    mock_vector_store = Mock()
+    mock_get_vector_store.return_value = mock_vector_store
+    mock_vector_store.list_table_names.return_value = ["documents", "chunks"]
+
+    saved = []
+
+    async def capture(collection):
+        saved.append(collection)
+
+    monkeypatch.setattr(cm.collection_manager, "save_collection", capture)
+
+    await cm.rebuild_collection_metadata()
+
+    assert len(saved) == 1
+    assert saved[0].embedding_model_id == "text-embedding-v4"
+    assert saved[0].embedding_dimension == 1024
+
+
 class TestRebuildCollectionMetadata:
     """Test rebuild_collection_metadata function."""
 

@@ -1504,12 +1504,20 @@ async def _rebuild_collection_metadata_impl() -> None:
 
                         break
 
-            # Update collection with embedding info
-            updated_collection = collection.model_copy(
-                update={
-                    "embedding_model_id": embedding_model_id,
-                    "embedding_dimension": embedding_dimension,
-                }
+            # Only overwrite what was actually inferred. save_collection
+            # merges with when_matched_update_all, so writing None for a
+            # collection with no embeddings yet would erase the binding it
+            # already has. Until now the enum TypeError below aborted the
+            # whole row, which is why this never surfaced.
+            embedding_updates: dict[str, Any] = {}
+            if embedding_model_id is not None:
+                embedding_updates["embedding_model_id"] = embedding_model_id
+            if embedding_dimension is not None:
+                embedding_updates["embedding_dimension"] = embedding_dimension
+            updated_collection = (
+                collection.model_copy(update=embedding_updates)
+                if embedding_updates
+                else collection
             )
 
             # Use the async save_collection method through sync wrapper
