@@ -126,6 +126,18 @@ def test_rebuild_style_save_keeps_a_binding_it_could_not_infer(metadata_store):
     assert readback.embedding_dimension == 1024
 
 
+def test_unknown_owned_fields_are_rejected(metadata_store):
+    """A typo would otherwise be an AttributeError the rebuild loop swallows."""
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    with pytest.raises(ValueError, match="not_a_field"):
+        asyncio.run(
+            cm.collection_manager.save_collection_fields(
+                CollectionInfo(name="typo"), ("not_a_field",)
+            )
+        )
+
+
 def _seed_two_tenant_configs(metadata_store, name: str) -> None:
     """Two collection_config rows for one name; tenant B is the latest."""
     older = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)

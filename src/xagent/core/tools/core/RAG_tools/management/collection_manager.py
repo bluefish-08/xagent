@@ -340,6 +340,12 @@ class CollectionManager:
         not written at all. Falls back to inserting ``collection`` whole when no
         row exists yet.
         """
+        unknown = set(owned_fields) - set(CollectionInfo.model_fields)
+        if unknown:
+            raise ValueError(
+                f"owned_fields are not CollectionInfo fields: {sorted(unknown)}"
+            )
+
         lock = _get_collection_lock(collection.name)
 
         async with lock, _collection_thread_guard(collection.name):
