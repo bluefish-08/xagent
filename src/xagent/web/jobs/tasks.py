@@ -182,7 +182,8 @@ def _end_worker_transaction(db: Session) -> None:
     Bookkeeping now runs on a second connection; leaving this one idle in
     transaction across it is the exposure this whole path exists to remove,
     and a rollback that fails on an already-dead connection must not replace
-    the failure being recorded.
+    the failure being recorded. Handlers must commit their own writes: any
+    ORM state still pending here is discarded, not committed.
     """
     try:
         db.rollback()

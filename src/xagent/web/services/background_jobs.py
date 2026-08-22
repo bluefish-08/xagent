@@ -360,8 +360,8 @@ def requeue_stale_background_jobs(
         return requeued
 
     # No post-commit refresh anywhere below: reading an expired attribute
-    # reopens a transaction that then stays open until the next commit -- on
-    # return, or across the broker call.
+    # reopens a transaction. Every such read below is closed by the commit
+    # that follows it; none spans the broker call or the return.
     db.commit()
 
     if not get_celery_enabled():
