@@ -163,15 +163,22 @@ def disposable_database_url(
     admin_conn = _admin_connection()
     try:
         admin_conn.cursor().execute(f'CREATE DATABASE "{dbname}"')
-        for key, value in (settings or {}).items():
-            admin_conn.cursor().execute(
-                f'ALTER DATABASE "{dbname}" SET {key} = %s', (value,)
-            )
     finally:
         admin_conn.close()
 
     parsed = make_url(base_url).set(database=dbname)
+    # Everything after CREATE DATABASE runs under the drop below, so a failing
+    # ALTER cannot leave the database behind.
     try:
+        admin_conn = _admin_connection()
+        try:
+            for key, value in (settings or {}).items():
+                admin_conn.cursor().execute(
+                    f'ALTER DATABASE "{dbname}" SET {key} = %s', (value,)
+                )
+        finally:
+            admin_conn.close()
+
         yield parsed.render_as_string(hide_password=False)
     finally:
         admin_conn = _admin_connection()

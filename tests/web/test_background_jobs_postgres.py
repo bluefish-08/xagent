@@ -9,11 +9,16 @@ reproduced here. Skipped unless XAGENT_TEST_POSTGRES_URL is set.
 
 from __future__ import annotations
 
+import os
 import time
 
+import psycopg2
 import pytest
 
-from tests.shared.postgres_disposable import disposable_database_url
+from tests.shared.postgres_disposable import (
+    disposable_database_url,
+    psycopg2_kwargs,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -50,12 +55,30 @@ def test_failure_is_recorded_after_idle_transaction_timeout(monkeypatch):
         from xagent.web.jobs import tasks as tasks_module
         from xagent.web.jobs.celery_app import celery_app
         from xagent.web.models.background_job import BackgroundJob, BackgroundJobStatus
-        from xagent.web.models.database import configure_db, get_session_local
+        from xagent.web.models.database import (
+            configure_db,
+            get_engine,
+            get_session_local,
+        )
         from xagent.web.models.user import User
         from xagent.web.services.background_jobs import create_background_job
 
         configure_db(db_url)
         _create_schema()
+
+        # The regression only reproduces if the timeout the test asked for is
+        # what the application's own connections actually get: a database, role
+        # or session-level override would leave the sleep below harmless and the
+        # assertions green for the wrong reason.
+        with get_engine().connect() as probe:
+            effective = probe.exec_driver_sql(
+                "SHOW idle_in_transaction_session_timeout"
+            ).scalar()
+        assert effective == IDLE_TIMEOUT, (
+            "idle_in_transaction_session_timeout on the application connection "
+            f"is {effective!r}, not {IDLE_TIMEOUT!r}; this test would pass "
+            "without exercising the regression"
+        )
 
         celery_app.conf.task_always_eager = True
         celery_app.conf.task_eager_propagates = False
@@ -106,3 +129,32 @@ def test_failure_is_recorded_after_idle_transaction_timeout(monkeypatch):
             assert int(row.attempts) == 1
         finally:
             verify.close()
+
+
+def test_disposable_database_is_dropped_when_setup_fails():
+    """A failing ALTER after CREATE DATABASE must not leak the database.
+
+    The setup statements run between CREATE and the yield, so without a drop
+    guard registered right after CREATE, a rejected setting leaves an orphan
+    database on a shared server for every run.
+    """
+    base_url = os.getenv("XAGENT_TEST_POSTGRES_URL")
+    if not base_url:
+        pytest.skip("XAGENT_TEST_POSTGRES_URL is not set")
+
+    prefix = "xagent_jobs_setup_fail"
+    with pytest.raises(psycopg2.Error):
+        with disposable_database_url(prefix, settings={"xagent_not_a_real_guc": "1"}):
+            pytest.fail("the context manager must not yield after a failed setup")
+
+    admin = psycopg2.connect(**psycopg2_kwargs(base_url))
+    try:
+        cursor = admin.cursor()
+        cursor.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE %s", (f"{prefix}_%",)
+        )
+        leaked = [row[0] for row in cursor.fetchall()]
+    finally:
+        admin.close()
+
+    assert leaked == [], f"disposable databases left behind: {leaked}"
