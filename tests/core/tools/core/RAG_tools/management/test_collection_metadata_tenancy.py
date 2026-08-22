@@ -104,7 +104,9 @@ def test_same_named_tenants_share_a_row_without_sharing_config(metadata_store):
 
 
 def test_rebuild_style_save_keeps_a_binding_it_could_not_infer(metadata_store):
-    """A save that infers no embedding model must not erase the stored one."""
+    """A rebuild that infers no embedding model must not erase the stored one."""
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
     bound = CollectionInfo(
         name="bound",
         embedding_model_id="text-embedding-v4",
@@ -112,10 +114,14 @@ def test_rebuild_style_save_keeps_a_binding_it_could_not_infer(metadata_store):
     )
     asyncio.run(metadata_store.save_collection(bound))
 
-    listed = asyncio.run(metadata_store.get_collection("bound"))
-    asyncio.run(metadata_store.save_collection(listed))
+    # What the rebuild holds when inference yielded nothing: stats, no binding.
+    inferred_nothing = CollectionInfo(name="bound", documents=3)
+    asyncio.run(
+        cm.collection_manager.save_collection_fields(inferred_nothing, ("documents",))
+    )
 
     readback = asyncio.run(metadata_store.get_collection("bound"))
+    assert readback.documents == 3
     assert readback.embedding_model_id == "text-embedding-v4"
     assert readback.embedding_dimension == 1024
 
@@ -272,6 +278,44 @@ def test_rebuild_skips_the_write_when_nothing_changed(metadata_store):
 
     after = asyncio.run(metadata_store.get_collection(name))
     assert after.updated_at == before.updated_at
+
+
+def test_a_written_row_carries_the_migrated_schema_version(metadata_store):
+    """schema_version rides along on any write without being an owned field.
+
+    The re-read migrates in memory, so the merged row already holds the current
+    version; owning the field would change nothing, and would not rewrite a
+    legacy row whose recomputed stats happen to match either.
+    """
+    from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
+        _safe_close_table,
+    )
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    name = "legacy-version"
+    asyncio.run(metadata_store.save_collection(CollectionInfo(name=name, documents=3)))
+
+    table = None
+    try:
+        table = metadata_store.get_raw_connection().open_table("collection_metadata")
+        table.update(f"name = '{name}'", {"schema_version": "0.0.0"})
+    finally:
+        _safe_close_table(table)
+
+    migrated = asyncio.run(metadata_store.get_collection(name))
+    assert migrated.schema_version == "1.0.0"
+    assert "schema_version" not in cm._REBUILD_OWNED_FIELDS
+
+    recomputed = migrated.model_copy(update={"documents": 4})
+    asyncio.run(
+        cm.collection_manager.save_collection_fields(
+            recomputed, cm._REBUILD_OWNED_FIELDS
+        )
+    )
+
+    raw = json.loads(_raw_metadata_rows(metadata_store))
+    row = next(row for row in raw if row["name"] == name)
+    assert row["schema_version"] == "1.0.0"
 
 
 def test_a_brand_new_collection_is_inserted_whole(metadata_store):

@@ -1370,7 +1370,6 @@ class TestCollectionInfo:
             "collection_locked": True,
             "allow_mixed_parse_methods": False,
             "skip_config_validation": False,
-            "ingestion_config": '{"chunk_size": 512}',
             "created_at": "2024-01-01T00:00:00",
             "updated_at": "2024-01-02T00:00:00",
             "last_accessed_at": "2024-01-02T00:00:00",

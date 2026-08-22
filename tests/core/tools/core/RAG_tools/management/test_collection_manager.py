@@ -427,7 +427,10 @@ class TestResolveEffectiveEmbeddingModel:
     def test_ingestion_config_model_does_not_outrank_the_caller(
         self, mock_get_collection: Mock, _mock_mark: Mock
     ) -> None:
-        """An attached config is tenant-scoped, so it never wins the resolution."""
+        """An attached config is tenant-scoped, so it never wins the resolution.
+
+        Defence in depth: a real get_collection_sync can no longer return one.
+        """
         mock_get_collection.return_value = CollectionInfo(
             name="test_collection",
             embedding_model_id=None,
@@ -450,7 +453,10 @@ class TestResolveEffectiveEmbeddingModel:
     def test_ingestion_config_model_is_not_a_fallback_source(
         self, mock_get_collection: Mock, _mock_mark: Mock
     ) -> None:
-        """With no bound model and no caller config there is nothing to resolve."""
+        """With no bound model and no caller config there is nothing to resolve.
+
+        Defence in depth: a real get_collection_sync can no longer return one.
+        """
         mock_get_collection.return_value = CollectionInfo(
             name="test_collection",
             embedding_model_id=None,
@@ -530,11 +536,13 @@ class TestResolveEffectiveEmbeddingModel:
             embeddings=12,
         )
         mock_infer.return_value = ("legacy-index-embed", None)
+        mock_save = Mock()
+        mock_sync_wrapper.return_value = mock_save
 
         resolved = resolve_effective_embedding_model_sync("legacy_collection")
 
         assert resolved == "legacy-index-embed"
-        mock_sync_wrapper.assert_not_called()
+        mock_save.assert_not_called()
 
     @patch(
         "xagent.core.tools.core.RAG_tools.management.collection_manager._sync_wrapper"
@@ -626,8 +634,14 @@ def test_rebuild_does_not_claim_a_binding_it_could_not_infer(monkeypatch):
         ingestion_config=IngestionConfig(parse_method=ParseMethod.PYPDF),
     )
 
+    # An inferable embeddings table is present: only the embeddings == 0
+    # short-circuit can be keeping the binding out of the write.
     writes = _run_rebuild_capturing_writes(
-        monkeypatch, listed, table_names=["documents", "chunks"]
+        monkeypatch,
+        listed,
+        table_names=["documents", "chunks", "embeddings_unmapped_tag"],
+        row_counts=1,
+        vector_dimension=768,
     )
 
     assert len(writes) == 1
