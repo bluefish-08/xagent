@@ -1602,10 +1602,11 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # panic on older-writer indices, taking the index step down (lance#8310).
             try:
                 self._rebuild_fts_index(table, table_name)
-            except Exception as exc:  # noqa: BLE001
-                # Must not take optimize down with it: compaction and version
-                # pruning run before the index step and are what reclaim the
-                # disk, so losing them costs more than a stale FTS index.
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:  # noqa: BLE001
+                # BaseException because pyo3 raises a Rust panic as
+                # PanicException; losing compaction costs more than stale FTS.
                 logger.warning("FTS rebuild failed for %s: %s", table_name, exc)
             table.optimize(cleanup_older_than=cleanup_older_than)
             # Pruning drops the versions cached handles point at, same reason

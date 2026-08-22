@@ -257,3 +257,39 @@ def test_a_failed_fts_rebuild_still_lets_optimize_run(tmp_path, monkeypatch, cap
         "FTS rebuild failed" in r.getMessage() and r.levelno == logging.WARNING
         for r in caplog.records
     ), "a silently swallowed rebuild failure is indistinguishable from success"
+
+
+def test_a_panicking_fts_rebuild_still_lets_optimize_run(tmp_path, monkeypatch):
+    """A Rust panic arrives as a BaseException, not an Exception.
+
+    pyo3 raises PanicException off BaseException, so catching Exception alone
+    would let it abort the compaction this isolation exists to protect.
+    """
+
+    class FakePanic(BaseException):
+        pass
+
+    db = lancedb.connect(str(tmp_path / "panic"))
+    table = db.create_table("embeddings_probe", data=_rows(400))
+    table.create_fts_index("text", with_position=True, replace=True)
+
+    calls: list[str] = []
+    real_optimize = table.optimize
+
+    def panicking_fts(*args, **kwargs):
+        calls.append("create_fts_index")
+        raise FakePanic("index out of bounds: the len is 10791")
+
+    def optimize(*args, **kwargs):
+        calls.append("optimize")
+        return real_optimize(*args, **kwargs)
+
+    table.create_fts_index = panicking_fts
+    table.optimize = optimize
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+
+    assert store.trigger_reindex("embeddings_probe") is True
+
+    assert calls == ["create_fts_index", "optimize"]
