@@ -289,6 +289,14 @@ FilterExpression = Union[
 ]
 
 
+class CollectionNotFoundError(ValueError):
+    """No metadata row exists for the collection.
+
+    A ValueError subclass so existing ``except ValueError`` callers keep working;
+    raised only for a missing row, never for one that exists but fails to parse.
+    """
+
+
 class MetadataStore(ABC):
     """Control-plane metadata storage contract."""
 
@@ -303,7 +311,7 @@ class MetadataStore(ABC):
             Collection metadata.
 
         Raises:
-            ValueError: If collection is not found.
+            CollectionNotFoundError: If no row exists for the collection.
         """
 
     @abstractmethod

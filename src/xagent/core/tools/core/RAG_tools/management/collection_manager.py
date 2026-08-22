@@ -27,7 +27,7 @@ import pyarrow as pa  # type: ignore
 from ..core.parser_registry import get_supported_parsers, validate_parser_compatibility
 from ..core.schemas import CollectionInfo
 from ..LanceDB.schema_manager import _safe_close_table
-from ..storage.contracts import MetadataStore
+from ..storage.contracts import CollectionNotFoundError, MetadataStore
 from ..storage.factory import get_metadata_store, get_vector_index_store
 from ..utils.lancedb_query_utils import list_table_names
 from ..utils.model_resolver import resolve_embedding_adapter
@@ -344,13 +344,14 @@ class CollectionManager:
 
         async with lock, _collection_thread_guard(collection.name):
             store = self._get_metadata_store()
-            # Only "not found" may reach the insert below; any other read failure
-            # would make it a stale full-row overwrite. ensure_* keeps a missing
-            # table out of that distinction.
+            # Only a missing row may reach the insert below; any other read
+            # failure -- including a row that exists but will not parse -- would
+            # make it a stale full-row overwrite. ensure_* keeps a missing table
+            # out of that distinction.
             await store.ensure_collection_metadata_table()
             try:
                 stored = await store.get_collection(collection.name)
-            except ValueError:
+            except CollectionNotFoundError:
                 logger.debug(
                     "Collection '%s' has no metadata row yet, inserting it whole",
                     collection.name,

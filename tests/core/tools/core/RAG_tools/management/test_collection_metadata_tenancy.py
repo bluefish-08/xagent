@@ -357,3 +357,39 @@ def test_a_read_failure_does_not_become_a_full_row_overwrite(metadata_store):
     survived = asyncio.run(metadata_store.get_collection(name))
     assert survived.documents == 9
     assert survived.collection_locked is True
+
+
+def test_a_corrupt_row_is_not_mistaken_for_a_missing_one(metadata_store):
+    """A row that exists but will not parse is a read failure, not "no row".
+
+    Both raise from the same call and json/pydantic errors are ValueError
+    subclasses, so only a dedicated not-found error can tell them apart -- and
+    getting it wrong turns a stale snapshot into a full-row overwrite.
+    """
+    from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
+        _safe_close_table,
+    )
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    name = "corrupt"
+    asyncio.run(
+        metadata_store.save_collection(
+            CollectionInfo(name=name, documents=9, collection_locked=True)
+        )
+    )
+
+    table = None
+    try:
+        table = metadata_store.get_raw_connection().open_table("collection_metadata")
+        table.update(f"name = '{name}'", {"extra_metadata": "{not json"})
+    finally:
+        _safe_close_table(table)
+
+    stale = CollectionInfo(name=name, documents=1)
+    with pytest.raises(ValueError):
+        asyncio.run(cm.collection_manager.save_collection_fields(stale, ("documents",)))
+
+    raw = json.loads(_raw_metadata_rows(metadata_store))
+    survived = next(row for row in raw if row["name"] == name)
+    assert survived["documents"] == 9
+    assert survived["collection_locked"] is True

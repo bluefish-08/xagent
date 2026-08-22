@@ -33,6 +33,7 @@ from ..utils.string_utils import (
 )
 from ..utils.user_permissions import UserPermissions
 from .contracts import (
+    CollectionNotFoundError,
     DocumentRecord,
     FilterCondition,
     FilterExpression,
@@ -180,7 +181,9 @@ class LanceDBMetadataStore(MetadataStore):
             safe_name = escape_lancedb_string(collection_name)
             result = table.search().where(f"name = '{safe_name}'").to_arrow()
             if len(result) == 0:
-                raise ValueError(f"Collection '{collection_name}' not found")
+                raise CollectionNotFoundError(
+                    f"Collection '{collection_name}' not found"
+                )
             # Convert Arrow table to list of dicts and take first row
             data = result.to_pylist()[0]
             return CollectionInfo.from_storage(data)
