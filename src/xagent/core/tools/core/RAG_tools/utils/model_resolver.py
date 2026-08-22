@@ -65,6 +65,10 @@ _MODEL_HUB_MODEL: Any = None
 _MODEL_HUB_DB_URL: Optional[str] = None
 _MODEL_HUB_LOCK = threading.Lock()
 
+# get_db_pool_kwargs' sizing applies per engine, and a worker already holds the
+# web engine's pool, so adopting it here would double this process's ceiling.
+_POOL_SIZING_KEYS = frozenset({"pool_size", "max_overflow", "pool_timeout"})
+
 
 def _reset_model_hub_cache() -> None:
     """Reset cached model hub DB resources.
@@ -174,17 +178,16 @@ def _get_or_init_model_hub() -> Any:
                         {}
                         if is_sqlite
                         else {
-                            "pool_pre_ping": True,
-                            "pool_recycle": get_db_pool_kwargs()["pool_recycle"],
+                            key: value
+                            for key, value in get_db_pool_kwargs().items()
+                            if key not in _POOL_SIZING_KEYS
                         }
                     )
                     engine = create_engine(
                         database_url,
                         connect_args={"check_same_thread": False} if is_sqlite else {},
-                        # Health knobs only. pool_recycle was the drift this
-                        # fixes; get_db_pool_kwargs' sizing applies per engine,
-                        # and a worker already holds the web engine's pool, so
-                        # adopting it here would double this process's ceiling.
+                        # Every non-sizing knob comes from the shared policy, so
+                        # a new health kwarg there reaches this engine too.
                         **pool_kwargs,
                         # Same database as the shared web engine
                         # (web/models/database.py) -- the Model table this
