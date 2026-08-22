@@ -29,6 +29,7 @@ from xagent.web.services.background_jobs import (
     enqueue_background_job,
     is_background_job_enqueue_available,
     requeue_stale_background_jobs,
+    update_job_progress,
 )
 from xagent.web.services.triggers import enqueue_trigger_event_job
 
@@ -46,6 +47,10 @@ def _age_job(db, job, *, updated_at=None, started_at=None) -> None:
         values["updated_at"] = updated_at
     if started_at is not None:
         values["started_at"] = started_at
+    if not values:
+        # An empty SET still carries onupdate=func.now(), so this would push
+        # updated_at forward -- the opposite of backdating.
+        raise ValueError("_age_job needs updated_at or started_at")
     db.query(BackgroundJob).filter(BackgroundJob.id == job.id).update(
         values, synchronize_session=False
     )
@@ -1526,9 +1531,17 @@ def test_requeue_spares_running_job_that_is_still_reporting_progress(
         setattr(job, "status", BackgroundJobStatus.RUNNING.value)
         db.add(job)
         db.commit()
-        # Started four hours ago, reported progress just now.
-        _age_job(db, job, started_at=datetime.now(timezone.utc) - timedelta(hours=4))
+        old = datetime.now(timezone.utc) - timedelta(hours=4)
+        _age_job(db, job, updated_at=old, started_at=old)
         db.refresh(job)
+        stale_updated_at = job.updated_at
+
+        # Go through the real reporting path, not a hand-set timestamp: that
+        # progress advances updated_at is the premise the whole predicate rests
+        # on, so the test has to fail if it ever stops holding.
+        update_job_progress(db, job, message="Still working", completed=536, total=699)
+        db.refresh(job)
+        assert job.updated_at > stale_updated_at
 
         requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
 
