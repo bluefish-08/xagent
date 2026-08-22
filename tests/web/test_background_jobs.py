@@ -2859,6 +2859,12 @@ def test_progress_update_skips_missing_job_row(tmp_path, caplog):
         with caplog.at_level(logging.WARNING, logger=service.__name__):
             service.update_job_progress("does-not-exist", message="gone")
 
-        assert caplog.text == ""
+        # Scoped to this logger: caplog also collects records other loggers
+        # propagate to root, which differ between environments.
+        assert [
+            record
+            for record in caplog.records
+            if record.name == service.__name__ and record.levelno >= logging.WARNING
+        ] == []
     finally:
         db.close()
