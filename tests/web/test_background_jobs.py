@@ -1551,7 +1551,9 @@ def test_requeue_spares_running_job_that_is_still_reporting_progress(
         # Go through the real reporting path, not a hand-set timestamp: that
         # progress advances updated_at is the premise the whole predicate rests
         # on, so the test has to fail if it ever stops holding.
-        update_job_progress(db, job, message="Still working", completed=536, total=699)
+        update_job_progress(
+            str(job.id), message="Still working", completed=536, total=699
+        )
         db.refresh(job)
         assert job.updated_at > stale_updated_at
 
