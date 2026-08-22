@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import text
 
 from xagent.config import CELERY_BROKER_URL, CELERY_ENABLED
 from xagent.core.tools.core.RAG_tools.core.schemas import (
@@ -2054,5 +2055,384 @@ def test_kb_document_job_publishes_the_config_end_to_end(tmp_path, monkeypatch):
         # have to be in it once the documents landed.
         assert saved_config is not None
         assert '"chunk_size":1234' in saved_config
+    finally:
+        db.close()
+
+
+def _track_open_transactions(engine) -> dict[str, int]:
+    """Count transactions the engine has begun but not yet ended.
+
+    This is the observable form of "idle in transaction": a session that
+    commits and then re-reads leaves a transaction open with no statement
+    running, and Postgres eventually terminates that connection.
+    """
+    from sqlalchemy import event
+
+    state = {"open": 0, "peak": 0}
+
+    @event.listens_for(engine, "begin")
+    def _begin(conn):  # noqa: ANN001, ANN202
+        state["open"] += 1
+        state["peak"] = max(state["peak"], state["open"])
+
+    @event.listens_for(engine, "commit")
+    def _commit(conn):  # noqa: ANN001, ANN202
+        state["open"] = max(0, state["open"] - 1)
+
+    @event.listens_for(engine, "rollback")
+    def _rollback(conn):  # noqa: ANN001, ANN202
+        state["open"] = max(0, state["open"] - 1)
+
+    return state
+
+
+def test_failure_is_recorded_even_when_the_worker_session_is_poisoned(
+    tmp_path, monkeypatch
+):
+    """Terminal bookkeeping must not share a session with the failed work.
+
+    The original defect was second-order: the work session died, and the
+    exception handler then tried to record the failure on that same dead
+    session, so the row stayed `running` with no error and max_attempts never
+    applied.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-poisoned.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "poisoned-session")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.poisoned",
+            payload={"collection": "kb1"},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        from sqlalchemy.exc import OperationalError
+
+        worker_sessions: list = []
+
+        def handler(work, _job):  # noqa: ANN001, ANN202
+            # SQLite cannot be made to terminate a connection server-side, so
+            # stand in for it: a session that can no longer write is what the
+            # exception path was handed. The real timeout is on Postgres, see
+            # tests/web/test_background_jobs_postgres.py.
+            work.execute(text("SELECT 1"))
+            worker_sessions.append(work)
+
+            def _dead(*_args, **_kwargs):
+                raise OperationalError("SELECT 1", {}, Exception("server closed"))
+
+            work.commit = _dead
+            work.flush = _dead
+            raise RuntimeError("ingestion died mid-run")
+
+        observed_in_transaction: list[bool] = []
+        real_mark_job_failed = tasks_module.mark_job_failed
+
+        def spying_mark_job_failed(*args, **kwargs):
+            observed_in_transaction.append(
+                any(session.in_transaction() for session in worker_sessions)
+            )
+            return real_mark_job_failed(*args, **kwargs)
+
+        monkeypatch.setattr(tasks_module, "mark_job_failed", spying_mark_job_failed)
+        tasks_module.register_background_job_handler("kb.team.poisoned", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.poisoned", None)
+
+        assert observed_in_transaction == [False], (
+            "the failed work session was still in a transaction while the "
+            "failure was recorded on a second connection"
+        )
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert "ingestion died mid-run" in str(row.error_message)
+        assert row.finished_at is not None
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_repeated_failures_stop_at_max_attempts(tmp_path, monkeypatch):
+    """A job that keeps failing must reach a terminal state, not loop forever.
+
+    Reaching FAILED is what takes the job out of requeue_stale_background_jobs'
+    reach; a row stuck at `running` is picked up again on every scan.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-max-attempts.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "max-attempts")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.always_fails",
+            payload={"collection": "kb1"},
+            max_attempts=2,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        calls: list[str] = []
+
+        def handler(_db, job_row):  # noqa: ANN001, ANN202
+            calls.append(str(job_row.id))
+            raise RuntimeError("permanent boom")
+
+        tasks_module.register_background_job_handler("kb.team.always_fails", handler)
+        try:
+            for _ in range(5):
+                db.expire_all()
+                current = (
+                    db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+                )
+                if current.status in {
+                    BackgroundJobStatus.FAILED.value,
+                    BackgroundJobStatus.SUCCEEDED.value,
+                }:
+                    break
+                db.rollback()
+                tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.always_fails", None)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert int(row.attempts) == 2, f"attempts overran max_attempts: {row.attempts}"
+        assert len(calls) == 2
+
+        # A terminal row is no longer stale-requeue material.
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=0)
+        assert job_id not in {str(j.id) for j in requeued}
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_claim_refuses_a_job_that_was_cancelled(tmp_path):
+    """The cancellation check and the claim must settle in one transaction.
+
+    Split across two, a cancel landing in between is clobbered back to RUNNING
+    and the cancelled job runs anyway.
+    """
+    from xagent.web.services.background_jobs import mark_job_running
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-claim-cancelled.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "claim-cancelled")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.cancelled",
+            payload={},
+        )
+        setattr(job, "status", BackgroundJobStatus.CANCELLED.value)
+        db.add(job)
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        assert mark_job_running(job_id) is None
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.CANCELLED.value
+        assert int(row.attempts or 0) == 0
+    finally:
+        db.close()
+
+
+def test_cancelled_job_is_skipped_without_running_the_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-skip-cancelled.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "skip-cancelled")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.skip_cancelled",
+            payload={},
+        )
+        setattr(job, "status", BackgroundJobStatus.CANCELLED.value)
+        db.add(job)
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        calls: list[str] = []
+
+        def handler(_db, _job):  # noqa: ANN001, ANN202
+            calls.append(job_id)
+            return {"status": "ok"}
+
+        tasks_module.register_background_job_handler("kb.team.skip_cancelled", handler)
+        try:
+            result = tasks_module.execute_background_job.apply(args=[job_id]).get()
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.skip_cancelled", None)
+
+        assert result == {"status": "cancelled"}
+        assert calls == []
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_already_succeeded_job_returns_its_stored_result(tmp_path, monkeypatch):
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-skip-succeeded.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "skip-succeeded")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.skip_succeeded",
+            payload={},
+        )
+        setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
+        setattr(job, "result", {"status": "succeeded", "doc_id": "doc-9"})
+        db.add(job)
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        result = tasks_module.execute_background_job.apply(args=[job_id]).get()
+
+        assert result == {"status": "succeeded", "doc_id": "doc-9"}
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda fn: fn.mark_job_running("missing"), id="running"),
+        pytest.param(lambda fn: fn.mark_job_succeeded("missing"), id="succeeded"),
+        pytest.param(
+            lambda fn: fn.mark_job_failed("missing", error_message="boom"), id="failed"
+        ),
+    ],
+)
+def test_mark_job_functions_raise_for_a_missing_row(tmp_path, call):
+    """One contract for the family: a vanished row is an error, never a no-op.
+
+    Silently doing nothing would let a lost job pass for a recorded one.
+    """
+    from xagent.web.services import background_jobs as service
+
+    _init_test_db(tmp_path / "jobs-missing-row.db")
+
+    with pytest.raises(ValueError, match="Background job not found"):
+        call(service)
+
+
+def test_enqueue_failure_records_the_failure_without_holding_a_transaction(
+    tmp_path, monkeypatch
+):
+    """The 503 path writes FAILED on its own session, so this one must be idle.
+
+    A caller sitting idle in transaction while a second connection records the
+    failure is the contention this split has to avoid, not create.
+    """
+    import asyncio
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.models.database import get_engine
+
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-enqueue-503.db")
+    tracker = _track_open_transactions(get_engine())
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "enqueue-503")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"collection": "kb1"},
+        )
+        db.commit()
+        # Reading an expired attribute reopens a transaction; that is the state
+        # the 503 path has to clear before the bookkeeping session opens.
+        job_id = str(job.id)
+        assert tracker["open"] == 1
+
+        observed: list[int] = []
+        real_mark_job_failed = kb_module.mark_job_failed
+
+        def spying_mark_job_failed(*args, **kwargs):
+            observed.append(tracker["open"])
+            return real_mark_job_failed(*args, **kwargs)
+
+        monkeypatch.setattr(kb_module, "mark_job_failed", spying_mark_job_failed)
+        monkeypatch.setattr(
+            kb_module, "is_background_job_enqueue_available", lambda **_kw: False
+        )
+
+        with pytest.raises(Exception) as excinfo:
+            asyncio.run(kb_module._enqueue_background_job_or_503_async(db, job))
+
+        assert getattr(excinfo.value, "status_code", None) == 503
+        assert observed == [0], (
+            f"a transaction was open while the failure was recorded: {observed}"
+        )
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
     finally:
         db.close()

@@ -1778,13 +1778,16 @@ async def _enqueue_background_job_or_503_async(
     db: Session,
     job: BackgroundJob,
 ) -> BackgroundJob:
+    # mark_job_failed runs on a session of its own, so this one must not be
+    # left idle in transaction (an expired attribute read reopens one).
+    job_id = str(job.id)
     if not await asyncio.to_thread(
         is_background_job_enqueue_available,
         check_worker=False,
     ):
+        db.rollback()
         mark_job_failed(
-            db,
-            job,
+            job_id,
             error_message="Background job queue is unavailable",
         )
         raise HTTPException(
@@ -1812,9 +1815,9 @@ async def _enqueue_background_job_or_503_async(
         db.refresh(job)
         return job
     except Exception as exc:  # noqa: BLE001
+        db.rollback()
         mark_job_failed(
-            db,
-            job,
+            job_id,
             error_message=f"Background job queue is unavailable: {exc}",
         )
         raise HTTPException(

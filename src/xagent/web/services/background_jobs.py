@@ -19,6 +19,7 @@ from ..models.background_job import (
     BackgroundJobStatus,
     BackgroundJobType,
 )
+from ..models.database import session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -229,16 +230,42 @@ def list_background_jobs(
     )
 
 
-def mark_job_running(db: Session, job: BackgroundJob) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.RUNNING.value)
-    setattr(job, "attempts", int(job.attempts or 0) + 1)
-    setattr(job, "started_at", datetime.now(timezone.utc))
-    setattr(job, "error_message", None)
-    setattr(job, "progress", {"message": "Running", "completed": 0, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+# mark_job_running / mark_job_succeeded / mark_job_failed each take a job id
+# and open a session of their own: sharing the caller's is what let a poisoned
+# connection take the failure record down with it. One contract for the
+# family -- ValueError when the row is gone, never a silent no-op.
+
+
+def mark_job_running(job_id: str) -> int | None:
+    """Claim the job for this attempt and return the new attempt count.
+
+    Returns ``None`` when the row already settled -- the cancellation check and
+    the claim must land in one transaction, or a cancel arriving between them
+    is silently clobbered back to RUNNING. ``with_for_update`` (a no-op on
+    SQLite) holds the row against a concurrent cancel for that window.
+    """
+    with session_scope() as db:
+        job = (
+            db.query(BackgroundJob)
+            .filter(BackgroundJob.id == job_id)
+            .with_for_update()
+            .first()
+        )
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        if job.status in (
+            BackgroundJobStatus.CANCELLED.value,
+            BackgroundJobStatus.SUCCEEDED.value,
+        ):
+            return None
+        attempts = int(job.attempts or 0) + 1
+        setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+        setattr(job, "attempts", attempts)
+        setattr(job, "started_at", datetime.now(timezone.utc))
+        setattr(job, "error_message", None)
+        setattr(job, "progress", {"message": "Running", "completed": 0, "total": 1})
+        db.add(job)
+        return attempts
 
 
 def update_job_progress(
@@ -382,36 +409,38 @@ def requeue_stale_background_jobs(
     return requeued
 
 
-def mark_job_succeeded(
-    db: Session,
-    job: BackgroundJob,
-    *,
-    result: dict[str, Any] | None = None,
-) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
-    setattr(job, "result", result)
-    setattr(job, "error_message", None)
-    setattr(job, "finished_at", datetime.now(timezone.utc))
-    setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+def mark_job_succeeded(job_id: str, *, result: dict[str, Any] | None = None) -> None:
+    with session_scope() as db:
+        job = get_background_job(db, job_id)
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
+        setattr(job, "result", result)
+        setattr(job, "error_message", None)
+        setattr(job, "finished_at", datetime.now(timezone.utc))
+        setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
+        db.add(job)
 
 
 def mark_job_failed(
-    db: Session,
-    job: BackgroundJob,
+    job_id: str,
     *,
     error_message: str,
     result: dict[str, Any] | None = None,
-) -> BackgroundJob:
-    setattr(job, "status", BackgroundJobStatus.FAILED.value)
-    setattr(job, "error_message", error_message)
-    setattr(job, "result", result)
-    setattr(job, "finished_at", datetime.now(timezone.utc))
-    setattr(job, "progress", {"message": error_message, "completed": 0, "total": 1})
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+) -> None:
+    """Record the terminal failure on a session of its own.
+
+    This must not share a session with the work that failed: a poisoned
+    session takes the failure record down with it, leaving the row ``running``
+    forever and bypassing ``max_attempts``.
+    """
+    with session_scope() as db:
+        job = get_background_job(db, job_id)
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        setattr(job, "status", BackgroundJobStatus.FAILED.value)
+        setattr(job, "error_message", error_message)
+        setattr(job, "result", result)
+        setattr(job, "finished_at", datetime.now(timezone.utc))
+        setattr(job, "progress", {"message": error_message, "completed": 0, "total": 1})
+        db.add(job)

@@ -11,8 +11,14 @@ from ..models.background_job import (
     BackgroundJobStatus,
     BackgroundJobType,
 )
-from ..models.database import get_session_local, init_db
+from ..models.database import (
+    get_optional_session_local,
+    get_session_local,
+    init_db,
+    session_scope,
+)
 from ..services.background_jobs import (
+    get_background_job,
     mark_job_failed,
     mark_job_running,
     mark_job_succeeded,
@@ -21,6 +27,13 @@ from .celery_app import celery_app
 from .exceptions import BackgroundJobHandlerError
 
 logger = logging.getLogger(__name__)
+
+
+class _Unset:
+    """Sentinel type for "argument not supplied" (bare ``object`` is vacuous)."""
+
+
+_UNSET = _Unset()
 
 BackgroundJobHandler = Callable[[Session, BackgroundJob], dict[str, Any]]
 
@@ -68,13 +81,14 @@ def is_background_job_handler_registered(job_type: str) -> bool:
     return str(job_type) in _EXTRA_HANDLERS
 
 
-def _open_worker_session() -> Session:
-    try:
-        SessionLocal = get_session_local()
-    except RuntimeError:
+def _ensure_db_initialized() -> None:
+    if get_optional_session_local() is None:
         init_db()
-        SessionLocal = get_session_local()
-    return SessionLocal()
+
+
+def _open_worker_session() -> Session:
+    _ensure_db_initialized()
+    return get_session_local()()
 
 
 def _execute_job_handler(db: Session, job: BackgroundJob) -> dict[str, Any]:
@@ -114,45 +128,86 @@ def _execute_job_handler(db: Session, job: BackgroundJob) -> dict[str, Any]:
     retry_jitter=True,
 )
 def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
+    _ensure_db_initialized()
+
+    attempts = mark_job_running(job_id)
+    if attempts is None:
+        return _settled_job_result(job_id)
+
     db = _open_worker_session()
     try:
         job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
-        if job.status == BackgroundJobStatus.CANCELLED.value:
-            logger.info("Skipping cancelled background job %s", job_id)
-            return {"status": "cancelled"}
-        if job.status == BackgroundJobStatus.SUCCEEDED.value:
-            logger.info("Skipping already completed background job %s", job_id)
-            return dict(job.result or {"status": "succeeded"})
+        max_attempts = int(job.max_attempts or 1)
 
-        mark_job_running(db, job)
         try:
             result = _execute_job_handler(db, job)
         except BackgroundJobHandlerError as exc:
-            db.refresh(job)
-            if exc.retryable and int(job.attempts or 0) < int(job.max_attempts or 1):
-                setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
-                setattr(job, "error_message", str(exc))
-                setattr(job, "result", exc.result)
-                db.add(job)
-                db.commit()
-                raise self.retry(exc=exc, max_retries=int(job.max_attempts or 1))
-            mark_job_failed(db, job, error_message=str(exc), result=exc.result)
+            _end_worker_transaction(db)
+            if exc.retryable and attempts < max_attempts:
+                _mark_job_for_retry(job_id, error_message=str(exc), result=exc.result)
+                raise self.retry(exc=exc, max_retries=max_attempts)
+            mark_job_failed(job_id, error_message=str(exc), result=exc.result)
             raise
         except Exception as exc:  # noqa: BLE001
-            db.refresh(job)
-            if int(job.attempts or 0) < int(job.max_attempts or 1):
-                setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
-                setattr(job, "error_message", str(exc))
-                db.add(job)
-                db.commit()
-                raise self.retry(exc=exc, max_retries=int(job.max_attempts or 1))
-            mark_job_failed(db, job, error_message=str(exc))
+            _end_worker_transaction(db)
+            if attempts < max_attempts:
+                _mark_job_for_retry(job_id, error_message=str(exc))
+                raise self.retry(exc=exc, max_retries=max_attempts)
+            mark_job_failed(job_id, error_message=str(exc))
             raise
 
-        db.refresh(job)
-        mark_job_succeeded(db, job, result=result)
+        _end_worker_transaction(db)
+        mark_job_succeeded(job_id, result=result)
         return result
     finally:
         db.close()
+
+
+def _settled_job_result(job_id: str) -> dict[str, Any]:
+    """Report the outcome of a job the claim refused as already settled."""
+    with session_scope() as db:
+        job = get_background_job(db, job_id)
+        if job is not None and job.status == BackgroundJobStatus.SUCCEEDED.value:
+            logger.info("Skipping already completed background job %s", job_id)
+            return dict(job.result or {"status": "succeeded"})
+    logger.info("Skipping cancelled background job %s", job_id)
+    return {"status": "cancelled"}
+
+
+def _end_worker_transaction(db: Session) -> None:
+    """End the handler session's transaction before bookkeeping opens its own.
+
+    Bookkeeping now runs on a second connection; leaving this one idle in
+    transaction across it is the exposure this whole path exists to remove,
+    and a rollback that fails on an already-dead connection must not replace
+    the failure being recorded.
+    """
+    try:
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to end worker session transaction", exc_info=True)
+
+
+def _mark_job_for_retry(
+    job_id: str,
+    *,
+    error_message: str,
+    result: dict[str, Any] | None | _Unset = _UNSET,
+) -> None:
+    """Hand the job back to the broker for another attempt.
+
+    ``result`` distinguishes "not supplied" from an explicit ``None``: the
+    handler-error path overwrites the stored result even when it is None, the
+    generic path leaves it untouched.
+    """
+    with session_scope() as db:
+        job = get_background_job(db, job_id)
+        if job is None:
+            raise ValueError(f"Background job not found: {job_id}")
+        setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
+        setattr(job, "error_message", error_message)
+        if not isinstance(result, _Unset):
+            setattr(job, "result", result)
+        db.add(job)
