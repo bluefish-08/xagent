@@ -47,6 +47,9 @@ on:
       - 'src/xagent/web/models/user.py'
       - 'tests/shared/postgres_disposable.py'
       - 'tests/web/services/checkpoint_anchor_shared.py'
+      - 'src/xagent/web/services/background_jobs.py'
+      - 'src/xagent/web/jobs/tasks.py'
+      - 'tests/web/test_background_jobs_postgres.py'
   pull_request:
     branches: [main]
   # Required by the merge queue: without this the two required contexts below
@@ -130,6 +133,9 @@ jobs:
             src/xagent/web/models/user.py
             tests/shared/postgres_disposable.py
             tests/web/services/checkpoint_anchor_shared.py
+            src/xagent/web/services/background_jobs.py
+            src/xagent/web/jobs/tasks.py
+            tests/web/test_background_jobs_postgres.py
           )
 
           case "$EVENT_NAME" in
@@ -423,6 +429,16 @@ jobs:
         if: needs.detect-migration-changes.outputs.should-test == 'true'
         run: |
           pytest tests/web/services/test_supersede_savepoint_postgresql.py -m postgresql -q
+        env:
+          XAGENT_TEST_POSTGRES_URL: postgresql://xagent:xagent@localhost:5432/xagent_test
+
+      # Mints its own disposable database with a short
+      # idle_in_transaction_session_timeout, so it neither depends on nor
+      # disturbs the schema the steps above build.
+      - name: Test background job bookkeeping under an idle-transaction timeout (Postgres-only)
+        if: needs.detect-migration-changes.outputs.should-test == 'true'
+        run: |
+          pytest tests/web/test_background_jobs_postgres.py -m postgresql -q
         env:
           XAGENT_TEST_POSTGRES_URL: postgresql://xagent:xagent@localhost:5432/xagent_test
 
