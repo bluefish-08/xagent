@@ -511,6 +511,43 @@ class TestResolveEffectiveEmbeddingModel:
     @patch(
         "xagent.core.tools.core.RAG_tools.utils.migration_utils._infer_embedding_config_from_collection"
     )
+    def test_inferred_model_without_a_dimension_is_not_persisted(
+        self,
+        mock_infer: Mock,
+        mock_get_collection: Mock,
+        _mock_mark: Mock,
+        mock_sync_wrapper: Mock,
+    ) -> None:
+        """Half a binding must not be written on the ingestion hot path.
+
+        Persisting the inferred model while keeping the stored dimension would
+        flip ``is_initialized`` on a pair that may not match.
+        """
+        mock_get_collection.return_value = CollectionInfo(
+            name="legacy_collection",
+            embedding_model_id=None,
+            embedding_dimension=1536,
+            embeddings=12,
+        )
+        mock_infer.return_value = ("legacy-index-embed", None)
+
+        resolved = resolve_effective_embedding_model_sync("legacy_collection")
+
+        assert resolved == "legacy-index-embed"
+        mock_sync_wrapper.assert_not_called()
+
+    @patch(
+        "xagent.core.tools.core.RAG_tools.management.collection_manager._sync_wrapper"
+    )
+    @patch(
+        "xagent.core.tools.core.RAG_tools.management.collection_manager.mark_collection_accessed_sync"
+    )
+    @patch(
+        "xagent.core.tools.core.RAG_tools.management.collection_manager.get_collection_sync"
+    )
+    @patch(
+        "xagent.core.tools.core.RAG_tools.utils.migration_utils._infer_embedding_config_from_collection"
+    )
     def test_inference_failure_falls_back_to_config_model(
         self,
         mock_infer: Mock,

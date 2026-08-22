@@ -272,3 +272,44 @@ def test_rebuild_skips_the_write_when_nothing_changed(metadata_store):
 
     after = asyncio.run(metadata_store.get_collection(name))
     assert after.updated_at == before.updated_at
+
+
+def test_a_brand_new_collection_is_inserted_whole(metadata_store):
+    """Nothing stored yet -- not even the table -- so the whole row goes in."""
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    fresh = CollectionInfo(name="brand-new", documents=4)
+    asyncio.run(cm.collection_manager.save_collection_fields(fresh, ("documents",)))
+
+    assert asyncio.run(metadata_store.get_collection("brand-new")).documents == 4
+
+
+def test_a_read_failure_does_not_become_a_full_row_overwrite(metadata_store):
+    """Only "not found" may reach the insert-whole path.
+
+    Treating any read failure as "no row" would let one flaky read turn a stale
+    caller snapshot into a full-row overwrite, silently reinstating exactly the
+    concurrent rollback the field merge exists to prevent.
+    """
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    name = "flaky"
+    asyncio.run(
+        metadata_store.save_collection(
+            CollectionInfo(name=name, documents=9, collection_locked=True)
+        )
+    )
+    stale = CollectionInfo(name=name, documents=1)
+
+    async def unavailable(_self, _name):
+        raise RuntimeError("table under compaction")
+
+    with patch.object(type(metadata_store), "get_collection", unavailable):
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                cm.collection_manager.save_collection_fields(stale, ("documents",))
+            )
+
+    survived = asyncio.run(metadata_store.get_collection(name))
+    assert survived.documents == 9
+    assert survived.collection_locked is True

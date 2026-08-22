@@ -343,13 +343,17 @@ class CollectionManager:
         lock = _get_collection_lock(collection.name)
 
         async with lock, _collection_thread_guard(collection.name):
+            store = self._get_metadata_store()
+            # Only "not found" may reach the insert below; any other read failure
+            # would make it a stale full-row overwrite. ensure_* keeps a missing
+            # table out of that distinction.
+            await store.ensure_collection_metadata_table()
             try:
-                stored = await self._get_metadata_store().get_collection(
-                    collection.name
-                )
-            except Exception as exc:
+                stored = await store.get_collection(collection.name)
+            except ValueError:
                 logger.debug(
-                    "No stored row for '%s', inserting whole: %s", collection.name, exc
+                    "Collection '%s' has no metadata row yet, inserting it whole",
+                    collection.name,
                 )
                 await self._save_collection_with_retry(collection)
                 return
@@ -1372,22 +1376,32 @@ def _resolve_effective_embedding_model_sync_impl(
                 collection_name,
                 inferred_model_id,
             )
-            try:
-                updated_collection = collection_info.model_copy(
-                    update={
-                        "embedding_model_id": inferred_model_id,
-                        "embedding_dimension": inferred_dimension
-                        if inferred_dimension is not None
-                        else collection_info.embedding_dimension,
-                    }
-                )
-                _sync_wrapper(collection_manager.save_collection)(updated_collection)
-            except Exception as save_error:
+            # Persisting the model without its dimension would leave the old,
+            # possibly incompatible one in place with is_initialized now True.
+            if inferred_dimension is None:
                 logger.warning(
-                    "Failed to persist inferred embedding metadata for collection '%s': %s",
+                    "Collection '%s' inferred model '%s' with no dimension; "
+                    "not persisting the binding",
                     collection_name,
-                    save_error,
+                    inferred_model_id,
                 )
+            else:
+                try:
+                    updated_collection = collection_info.model_copy(
+                        update={
+                            "embedding_model_id": inferred_model_id,
+                            "embedding_dimension": inferred_dimension,
+                        }
+                    )
+                    _sync_wrapper(collection_manager.save_collection)(
+                        updated_collection
+                    )
+                except Exception as save_error:
+                    logger.warning(
+                        "Failed to persist inferred embedding metadata for collection '%s': %s",
+                        collection_name,
+                        save_error,
+                    )
             return inferred_model_id
 
         if config_model_id:
