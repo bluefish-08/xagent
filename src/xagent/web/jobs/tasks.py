@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -41,16 +42,25 @@ def register_background_job_handler(
 ) -> None:
     """Register a handler for a job type defined outside this package.
 
+    The handler takes one positional ``BackgroundJobRef`` (exported from
+    ``xagent.web.jobs``) and returns the result dict. It replaces the former
+    ``(Session, BackgroundJob)`` pair: the worker no longer holds a session
+    across the handler body, so a handler that needs the database opens its own
+    ``session_scope()`` per operation. See this package's module docstring for
+    the migration.
+
     Args:
         job_type: Durable ``BackgroundJob.job_type`` value the handler owns.
         handler: Callable invoked by ``_execute_job_handler`` for that job type.
         replace: Allow replacing an existing registration for ``job_type``.
 
     Raises:
-        ValueError: If ``job_type`` is built into this package, or is already
-            registered and ``replace`` is not set.
+        ValueError: If ``job_type`` is built into this package, is already
+            registered and ``replace`` is not set, or still takes the removed
+            ``(db, job)`` pair.
     """
     key = str(job_type)
+    _reject_legacy_handler_signature(key, handler)
     if key in _BUILTIN_JOB_TYPES:
         # _execute_job_handler would never reach such a handler, so accepting
         # the registration would silently do nothing.
@@ -58,6 +68,43 @@ def register_background_job_handler(
     if not replace and key in _EXTRA_HANDLERS:
         raise ValueError(f"Background job handler already registered: {key}")
     _EXTRA_HANDLERS[key] = handler
+
+
+def _reject_legacy_handler_signature(job_type: str, handler: Any) -> None:
+    """Refuse the removed ``(db, job)`` handler shape at registration time.
+
+    Accepting one defers the mismatch to a TypeError per attempt, so the job
+    burns through ``max_attempts`` before reaching FAILED. Registration runs at
+    worker import, which is where a downstream distribution can still react.
+    """
+    try:
+        params = list(inspect.signature(handler).parameters.values())
+    except (TypeError, ValueError):
+        # Some C callables expose no signature; let execution surface any
+        # mismatch rather than refuse a handler that may well be valid.
+        return
+
+    positional = [
+        param
+        for param in params
+        if param.kind
+        in (
+            param.POSITIONAL_ONLY,
+            param.POSITIONAL_OR_KEYWORD,
+            param.VAR_POSITIONAL,
+        )
+    ]
+    if any(param.kind == param.VAR_POSITIONAL for param in positional):
+        return
+
+    required = [param for param in positional if param.default is param.empty]
+    if len(required) > 1:
+        raise ValueError(
+            f"Background job handler for {job_type} takes {len(required)} required "
+            "arguments; handlers now receive one BackgroundJobRef. The (db, job) "
+            "signature was removed so no Session outlives a single operation -- "
+            "read what you need from the ref and open your own short session."
+        )
 
 
 def is_background_job_handler_registered(job_type: str) -> bool:
@@ -124,6 +171,7 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
             logger.info("Skipping already completed background job %s", job_id)
             return dict(job.result or {"status": "succeeded"})
         job_type = str(job.job_type)
+        user_id = int(job.user_id)
         payload = dict(job.payload or {})
         max_attempts = int(job.max_attempts or 1)
 
@@ -131,6 +179,7 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
     ref = BackgroundJobRef(
         id=job_id,
         job_type=job_type,
+        user_id=user_id,
         payload=payload,
         attempts=attempts,
         max_attempts=max_attempts,

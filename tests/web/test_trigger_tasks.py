@@ -33,6 +33,7 @@ def _job_ref(job) -> BackgroundJobRef:
     return BackgroundJobRef(
         id=str(job.id),
         job_type=str(job.job_type),
+        user_id=int(job.user_id),
         payload=dict(job.payload or {}),
         attempts=int(job.attempts or 0),
         max_attempts=int(job.max_attempts or 1),

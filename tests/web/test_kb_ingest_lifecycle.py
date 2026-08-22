@@ -176,7 +176,6 @@ def test_background_failed_ingest_config_cleanup_reuses_api_helper(
     )
     user = User()
     user.id = 11
-    db = object()
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: user)
 
@@ -190,7 +189,6 @@ def test_background_failed_ingest_config_cleanup_reuses_api_helper(
     )
 
     kb_tasks._cleanup_failed_job_collection_metadata_after_api_ingest(
-        db,  # type: ignore[arg-type]
         {
             "collection": "job-kb",
             "collection_existed_before": False,
@@ -221,7 +219,6 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
 
     fallback = MagicMock()
     api_helper = MagicMock()
-    db = object()
     payload = {"collection": "job-kb"}
     monkeypatch.setattr(
         kb_tasks,
@@ -234,13 +231,9 @@ def test_background_web_cleanup_keeps_early_exception_fallback(
         api_helper,
     )
 
-    kb_tasks._cleanup_failed_web_collection_metadata_if_new(
-        db,  # type: ignore[arg-type]
-        payload,
-    )
+    kb_tasks._cleanup_failed_web_collection_metadata_if_new(payload)
 
     fallback.assert_called_once_with(
-        db,
         payload,
         context="background web ingest",
         successful_documents=0,
@@ -557,7 +550,6 @@ def test_job_config_save_failure_is_not_retryable(
 
     with pytest.raises(BackgroundJobHandlerError) as excinfo:
         kb_tasks._save_job_collection_config_after_ingest(
-            MagicMock(),
             {"collection": "job-kb", "user_id": 13},
             IngestionConfig(),
             context="background document ingest",
@@ -924,7 +916,6 @@ def test_job_config_save_failure_keeps_the_result_payload(
 
     with pytest.raises(BackgroundJobHandlerError) as excinfo:
         kb_tasks._save_job_collection_config_after_ingest(
-            MagicMock(),
             {"collection": "job-kb", "user_id": 13},
             IngestionConfig(),
             context="background document ingest",
@@ -948,7 +939,6 @@ def test_job_with_a_missing_user_fails_instead_of_succeeding_silently(
 
     with pytest.raises(BackgroundJobHandlerError) as excinfo:
         kb_tasks._save_job_collection_config_after_ingest(
-            MagicMock(),
             {"collection": "job-kb", "user_id": 13},
             IngestionConfig(),
             context="background document ingest",
@@ -1041,7 +1031,6 @@ def test_missing_user_is_ignored_when_there_is_nothing_to_publish(
     monkeypatch.setattr(kb_tasks, "_get_job_user", get_user)
 
     kb_tasks._save_job_collection_config_after_ingest(
-        MagicMock(),
         {"collection": "job-kb", "user_id": 13, "collection_existed_before": True},
         IngestionConfig(),
         context="background web ingest",
@@ -1061,7 +1050,6 @@ def test_missing_user_on_a_failed_new_collection_does_not_raise(
     monkeypatch.setattr(kb_tasks, "_get_job_user", lambda *args, **kwargs: None)
 
     kb_tasks._save_job_collection_config_after_ingest(
-        MagicMock(),
         {"collection": "job-kb", "user_id": 13, "collection_existed_before": False},
         IngestionConfig(),
         context="background web ingest",

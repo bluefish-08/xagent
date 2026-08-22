@@ -377,22 +377,37 @@ def requeue_stale_background_jobs(
         setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
         db.add(job)
     db.commit()
-    for job in stale_jobs:
-        db.refresh(job)
+    dispatch_targets = [
+        (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
+    ]
 
-    for job in stale_jobs:
+    # apply_async is broker I/O and can block for as long as the broker takes.
+    # Nothing may be read from the session until it returns, or the refresh
+    # above reopens a transaction that then sits idle across that call.
+    db.rollback()
+
+    task_ids: dict[str, str] = {}
+    dispatch_errors: dict[str, str] = {}
+    for job_id, queue in dispatch_targets:
         try:
             async_result = execute_background_job.apply_async(
-                args=[job.id],
-                queue=str(job.queue or QUEUE_DEFAULT),
+                args=[job_id],
+                queue=queue,
             )
-            setattr(job, "celery_task_id", async_result.id)
-            requeued.append(job)
+            task_ids[job_id] = async_result.id
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to requeue stale background job %s", job.id)
+            logger.exception("Failed to requeue stale background job %s", job_id)
+            dispatch_errors[job_id] = str(exc)
+
+    for job in stale_jobs:
+        job_id = str(job.id)
+        error = dispatch_errors.get(job_id)
+        if error is None:
+            setattr(job, "celery_task_id", task_ids.get(job_id))
+        else:
             setattr(job, "status", BackgroundJobStatus.PENDING.value)
-            setattr(job, "error_message", f"Failed to requeue stale job: {exc}")
-            requeued.append(job)
+            setattr(job, "error_message", f"Failed to requeue stale job: {error}")
+        requeued.append(job)
         db.add(job)
 
     db.commit()

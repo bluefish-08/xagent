@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from xagent.config import CELERY_BROKER_URL, CELERY_ENABLED
 from xagent.core.tools.core.RAG_tools.core.schemas import (
     IngestionConfig,
     IngestionResult,
+    IngestionStepResult,
     WebCrawlConfig,
     WebIngestionResult,
 )
@@ -65,6 +67,7 @@ def _job_ref(job) -> BackgroundJobRef:
     return BackgroundJobRef(
         id=str(job.id),
         job_type=str(job.job_type),
+        user_id=int(job.user_id),
         payload=dict(job.payload or {}),
         attempts=int(job.attempts or 0),
         max_attempts=int(job.max_attempts or 1),
@@ -1345,6 +1348,208 @@ def test_kb_web_job_partial_publishes_new_config(tmp_path, monkeypatch):
         db.close()
 
 
+def test_job_user_snapshot_survives_its_own_scope(tmp_path):
+    """The user row must stay readable once its session is gone.
+
+    Every caller hands this row to async metadata work that runs with no
+    session open; an expired instance would raise there instead, replacing the
+    real ingestion outcome with a lazy-load error.
+    """
+    from xagent.web.jobs.kb_tasks import _get_job_user
+    from xagent.web.models.database import get_engine
+
+    SessionLocal = _init_test_db(tmp_path / "job-user-snapshot.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="job-user-snapshot")
+        db.commit()
+        user_id = int(user.id)
+        db.rollback()
+
+        tracker = _track_open_transactions(get_engine())
+        snapshot = _get_job_user({"user_id": user_id}, context="test")
+
+        assert snapshot is not None
+        assert int(snapshot.id) == user_id
+        assert str(snapshot.username) == "job-user-snapshot"
+        assert bool(snapshot.is_admin) is False
+        assert tracker["open"] == 0, "reading the snapshot reopened a transaction"
+    finally:
+        db.close()
+
+
+def test_job_user_snapshot_is_none_for_a_missing_row(tmp_path):
+    from xagent.web.jobs.kb_tasks import _get_job_user
+
+    _init_test_db(tmp_path / "job-user-missing.db")
+
+    assert _get_job_user({"user_id": 9999}, context="test") is None
+
+
+def test_web_ingest_finalization_holds_no_transaction(tmp_path, monkeypatch):
+    """Crawl finalization must not run inside an open read transaction.
+
+    Both steps -- publishing the collection config and cleaning up after a
+    partial crawl -- are async metadata and vector I/O. A slow finalization with
+    a transaction held open is the same idle_in_transaction exposure as the
+    crawl itself, and it happens after side effects have already landed.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+    monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs.kb_tasks import handle_kb_ingest_web
+    from xagent.web.models.database import get_engine
+
+    SessionLocal = _init_test_db(tmp_path / "web-ingest-finalize-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="web-ingest-finalize-txn")
+        ingestion_config = IngestionConfig(chunk_size=2048)
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={
+                "collection": "existing-web-kb",
+                "crawl_config": WebCrawlConfig(
+                    start_url="https://example.com"
+                ).model_dump(mode="json"),
+                "ingestion_config": ingestion_config.model_dump(mode="json"),
+                "user_id": int(user.id),
+                "is_admin": False,
+                "collection_existed_before": False,
+            },
+        )
+        db.commit()
+        ref = _job_ref(job)
+        # The worker's transactions are what this measures; the test session's
+        # own connection must be idle first.
+        db.rollback()
+
+        tracker = _track_open_transactions(get_engine())
+        observed: dict[str, int] = {}
+
+        async def fake_save(**_kwargs):
+            observed["save"] = tracker["open"]
+
+        async def fake_cleanup(**_kwargs):
+            observed["cleanup"] = tracker["open"]
+
+        monkeypatch.setattr(
+            kb_module, "_save_collection_config_after_ingest", fake_save
+        )
+        monkeypatch.setattr(
+            kb_module,
+            "_cleanup_collection_metadata_after_failed_api_ingest",
+            fake_cleanup,
+        )
+
+        async def fake_run_web_ingestion(**_kwargs):
+            return WebIngestionResult(
+                status="partial",
+                collection="existing-web-kb",
+                total_urls_found=2,
+                pages_crawled=1,
+                pages_failed=1,
+                documents_created=1,
+                chunks_created=1,
+                embeddings_created=1,
+                crawled_urls=["https://example.com/ok"],
+                failed_urls={"https://example.com/bad": "ingestion failed"},
+                message="partial failure",
+                warnings=[],
+                elapsed_time_ms=1,
+            )
+
+        monkeypatch.setattr(
+            "xagent.web.jobs.kb_tasks.run_web_ingestion",
+            fake_run_web_ingestion,
+        )
+
+        result = handle_kb_ingest_web(ref)
+
+        assert result["status"] == "partial"
+        assert observed == {"save": 0, "cleanup": 0}, (
+            f"finalization ran inside an open transaction: {observed}"
+        )
+    finally:
+        db.close()
+
+
+def test_document_ingest_config_publish_holds_no_transaction(tmp_path, monkeypatch):
+    """The settled-ingestion bookkeeping must not share one held-open session.
+
+    ``_save_collection_config_after_ingest`` is async metadata I/O reached after
+    the document already landed; a transaction spanning it can be reaped, and
+    the failure then arrives with the side effects already committed.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+    monkeypatch.delenv(CELERY_BROKER_URL, raising=False)
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs.kb_tasks import handle_kb_ingest_document
+    from xagent.web.models.database import get_engine
+
+    SessionLocal = _init_test_db(tmp_path / "doc-ingest-publish-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="doc-ingest-publish-txn")
+        source_file = tmp_path / "src" / "doc.txt"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("content", encoding="utf-8")
+        ingestion_config = IngestionConfig(chunk_size=2048)
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_DOCUMENT,
+            payload={
+                "collection": "existing-kb",
+                "source_path": str(source_file),
+                "user_id": int(user.id),
+                "is_admin": False,
+                "ingestion_config": ingestion_config.model_dump(mode="json"),
+                "collection_existed_before": True,
+            },
+        )
+        db.commit()
+        ref = _job_ref(job)
+        db.rollback()
+
+        tracker = _track_open_transactions(get_engine())
+        observed: list[int] = []
+
+        async def fake_save(**_kwargs):
+            observed.append(tracker["open"])
+
+        monkeypatch.setattr(
+            kb_module, "_save_collection_config_after_ingest", fake_save
+        )
+
+        def fake_run_document_ingestion(**_kwargs):
+            return IngestionResult(
+                status="success",
+                message="ok",
+                doc_id="doc-1",
+                completed_steps=[
+                    IngestionStepResult(name="register_document", metadata={})
+                ],
+            )
+
+        monkeypatch.setattr(
+            "xagent.web.jobs.kb_tasks.run_document_ingestion",
+            fake_run_document_ingestion,
+        )
+
+        handle_kb_ingest_document(ref)
+
+        assert observed == [0], (
+            f"the config publish ran inside an open transaction: {observed}"
+        )
+    finally:
+        db.close()
+
+
 def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
     """A crawl that ingested nothing publishes no KB, so the job must not succeed."""
     monkeypatch.setenv(CELERY_ENABLED, "false")
@@ -1519,6 +1724,127 @@ def test_requeue_stale_background_jobs_marks_old_running_pending(tmp_path, monke
         db.close()
 
 
+def test_requeue_dispatches_to_broker_with_no_open_transaction(tmp_path, monkeypatch):
+    """The stale-job scan must not hold a read transaction across apply_async.
+
+    A slow or unreachable broker blocks per job while the session sits idle in
+    transaction, which is exactly what the server terminates. The task ids are
+    persisted afterwards, in a write that starts once the broker is done.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.models.database import get_engine
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-txn.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="requeue-txn")
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        job_ids: list[str] = []
+        for index in range(2):
+            job = create_background_job(
+                db,
+                user_id=int(user.id),
+                job_type=BackgroundJobType.KB_INGEST_WEB,
+                payload={"collection": f"kb{index}"},
+            )
+            setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+            db.add(job)
+            db.commit()
+            _age_job(db, job, updated_at=old, started_at=old)
+            job_ids.append(str(job.id))
+        db.rollback()
+
+        tracker = _track_open_transactions(get_engine())
+        observed: list[int] = []
+
+        class _Result:
+            def __init__(self, task_id: str) -> None:
+                self.id = task_id
+
+        def fake_apply_async(*, args, queue):  # noqa: ANN001, ANN202
+            observed.append(tracker["open"])
+            return _Result(f"task-{args[0]}")
+
+        monkeypatch.setattr(
+            tasks_module.execute_background_job, "apply_async", fake_apply_async
+        )
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert observed == [0, 0], (
+            f"a transaction was open while the broker was called: {observed}"
+        )
+        assert sorted(str(item.id) for item in requeued) == sorted(job_ids)
+        db.expire_all()
+        for job_id in job_ids:
+            row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+            assert row.celery_task_id == f"task-{job_id}"
+            assert row.status == BackgroundJobStatus.ENQUEUED.value
+    finally:
+        db.close()
+
+
+def test_requeue_records_broker_failure_per_job(tmp_path, monkeypatch):
+    """A broker that rejects one job leaves that row PENDING with the reason."""
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-broker-fail.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, username="requeue-broker-fail")
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        job_ids: list[str] = []
+        for index in range(2):
+            job = create_background_job(
+                db,
+                user_id=int(user.id),
+                job_type=BackgroundJobType.KB_INGEST_WEB,
+                payload={"collection": f"kb{index}"},
+            )
+            setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+            db.add(job)
+            db.commit()
+            _age_job(db, job, updated_at=old, started_at=old)
+            job_ids.append(str(job.id))
+        db.rollback()
+
+        doomed = job_ids[0]
+
+        class _Result:
+            def __init__(self, task_id: str) -> None:
+                self.id = task_id
+
+        def fake_apply_async(*, args, queue):  # noqa: ANN001, ANN202
+            if args[0] == doomed:
+                raise RuntimeError("broker unreachable")
+            return _Result(f"task-{args[0]}")
+
+        monkeypatch.setattr(
+            tasks_module.execute_background_job, "apply_async", fake_apply_async
+        )
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert sorted(str(item.id) for item in requeued) == sorted(job_ids)
+        db.expire_all()
+        failed = db.query(BackgroundJob).filter(BackgroundJob.id == doomed).first()
+        assert failed.status == BackgroundJobStatus.PENDING.value
+        assert failed.celery_task_id is None
+        assert "broker unreachable" in str(failed.error_message)
+
+        other = db.query(BackgroundJob).filter(BackgroundJob.id == job_ids[1]).first()
+        assert other.status == BackgroundJobStatus.ENQUEUED.value
+        assert other.celery_task_id == f"task-{job_ids[1]}"
+    finally:
+        db.close()
+
+
 def test_requeue_spares_running_job_that_is_still_reporting_progress(
     tmp_path, monkeypatch
 ):
@@ -1666,10 +1992,10 @@ def test_register_background_job_handler_rejects_duplicate(tmp_path):
     """Duplicate registration is a bug, not a silent last-writer-wins overwrite."""
     from xagent.web.jobs import tasks as tasks_module
 
-    def first_handler(_session, _job):
+    def first_handler(_ref):
         return {"status": "first"}
 
-    def second_handler(_session, _job):
+    def second_handler(_ref):
         return {"status": "second"}
 
     tasks_module.register_background_job_handler("kb.team.transfer", first_handler)
@@ -1687,10 +2013,10 @@ def test_register_background_job_handler_replace_overrides_existing(tmp_path):
     """``replace=True`` is the explicit opt-in for swapping a registration."""
     from xagent.web.jobs import tasks as tasks_module
 
-    def first_handler(_session, _job):
+    def first_handler(_ref):
         return {"status": "first"}
 
-    def second_handler(_session, _job):
+    def second_handler(_ref):
         return {"status": "second"}
 
     tasks_module.register_background_job_handler("kb.team.transfer", first_handler)
@@ -1701,6 +2027,73 @@ def test_register_background_job_handler_replace_overrides_existing(tmp_path):
         assert tasks_module._EXTRA_HANDLERS["kb.team.transfer"] is second_handler
     finally:
         tasks_module._EXTRA_HANDLERS.pop("kb.team.transfer", None)
+
+
+def test_register_background_job_handler_rejects_legacy_two_arg_handler():
+    """The removed ``(db, job)`` shape must be refused where it can be fixed.
+
+    Accepting it defers the mismatch to a TypeError per attempt, so the job
+    burns through max_attempts before reaching FAILED. Registration happens at
+    worker import, which is where a downstream distribution can still react.
+    """
+    from xagent.web.jobs import tasks as tasks_module
+
+    def legacy_handler(db, job):
+        return {"status": "legacy"}
+
+    with pytest.raises(ValueError, match="one BackgroundJobRef"):
+        tasks_module.register_background_job_handler(
+            "kb.team.legacy_signature", legacy_handler
+        )
+
+    assert "kb.team.legacy_signature" not in tasks_module._EXTRA_HANDLERS
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(lambda ref: {"status": "ok"}, id="one-positional"),
+        pytest.param(lambda ref, *, retries=0: {"status": "ok"}, id="keyword-default"),
+        pytest.param(lambda ref, unused=None: {"status": "ok"}, id="optional-second"),
+        pytest.param(lambda *args: {"status": "ok"}, id="var-positional"),
+    ],
+)
+def test_register_background_job_handler_accepts_ref_only_shapes(handler):
+    """Only a second *required* positional means the old contract."""
+    from xagent.web.jobs import tasks as tasks_module
+
+    tasks_module.register_background_job_handler("kb.team.ref_shape", handler)
+    try:
+        assert tasks_module._EXTRA_HANDLERS["kb.team.ref_shape"] is handler
+    finally:
+        tasks_module._EXTRA_HANDLERS.pop("kb.team.ref_shape", None)
+
+
+def test_jobs_package_exports_the_handler_ref_contract():
+    """The value a handler receives is part of the public API, not an internal.
+
+    Without this export a downstream handler has to import the ref from
+    ``xagent.web.models.background_job`` -- a module path this package is free
+    to move -- to type or construct what it is handed.
+    """
+    import xagent.web.jobs as jobs_package
+    from xagent.web.jobs import BackgroundJobHandler, BackgroundJobRef
+
+    assert {"BackgroundJobRef", "BackgroundJobHandler"} <= set(jobs_package.__all__)
+    assert BackgroundJobHandler is not None
+
+    ref = BackgroundJobRef(
+        id="job-1",
+        job_type="kb.team.transfer",
+        user_id=7,
+        payload={"collection": "kb1"},
+        attempts=1,
+        max_attempts=3,
+    )
+    # The row identity a handler needs to scope its own queries.
+    assert (ref.id, ref.job_type, ref.user_id) == ("job-1", "kb.team.transfer", 7)
+    with pytest.raises(Exception):
+        ref.user_id = 8  # frozen: a handler cannot mutate the snapshot
 
 
 @pytest.mark.parametrize("replace", [False, True])
@@ -2350,36 +2743,101 @@ def test_repeated_failures_stop_at_max_attempts(tmp_path, monkeypatch):
         celery_app.conf.task_eager_propagates = False
 
 
-def test_progress_update_failure_does_not_propagate(tmp_path):
-    """Progress is telemetry: a failed write must not fail the caller.
+def _progress_job(db, name: str) -> str:
+    user = _create_user(db, name)
+    job = create_background_job(
+        db,
+        user_id=int(user.id),
+        job_type="kb.team.progress_best_effort",
+        payload={},
+    )
+    db.commit()
+    job_id = str(job.id)
+    db.rollback()
+    return job_id
+
+
+def test_progress_update_read_failure_does_not_propagate(tmp_path, caplog):
+    """Progress is telemetry: a failed read must not fail the caller.
 
     The web ingestion path calls this from inside per-page processing, before
     the page's own try block, so a raised exception here failed the page.
     """
-    from xagent.web.services.background_jobs import update_job_progress
+    from sqlalchemy.exc import OperationalError
 
-    SessionLocal = _init_test_db(tmp_path / "jobs-progress-best-effort.db")
+    from xagent.web.services import background_jobs as service
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-progress-read-fail.db")
     db = SessionLocal()
     try:
-        user = _create_user(db, "progress-best-effort")
-        job = create_background_job(
-            db,
-            user_id=int(user.id),
-            job_type="kb.team.progress_best_effort",
-            payload={},
-        )
-        db.commit()
-        job_id = str(job.id)
-        db.rollback()
+        job_id = _progress_job(db, "progress-read-fail")
 
-        # A job row that no longer exists is the cheap stand-in for any write
-        # failure: the call must return normally either way.
-        update_job_progress("does-not-exist", message="gone")
+        original = service.get_background_job
 
-        # And the real row still updates.
-        update_job_progress(job_id, message="page 1", completed=1, total=2)
+        def _exploding_get(*_args, **_kwargs):
+            raise OperationalError("SELECT 1", {}, Exception("server closed"))
+
+        service.get_background_job = _exploding_get
+        try:
+            with caplog.at_level(logging.WARNING, logger=service.__name__):
+                service.update_job_progress(job_id, message="page 1")
+        finally:
+            service.get_background_job = original
+
+        assert "Failed to update progress" in caplog.text
+
+        # The next call still works: nothing was left broken behind.
+        service.update_job_progress(job_id, message="page 2", completed=2, total=2)
         db.expire_all()
         row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
-        assert row.progress["message"] == "page 1"
+        assert row.progress["message"] == "page 2"
+    finally:
+        db.close()
+
+
+def test_progress_update_commit_failure_does_not_propagate(tmp_path, caplog):
+    """A write that fails at flush/commit must be swallowed the same way.
+
+    ``extra`` reaches the JSON column verbatim, so an unserializable value
+    fails inside the scope's commit rather than before any SQL is emitted --
+    the path a dead connection takes.
+    """
+    from xagent.web.services import background_jobs as service
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-progress-commit-fail.db")
+    db = SessionLocal()
+    try:
+        job_id = _progress_job(db, "progress-commit-fail")
+
+        with caplog.at_level(logging.WARNING, logger=service.__name__):
+            service.update_job_progress(
+                job_id, message="page 1", extra={"unserializable": object()}
+            )
+
+        assert "Failed to update progress" in caplog.text
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.progress is None or "unserializable" not in row.progress
+
+        service.update_job_progress(job_id, message="page 2", completed=2, total=2)
+        db.expire_all()
+        db.refresh(row)
+        assert row.progress["message"] == "page 2"
+    finally:
+        db.close()
+
+
+def test_progress_update_skips_missing_job_row(tmp_path, caplog):
+    """A vanished row is a normal outcome, not a failure worth warning about."""
+    from xagent.web.services import background_jobs as service
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-progress-missing-row.db")
+    db = SessionLocal()
+    try:
+        with caplog.at_level(logging.WARNING, logger=service.__name__):
+            service.update_job_progress("does-not-exist", message="gone")
+
+        assert caplog.text == ""
     finally:
         db.close()

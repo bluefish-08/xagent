@@ -37,6 +37,7 @@ class BackgroundJobRef:
 
     id: str
     job_type: str
+    user_id: int
     payload: dict[str, Any]
     attempts: int
     max_attempts: int
