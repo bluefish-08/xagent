@@ -1,5 +1,6 @@
-"""Tests for release_db_connection_if_clean (issue #889)."""
+"""Tests for release_db_connection_if_clean (issue #889) and session_scope."""
 
+import pytest
 from sqlalchemy import Column, Integer, String, create_engine, insert, text, update
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -164,3 +165,63 @@ def test_none_session_is_noop():
 def test_no_transaction_returns_true():
     db = _make_session()
     assert release_db_connection_if_clean(db) is True
+
+
+def test_session_scope_commits_a_write_and_leaves_no_transaction(tmp_path):
+    """The unit of work is committed and the connection released on exit."""
+    from xagent.web.models.background_job import BackgroundJob
+    from xagent.web.models.database import init_db, session_scope
+    from xagent.web.models.user import User
+
+    init_db(f"sqlite:///{tmp_path / 'scope-commit.db'}")
+
+    with session_scope() as db:
+        user = User(username="scope-commit", password_hash="x")
+        db.add(user)
+        db.flush()
+        user_id = int(user.id)
+
+    with session_scope() as db:
+        assert db.query(User).filter(User.id == user_id).first() is not None
+        assert db.query(BackgroundJob).count() == 0
+
+
+def test_session_scope_does_not_commit_a_read_only_scope(tmp_path):
+    """A scope that only read has nothing to commit.
+
+    Committing anyway bypasses the release helper every other call site uses
+    for this exact problem class, and issues a COMMIT per read.
+    """
+    from sqlalchemy import event
+
+    from xagent.web.models.database import get_engine, init_db, session_scope
+    from xagent.web.models.user import User
+
+    init_db(f"sqlite:///{tmp_path / 'scope-readonly.db'}")
+
+    commits: list[int] = []
+    event.listen(get_engine(), "commit", lambda _conn: commits.append(1))
+
+    with session_scope() as db:
+        db.query(User).all()
+
+    assert commits == []
+
+
+def test_session_scope_reraises_the_original_when_rollback_fails(tmp_path):
+    """A rollback that fails on a dead connection must not mask the failure.
+
+    That is precisely this path's target scenario: the connection the server
+    terminated is the one the rollback runs on.
+    """
+    from xagent.web.models.database import init_db, session_scope
+
+    init_db(f"sqlite:///{tmp_path / 'scope-rollback-fail.db'}")
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with session_scope() as db:
+            db.rollback = lambda: (_ for _ in ()).throw(RuntimeError("connection gone"))
+            raise _Boom("the original failure")

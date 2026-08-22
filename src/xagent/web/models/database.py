@@ -1,6 +1,7 @@
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Iterator
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import Connection, make_url
@@ -135,6 +136,37 @@ def release_db_connection_if_clean(db: Session | None) -> bool:
             "Failed to release DB connection", exc_info=True
         )
         return False
+
+
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    """Open a session for one unit of work, then settle and close it.
+
+    Long-running work must not hold a session open across its idle gaps: the
+    default ``expire_on_commit=True`` re-reads expired attributes after every
+    commit, which re-opens a transaction that then sits idle until the next
+    commit. Postgres terminates such a connection once
+    ``idle_in_transaction_session_timeout`` elapses, and every later statement
+    on that session fails -- including the bookkeeping meant to record the
+    failure. Callers that span minutes or hours use one scope per operation.
+    """
+    db = get_session_local()()
+    try:
+        yield db
+        # A scope that only read has nothing to commit; the helper ends its
+        # transaction instead, and returns False when a write needs one.
+        if not release_db_connection_if_clean(db):
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            # A rollback that fails on an already-dead connection must not
+            # replace the failure the caller is unwinding with.
+            logger.warning("Rollback failed in session_scope", exc_info=True)
+        raise
+    finally:
+        db.close()
 
 
 def get_session_local() -> sessionmaker[Session]:
