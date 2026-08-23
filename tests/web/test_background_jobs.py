@@ -2851,6 +2851,60 @@ def test_accepted_broker_work_survives_a_failure_to_persist_its_task_id(
         verify.close()
 
 
+def test_publish_failure_still_fails_the_job_and_returns_503(tmp_path, monkeypatch):
+    """Before apply_async returns, the old contract holds: FAILED plus 503.
+
+    The acceptance split must not swallow a broker publish that never
+    happened -- only failures after acceptance are exempt from the failure
+    path.
+    """
+    import asyncio
+
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "redis://localhost:6379/0")
+    monkeypatch.setattr(bg, "_is_redis_broker_reachable", lambda _url: True)
+
+    def refuse_publish(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("broker refused the publish")
+
+    monkeypatch.setattr(
+        tasks_module.execute_background_job, "apply_async", refuse_publish
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-publish-failed.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "publish-failed")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        job_id = str(job.id)
+
+        with _pytest.raises(HTTPException) as exc_info:
+            asyncio.run(kb_module._enqueue_background_job_or_503_async(db, job))
+        assert exc_info.value.status_code == 503
+    finally:
+        db.close()
+
+    verify = SessionLocal()
+    try:
+        row = verify.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert "broker refused the publish" in str(row.error_message)
+    finally:
+        verify.close()
+
+
 def test_requeue_does_not_resurrect_a_job_settled_during_dispatch(
     tmp_path, monkeypatch
 ):
