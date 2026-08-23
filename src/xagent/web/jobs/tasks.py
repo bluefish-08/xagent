@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -23,7 +24,6 @@ from ..services.background_jobs import (
     get_background_job,
     mark_job_failed,
     mark_job_running,
-    mark_job_succeeded,
 )
 from .celery_app import celery_app
 from .exceptions import BackgroundJobHandlerError
@@ -146,6 +146,15 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         result = _execute_job_handler(db, job)
+        # SUCCEEDED rides the handler's own commit: a separate session would
+        # leave durable side effects on a RUNNING row for the stale sweep to
+        # run a second time.
+        setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
+        setattr(job, "result", result)
+        setattr(job, "error_message", None)
+        setattr(job, "finished_at", datetime.now(timezone.utc))
+        setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
+        db.add(job)
         db.commit()
     except BackgroundJobHandlerError as exc:
         _end_worker_transaction(db)
@@ -162,7 +171,6 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
         mark_job_failed(job_id, error_message=str(exc))
         raise
     else:
-        mark_job_succeeded(job_id, result=result)
         return result
     finally:
         if db is not None:

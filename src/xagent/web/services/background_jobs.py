@@ -235,7 +235,7 @@ def list_background_jobs(
     )
 
 
-# mark_job_running / mark_job_succeeded / mark_job_failed each take a job id
+# mark_job_running / mark_job_failed each take a job id
 # and open a session of their own: sharing the caller's is what let a poisoned
 # connection take the failure record down with it. One contract for the
 # family -- ValueError when the row is gone, never a silent no-op.
@@ -496,19 +496,6 @@ def requeue_stale_background_jobs(
     db.commit()
 
     return requeued
-
-
-def mark_job_succeeded(job_id: str, *, result: dict[str, Any] | None = None) -> None:
-    with session_scope() as db:
-        job = get_background_job(db, job_id)
-        if job is None:
-            raise ValueError(f"Background job not found: {job_id}")
-        setattr(job, "status", BackgroundJobStatus.SUCCEEDED.value)
-        setattr(job, "result", result)
-        setattr(job, "error_message", None)
-        setattr(job, "finished_at", datetime.now(timezone.utc))
-        setattr(job, "progress", {"message": "Completed", "completed": 1, "total": 1})
-        db.add(job)
 
 
 def mark_job_failed(

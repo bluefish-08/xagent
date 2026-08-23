@@ -2407,7 +2407,6 @@ def test_already_succeeded_job_returns_its_stored_result(tmp_path, monkeypatch):
     "call",
     [
         pytest.param(lambda fn: fn.mark_job_running("missing"), id="running"),
-        pytest.param(lambda fn: fn.mark_job_succeeded("missing"), id="succeeded"),
         pytest.param(
             lambda fn: fn.mark_job_failed("missing", error_message="boom"), id="failed"
         ),
@@ -3023,3 +3022,162 @@ def test_requeue_does_not_dispatch_a_job_settled_before_staging(tmp_path, monkey
         assert row.status == BackgroundJobStatus.CANCELLED.value
     finally:
         db.close()
+
+
+def test_success_is_one_transaction_with_the_handler_writes(tmp_path, monkeypatch):
+    """A second session must never see the handler's writes without SUCCEEDED.
+
+    Committing the handler and then marking SUCCEEDED on another session leaves
+    a window where durable side effects sit on a RUNNING row, which the stale
+    sweep is entitled to run again.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as SASession
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-success-atomic.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "success-atomic")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.atomic",
+            payload={},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        observations: list[tuple[bool, bool]] = []
+
+        @event.listens_for(SASession, "after_commit")
+        def _observe_from_another_session(session):  # noqa: ANN001, ANN202
+            watcher = SessionLocal()
+            try:
+                written = (
+                    watcher.query(User)
+                    .filter(User.username == "atomic-pending-write")
+                    .first()
+                    is not None
+                )
+                row = (
+                    watcher.query(BackgroundJob)
+                    .filter(BackgroundJob.id == job_id)
+                    .first()
+                )
+                succeeded = (
+                    row is not None
+                    and str(row.status) == BackgroundJobStatus.SUCCEEDED.value
+                )
+            finally:
+                watcher.close()
+            observations.append((written, succeeded))
+
+        def handler(work, _job):  # noqa: ANN001, ANN202
+            work.add(User(username="atomic-pending-write", password_hash="x"))
+            return {"status": "ok"}
+
+        tasks_module.register_background_job_handler("kb.team.atomic", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.atomic", None)
+            event.remove(SASession, "after_commit", _observe_from_another_session)
+
+        assert (True, True) in observations, (
+            "the handler's write and SUCCEEDED never became visible together"
+        )
+        assert (True, False) not in observations, (
+            "a second session saw durable handler writes on a non-SUCCEEDED row"
+        )
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_a_failed_success_commit_leaves_neither_the_writes_nor_succeeded(
+    tmp_path, monkeypatch
+):
+    """The terminal commit is the whole success unit, so losing it loses both.
+
+    If the handler's writes were committed first, this crash would leave them
+    durable on a row that never reached SUCCEEDED.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+    from xagent.web.models.database import get_engine
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-success-commit-fails.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "success-commit-fails")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.commitfail",
+            payload={},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        engine = get_engine()
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _break_the_terminal_write(  # noqa: ANN202
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            if not statement.lstrip().upper().startswith("UPDATE BACKGROUND_JOBS"):
+                return
+            # The first bound value is the SET status; matching anywhere in the
+            # parameters would also hit the claim's NOT IN terminal list.
+            bound = parameters if isinstance(parameters, (list, tuple)) else ()
+            if not bound or str(bound[0]) != BackgroundJobStatus.SUCCEEDED.value:
+                return
+            raise OperationalError("update", {}, Exception("server closed"))
+
+        def handler(work, _job):  # noqa: ANN001, ANN202
+            work.add(User(username="commitfail-pending-write", password_hash="x"))
+            return {"status": "ok"}
+
+        tasks_module.register_background_job_handler("kb.team.commitfail", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.commitfail", None)
+            event.remove(engine, "before_cursor_execute", _break_the_terminal_write)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        written = (
+            db.query(User).filter(User.username == "commitfail-pending-write").first()
+        )
+        assert written is None, (
+            "handler writes stayed durable although SUCCEEDED never landed"
+        )
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
