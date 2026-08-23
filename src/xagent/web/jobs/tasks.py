@@ -146,7 +146,7 @@ def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
         result = _execute_job_handler(db, job)
-        _end_worker_transaction(db)
+        db.commit()
     except BackgroundJobHandlerError as exc:
         _end_worker_transaction(db)
         if exc.retryable and claim.attempts < claim.max_attempts:
@@ -187,13 +187,12 @@ def _settled_job_result(job_id: str, settled: SettledJob) -> dict[str, Any]:
 
 
 def _end_worker_transaction(db: Session | None) -> None:
-    """End the handler session's transaction before bookkeeping opens its own.
+    """Discard the failed attempt's work before bookkeeping opens its own session.
 
-    Bookkeeping now runs on a second connection; leaving this one idle in
-    transaction across it is the exposure this whole path exists to remove,
-    and a rollback that fails on an already-dead connection must not replace
-    the failure being recorded. Handlers must commit their own writes: any
-    ORM state still pending here is discarded, not committed.
+    Failure only. The success path commits instead, so a handler that leaves
+    ORM work pending keeps the upstream guarantee that SUCCEEDED means its
+    writes are durable. A rollback that fails on an already-dead connection
+    must not replace the failure being recorded.
     """
     if db is None:
         return

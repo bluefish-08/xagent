@@ -2608,6 +2608,64 @@ def test_requeue_records_broker_failure_per_job(tmp_path, monkeypatch):
         db.close()
 
 
+def test_successful_handler_writes_are_committed(tmp_path, monkeypatch):
+    """SUCCEEDED must still mean the handler's pending writes are durable.
+
+    The public handler contract hands out a ``Session`` and has never required
+    the handler to commit; the upstream wrapper committed it as part of marking
+    the job successful. Rolling it back instead silently drops that work while
+    the job is recorded SUCCEEDED.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-handler-writes.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "handler-writes")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.writes",
+            payload={},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        def handler(work, _job):  # noqa: ANN001, ANN202
+            work.add(User(username="handler-pending-write", password_hash="x"))
+            return {"status": "ok"}
+
+        tasks_module.register_background_job_handler("kb.team.writes", handler)
+        try:
+            tasks_module.execute_background_job.apply(args=[job_id])
+        finally:
+            tasks_module._EXTRA_HANDLERS.pop("kb.team.writes", None)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.SUCCEEDED.value
+        written = (
+            db.query(User).filter(User.username == "handler-pending-write").first()
+        )
+        assert written is not None, (
+            "the handler's pending write was discarded while the job was "
+            "recorded SUCCEEDED"
+        )
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
 def test_setup_failure_after_the_claim_still_reaches_terminal_bookkeeping(
     tmp_path, monkeypatch
 ):
