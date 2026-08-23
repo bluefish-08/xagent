@@ -3181,3 +3181,134 @@ def test_a_failed_success_commit_leaves_neither_the_writes_nor_succeeded(
         db.close()
         celery_app.conf.task_always_eager = False
         celery_app.conf.task_eager_propagates = False
+
+
+def test_enqueue_records_the_failure_even_when_rollback_also_fails(
+    tmp_path, monkeypatch
+):
+    """The caller's connection is already suspect on this path.
+
+    Rollback runs on the connection that just failed, so it can raise too. That
+    must not swallow the independent FAILED record or the 503.
+    """
+    import asyncio
+
+    import pytest as _pytest
+    from fastapi import HTTPException
+    from sqlalchemy.exc import OperationalError
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "redis://localhost:6379/0")
+    monkeypatch.setattr(bg, "_is_redis_broker_reachable", lambda _url: True)
+
+    def refuse_publish(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("broker refused the publish")
+
+    monkeypatch.setattr(
+        tasks_module.execute_background_job, "apply_async", refuse_publish
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-rollback-fails.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "rollback-fails")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        job_id = str(job.id)
+
+        def dead_rollback():  # noqa: ANN202
+            raise OperationalError("rollback", {}, Exception("server closed"))
+
+        monkeypatch.setattr(db, "rollback", dead_rollback)
+
+        with _pytest.raises(HTTPException) as exc_info:
+            asyncio.run(kb_module._enqueue_background_job_or_503_async(db, job))
+        assert exc_info.value.status_code == 503
+    finally:
+        db.close()
+
+    verify = SessionLocal()
+    try:
+        row = verify.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value, (
+            "a failed rollback swallowed the independent failure record"
+        )
+        assert "broker refused the publish" in str(row.error_message)
+    finally:
+        verify.close()
+
+
+def test_accepted_work_is_reconciled_even_when_rollback_also_fails(
+    tmp_path, monkeypatch
+):
+    """Past acceptance a raising rollback must not reach the caller.
+
+    ``create_ingest_job``'s exception cleanup deletes the staging input a
+    running worker still needs, so this branch must always fall through to the
+    independent task-id reconciliation.
+    """
+    import asyncio
+
+    from sqlalchemy.exc import OperationalError
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "redis://localhost:6379/0")
+    monkeypatch.setattr(bg, "_is_redis_broker_reachable", lambda _url: True)
+    monkeypatch.setattr(
+        tasks_module.execute_background_job,
+        "apply_async",
+        MagicMock(return_value=MagicMock(id="accepted-task-id")),
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-accepted-rollback-fails.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "accepted-rollback-fails")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        job_id = str(job.id)
+
+        refreshes: list[object] = []
+        real_refresh = db.refresh
+
+        def flaky_refresh(instance, *args, **kwargs):  # noqa: ANN001, ANN202
+            refreshes.append(instance)
+            if len(refreshes) >= 2:
+                raise OperationalError("refresh", {}, Exception("server closed"))
+            return real_refresh(instance, *args, **kwargs)
+
+        def dead_rollback():  # noqa: ANN202
+            raise OperationalError("rollback", {}, Exception("server closed"))
+
+        monkeypatch.setattr(db, "refresh", flaky_refresh)
+        monkeypatch.setattr(db, "rollback", dead_rollback)
+
+        asyncio.run(kb_module._enqueue_background_job_or_503_async(db, job))
+    finally:
+        db.close()
+
+    verify = SessionLocal()
+    try:
+        row = verify.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.ENQUEUED.value
+        assert row.celery_task_id == "accepted-task-id", (
+            "a failed rollback skipped the independent task-id reconciliation"
+        )
+    finally:
+        verify.close()

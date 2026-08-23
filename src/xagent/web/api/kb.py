@@ -1775,6 +1775,21 @@ async def _ensure_background_job_queue_available_async() -> None:
         )
 
 
+def _rollback_quietly(db: Session) -> None:
+    """Give up the caller's transaction without letting a dead connection win.
+
+    Rollback runs on the connection that just failed, so it can raise too; the
+    independent failure/reconciliation write that follows must still happen.
+    """
+    try:
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Failed to roll back the caller session after an enqueue failure",
+            exc_info=True,
+        )
+
+
 async def _enqueue_background_job_or_503_async(
     db: Session,
     job: BackgroundJob,
@@ -1786,7 +1801,7 @@ async def _enqueue_background_job_or_503_async(
         is_background_job_enqueue_available,
         check_worker=False,
     ):
-        db.rollback()
+        _rollback_quietly(db)
         mark_job_failed(
             job_id,
             error_message="Background job queue is unavailable",
@@ -1810,7 +1825,7 @@ async def _enqueue_background_job_or_503_async(
             queue=str(job.queue or QUEUE_DEFAULT),
         )
     except Exception as exc:  # noqa: BLE001
-        db.rollback()
+        _rollback_quietly(db)
         mark_job_failed(
             job_id,
             error_message=f"Background job queue is unavailable: {exc}",
@@ -1830,7 +1845,7 @@ async def _enqueue_background_job_or_503_async(
         db.commit()
         db.refresh(job)
     except Exception:  # noqa: BLE001
-        db.rollback()
+        _rollback_quietly(db)
         _reconcile_celery_task_id(job_id, str(async_result.id))
     return job
 
