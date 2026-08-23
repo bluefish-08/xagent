@@ -754,7 +754,7 @@ class TestModelHubEnginePoolKwargs:
             for key, value in policy.items()
             if key not in model_resolver._POOL_SIZING_KEYS
         }
-        assert set(expected) == {"pool_recycle", "pool_pre_ping"}
+        assert "pool_timeout" in expected
 
         kwargs = self._capture_create_engine_kwargs(
             monkeypatch, "postgresql+psycopg2://u:p@127.0.0.1:5432/xagent"
@@ -787,10 +787,20 @@ class TestModelHubEnginePoolKwargs:
         assert kwargs == {
             "connect_args": {},
             "hide_parameters": True,
+            "pool_timeout": 999,
             "pool_recycle": 61,
             "pool_pre_ping": False,
             "pool_use_lifo": True,
         }
+
+    def test_configured_pool_timeout_reaches_the_engine(self, monkeypatch):
+        monkeypatch.setenv("XAGENT_DB_POOL_TIMEOUT_SECONDS", "7")
+
+        kwargs = self._capture_create_engine_kwargs(
+            monkeypatch, "postgresql+psycopg2://u:p@127.0.0.1:5432/xagent"
+        )
+
+        assert kwargs["pool_timeout"] == 7
 
     def test_sqlite_engine_takes_no_pool_kwargs(self, monkeypatch, tmp_path):
         kwargs = self._capture_create_engine_kwargs(

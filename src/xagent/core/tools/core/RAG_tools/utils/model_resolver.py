@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import Runnable
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -67,7 +68,8 @@ _MODEL_HUB_LOCK = threading.Lock()
 
 # get_db_pool_kwargs' sizing applies per engine, and a worker already holds the
 # web engine's pool, so adopting it here would double this process's ceiling.
-_POOL_SIZING_KEYS = frozenset({"pool_size", "max_overflow", "pool_timeout"})
+# pool_timeout stays: it is the acquisition wait, not capacity.
+_POOL_SIZING_KEYS = frozenset({"pool_size", "max_overflow"})
 
 
 def _reset_model_hub_cache() -> None:
@@ -173,7 +175,7 @@ def _get_or_init_model_hub() -> Any:
             with _MODEL_HUB_LOCK:
                 if _MODEL_HUB_ENGINE is None or _MODEL_HUB_DB_URL != database_url:
                     old_engine = _MODEL_HUB_ENGINE
-                    is_sqlite = "sqlite" in database_url
+                    is_sqlite = make_url(database_url).get_backend_name() == "sqlite"
                     pool_kwargs: dict[str, Any] = (
                         {}
                         if is_sqlite
