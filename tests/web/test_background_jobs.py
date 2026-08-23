@@ -3312,3 +3312,80 @@ def test_accepted_work_is_reconciled_even_when_rollback_also_fails(
         )
     finally:
         verify.close()
+
+
+def test_requeue_skips_a_job_that_reported_progress_after_the_scan(
+    tmp_path, monkeypatch
+):
+    """The stale SELECT is a snapshot; a live worker invalidates it.
+
+    Between the scan and the claim a RUNNING worker can commit progress. The
+    row is no longer stale, so resetting it to PENDING would clear its task id
+    and put a second copy of live work on the broker.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    dispatched = MagicMock(return_value=MagicMock(id="should-not-happen"))
+    monkeypatch.setattr(tasks_module.execute_background_job, "apply_async", dispatched)
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-freshness.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "requeue-freshness")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.query(BackgroundJob).filter(BackgroundJob.id == job_id).update(
+            {
+                "status": BackgroundJobStatus.RUNNING.value,
+                "celery_task_id": "live-task-id",
+            },
+            synchronize_session=False,
+        )
+        db.commit()
+        _age_job(db, job, updated_at=datetime.now(timezone.utc) - timedelta(hours=3))
+
+        reported: list[str] = []
+        real_fenced_update = bg._fenced_job_update
+
+        def reporting_fenced_update(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            # Called with the scan's snapshot still in hand -- the window the
+            # live worker's progress commit lands in.
+            if not reported:
+                reported.append(job_id)
+                other = SessionLocal()
+                try:
+                    other.query(BackgroundJob).filter(
+                        BackgroundJob.id == job_id
+                    ).update(
+                        {"progress": {"message": "still working"}},
+                        synchronize_session=False,
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+            return real_fenced_update(*args, **kwargs)
+
+        monkeypatch.setattr(bg, "_fenced_job_update", reporting_fenced_update)
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert reported, "the progress window was never reached"
+        assert requeued == [], "a freshly reporting job was claimed by the sweep"
+        assert dispatched.call_count == 0, "a live job was dispatched a second time"
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.RUNNING.value
+        assert row.celery_task_id == "live-task-id"
+    finally:
+        db.close()

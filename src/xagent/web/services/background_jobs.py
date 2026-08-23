@@ -325,27 +325,44 @@ def _rowcount(db: Session, statement: Update) -> int:
 
 
 def _fenced_job_update(
-    db: Session, job_id: str, *, expected: Collection[str], **values: Any
+    db: Session,
+    job_id: str,
+    *,
+    expected: Collection[str],
+    unchanged_since: datetime | None = None,
+    **values: Any,
 ) -> bool:
-    """Write only while the row is still in the state this pass staged.
+    """Write only while the row is still the one this pass observed.
 
     A worker or a cancellation can settle the row between the requeue's steps;
     a zero rowcount means one did, and the row is left alone instead of being
-    resurrected. Two sweepers racing at the same state still both match -- that
-    needs a claim token, not a state predicate.
+    resurrected. ``unchanged_since`` additionally pins the ``updated_at`` the
+    scan read, so a live worker that reports progress after the SELECT takes
+    the row out of this sweep. Two sweepers reading the same snapshot still
+    both match -- that needs a claim token, not a state predicate.
     """
+    predicates = [
+        BackgroundJob.id == job_id,
+        BackgroundJob.status.in_(tuple(expected)),
+    ]
+    if unchanged_since is not None:
+        predicates.append(BackgroundJob.updated_at == unchanged_since)
     return bool(
         _rowcount(
             db,
             update(BackgroundJob)
-            .where(
-                BackgroundJob.id == job_id,
-                BackgroundJob.status.in_(tuple(expected)),
-            )
+            .where(*predicates)
             .values(**values)
             .execution_options(synchronize_session=False),
         )
     )
+
+
+class RequeuedJob(NamedTuple):
+    """Immutable snapshot of one requeue claim, not of the row's later state."""
+
+    id: str
+    queue: str
 
 
 def requeue_stale_background_jobs(
@@ -353,7 +370,7 @@ def requeue_stale_background_jobs(
     *,
     stale_after_seconds: int | None = None,
     limit: int = 100,
-) -> list[BackgroundJob]:
+) -> list[RequeuedJob]:
     """Requeue non-terminal jobs whose durable DB state is stale.
 
     Redis/Celery can lose in-flight delivery state during broker loss or worker
@@ -393,28 +410,36 @@ def requeue_stale_background_jobs(
         .all()
     )
 
-    requeued: list[BackgroundJob] = []
     if not stale_jobs:
-        return requeued
+        return []
 
-    # Snapshot dispatch identities while the attributes are still loaded --
-    # after the commit each read would lazy-load on a reopened transaction.
-    targets = [(str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs]
-    by_id = {str(job.id): job for job in stale_jobs}
+    # Snapshot dispatch identities and the observed state while the attributes
+    # are still loaded -- after the commit each read would lazy-load on a
+    # reopened transaction.
+    targets = [
+        (
+            str(job.id),
+            str(job.queue or QUEUE_DEFAULT),
+            str(job.job_type),
+            str(job.status),
+            cast("datetime | None", job.updated_at),
+        )
+        for job in stale_jobs
+    ]
 
-    claimed: list[tuple[str, str]] = []
-    for job_id, queue in targets:
-        job = by_id[job_id]
+    claimed: list[RequeuedJob] = []
+    for job_id, queue, job_type, observed_status, observed_updated_at in targets:
         logger.warning(
             "Requeueing stale background job %s type=%s status=%s",
             job_id,
-            job.job_type,
-            job.status,
+            job_type,
+            observed_status,
         )
         if _fenced_job_update(
             db,
             job_id,
-            expected=requeue_statuses,
+            expected=(observed_status,),
+            unchanged_since=observed_updated_at,
             status=BackgroundJobStatus.PENDING.value,
             celery_task_id=None,
             started_at=None,
@@ -425,16 +450,12 @@ def requeue_stale_background_jobs(
                 "total": 1,
             },
         ):
-            claimed.append((job_id, queue))
+            claimed.append(RequeuedJob(id=job_id, queue=queue))
 
-    # No post-commit refresh anywhere below: reading an expired attribute
-    # reopens a transaction. Every such read below is closed by the commit
-    # that follows it; none spans the broker call or the return.
     db.commit()
 
-    requeued = [by_id[job_id] for job_id, _queue in claimed]
     if not claimed or not get_celery_enabled():
-        return requeued
+        return claimed
 
     if get_celery_broker_url() is None:
         error_message = "Celery background jobs are enabled but no broker URL is set"
@@ -446,7 +467,7 @@ def requeue_stale_background_jobs(
                 error_message=f"Failed to requeue stale job: {error_message}",
             )
         db.commit()
-        return requeued
+        return claimed
 
     from ..jobs.tasks import execute_background_job
 
@@ -495,7 +516,7 @@ def requeue_stale_background_jobs(
 
     db.commit()
 
-    return requeued
+    return claimed
 
 
 def mark_job_failed(
