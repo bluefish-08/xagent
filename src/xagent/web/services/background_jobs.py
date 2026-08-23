@@ -346,7 +346,7 @@ def _fenced_job_update(
         BackgroundJob.status.in_(tuple(expected)),
     ]
     if unchanged_since is not None:
-        predicates.append(BackgroundJob.updated_at == unchanged_since)
+        predicates.append(BackgroundJob.updated_at <= unchanged_since)
     return bool(
         _rowcount(
             db,

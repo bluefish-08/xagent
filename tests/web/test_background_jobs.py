@@ -3314,6 +3314,56 @@ def test_accepted_work_is_reconciled_even_when_rollback_also_fails(
         verify.close()
 
 
+def test_requeue_reclaims_a_row_whose_updated_at_the_server_wrote(
+    tmp_path, monkeypatch
+):
+    """The freshness fence must match a server-written timestamp.
+
+    SQLite's CURRENT_TIMESTAMP stores second precision, so an equality
+    predicate against the ORM read-back never matches and every stale row
+    is silently skipped -- the sweep does nothing on the default backend.
+    """
+    from sqlalchemy import text
+
+    monkeypatch.setenv(CELERY_ENABLED, "false")
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-server-written.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "server-written")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        setattr(job, "status", BackgroundJobStatus.RUNNING.value)
+        db.add(job)
+        db.commit()
+        job_id = str(job.id)
+        # Write the staleness the way the server does: second precision,
+        # no microseconds. _age_job's python datetime would round-trip.
+        db.execute(
+            text(
+                "UPDATE background_jobs"
+                " SET updated_at = datetime('now', '-3 hours'),"
+                "     started_at = datetime('now', '-3 hours')"
+                " WHERE id = :id"
+            ),
+            {"id": job_id},
+        )
+        db.commit()
+
+        requeued = requeue_stale_background_jobs(db, stale_after_seconds=3600)
+
+        assert [item.id for item in requeued] == [job_id]
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.PENDING.value
+    finally:
+        db.close()
+
+
 def test_requeue_skips_a_job_that_reported_progress_after_the_scan(
     tmp_path, monkeypatch
 ):
