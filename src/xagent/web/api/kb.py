@@ -106,13 +106,14 @@ from ..models.background_job import (
     BackgroundJobStatus,
     BackgroundJobType,
 )
-from ..models.database import get_db, get_session_local
+from ..models.database import get_db, get_session_local, session_scope
 from ..models.uploaded_file import UploadedFile
 from ..models.user import User
 from ..schemas.background_job import BackgroundJobResponse
 from ..services.background_jobs import (
     QUEUE_DEFAULT,
     create_background_job,
+    get_background_job,
     get_non_terminal_background_job_by_idempotency_key,
     is_background_job_enqueue_available,
     mark_job_failed,
@@ -1808,12 +1809,6 @@ async def _enqueue_background_job_or_503_async(
             args=[job.id],
             queue=str(job.queue or QUEUE_DEFAULT),
         )
-        db.refresh(job)
-        setattr(job, "celery_task_id", async_result.id)
-        db.add(job)
-        db.commit()
-        db.refresh(job)
-        return job
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         mark_job_failed(
@@ -1824,6 +1819,36 @@ async def _enqueue_background_job_or_503_async(
             status_code=503,
             detail=f"Background job queue is unavailable: {exc}",
         ) from exc
+
+    # The broker accepted the job and a worker may already be running it.
+    # Failing to persist the task id past this point must not mark that work
+    # FAILED, 503 the caller, or trigger the caller's destructive cleanup.
+    try:
+        db.refresh(job)
+        setattr(job, "celery_task_id", async_result.id)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        _reconcile_celery_task_id(job_id, str(async_result.id))
+    return job
+
+
+def _reconcile_celery_task_id(job_id: str, task_id: str) -> None:
+    """Record the task id of already-accepted work, on a session of its own."""
+    try:
+        with session_scope() as scoped_db:
+            job = get_background_job(scoped_db, job_id)
+            if job is not None:
+                setattr(job, "celery_task_id", task_id)
+                scoped_db.add(job)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Failed to record Celery task id for accepted background job %s",
+            job_id,
+            exc_info=True,
+        )
 
 
 def _atomic_replace_file(source_path: Path, target_path: Path) -> None:

@@ -2785,6 +2785,72 @@ def test_claim_does_not_clobber_a_cancel_that_lands_mid_claim(tmp_path):
         db.close()
 
 
+def test_accepted_broker_work_survives_a_failure_to_persist_its_task_id(
+    tmp_path, monkeypatch
+):
+    """Once apply_async returns, a worker may already be running the job.
+
+    A refresh or commit that fails after acceptance must not mark that work
+    FAILED, must not 503 the caller (whose failure path deletes the staging
+    input the accepted worker still needs), and must still reconcile the task
+    id on a session of its own.
+    """
+    import asyncio
+
+    from sqlalchemy.exc import OperationalError
+
+    from xagent.web.api import kb as kb_module
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "redis://localhost:6379/0")
+    monkeypatch.setattr(bg, "_is_redis_broker_reachable", lambda _url: True)
+    monkeypatch.setattr(
+        tasks_module.execute_background_job,
+        "apply_async",
+        MagicMock(return_value=MagicMock(id="accepted-task-id")),
+    )
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-accepted.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "accepted-publish")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        job_id = str(job.id)
+
+        refreshes: list[object] = []
+        real_refresh = db.refresh
+
+        def flaky_refresh(instance, *args, **kwargs):  # noqa: ANN001, ANN202
+            refreshes.append(instance)
+            if len(refreshes) >= 2:
+                # The first refresh precedes apply_async; this one follows it.
+                raise OperationalError("refresh", {}, Exception("server closed"))
+            return real_refresh(instance, *args, **kwargs)
+
+        monkeypatch.setattr(db, "refresh", flaky_refresh)
+
+        asyncio.run(kb_module._enqueue_background_job_or_503_async(db, job))
+    finally:
+        db.close()
+
+    verify = SessionLocal()
+    try:
+        row = verify.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.ENQUEUED.value, (
+            "accepted broker work was recorded as failed"
+        )
+        assert row.celery_task_id == "accepted-task-id"
+    finally:
+        verify.close()
+
+
 def test_requeue_does_not_resurrect_a_job_settled_during_dispatch(
     tmp_path, monkeypatch
 ):
