@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Update
+
+if TYPE_CHECKING:
+    from sqlalchemy import CursorResult
 
 from ...config import (
     get_background_job_max_retries,
@@ -236,33 +240,59 @@ def list_background_jobs(
 # family -- ValueError when the row is gone, never a silent no-op.
 
 
-def mark_job_running(job_id: str) -> int | None:
-    """Claim the job for this attempt and return the new attempt count.
+class JobClaim(NamedTuple):
+    """Immutable snapshot of a won claim, enough to decide about a retry."""
 
-    Returns ``None`` when the row already settled -- the cancellation check and
-    the claim must land in one transaction, or a cancel arriving between them
-    is silently clobbered back to RUNNING. ``with_for_update`` (a no-op on
-    SQLite) holds the row against a concurrent cancel for that window.
+    attempts: int
+    max_attempts: int
+
+
+class SettledJob(NamedTuple):
+    """Immutable snapshot of a job the claim refused as already settled."""
+
+    status: str
+    result: dict[str, Any] | None
+
+
+def mark_job_running(job_id: str) -> JobClaim | SettledJob:
+    """Claim the job for this attempt, or report the state that refused it.
+
+    The terminal check and the claim are one conditional UPDATE so no cancel
+    can land between them and be clobbered back to RUNNING. Row locking is not
+    involved, so the guarantee holds on SQLite too.
     """
     with session_scope() as db:
-        job = (
-            db.query(BackgroundJob)
-            .filter(BackgroundJob.id == job_id)
-            .with_for_update()
-            .first()
+        claimed = _rowcount(
+            db,
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.id == job_id,
+                BackgroundJob.status.not_in(TERMINAL_JOB_STATUSES),
+            )
+            .values(
+                status=BackgroundJobStatus.RUNNING.value,
+                attempts=BackgroundJob.attempts + 1,
+                started_at=datetime.now(timezone.utc),
+                error_message=None,
+                progress={"message": "Running", "completed": 0, "total": 1},
+            )
+            .execution_options(synchronize_session=False),
         )
-        if job is None:
+        row = db.execute(
+            select(
+                BackgroundJob.status,
+                BackgroundJob.attempts,
+                BackgroundJob.max_attempts,
+                BackgroundJob.result,
+            ).where(BackgroundJob.id == job_id)
+        ).first()
+        if row is None:
             raise ValueError(f"Background job not found: {job_id}")
-        if job.status in TERMINAL_JOB_STATUSES:
-            return None
-        attempts = int(job.attempts or 0) + 1
-        setattr(job, "status", BackgroundJobStatus.RUNNING.value)
-        setattr(job, "attempts", attempts)
-        setattr(job, "started_at", datetime.now(timezone.utc))
-        setattr(job, "error_message", None)
-        setattr(job, "progress", {"message": "Running", "completed": 0, "total": 1})
-        db.add(job)
-        return attempts
+        if not claimed:
+            return SettledJob(status=str(row.status), result=row.result)
+        return JobClaim(
+            attempts=int(row.attempts or 0), max_attempts=int(row.max_attempts or 1)
+        )
 
 
 def update_job_progress(
@@ -287,6 +317,10 @@ def update_job_progress(
     db.commit()
     db.refresh(job)
     return job
+
+
+def _rowcount(db: Session, statement: Update) -> int:
+    return cast("CursorResult[Any]", db.execute(statement)).rowcount
 
 
 def requeue_stale_background_jobs(

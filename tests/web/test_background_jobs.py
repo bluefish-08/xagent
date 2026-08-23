@@ -26,6 +26,7 @@ from xagent.web.models.database import get_session_local, init_db
 from xagent.web.models.uploaded_file import UploadedFile
 from xagent.web.models.user import User
 from xagent.web.services.background_jobs import (
+    SettledJob,
     create_background_job,
     enqueue_background_job,
     is_background_job_enqueue_available,
@@ -2263,7 +2264,10 @@ def test_claim_refuses_a_job_that_was_cancelled(tmp_path):
         job_id = str(job.id)
         db.rollback()
 
-        assert mark_job_running(job_id) is None
+        settled = mark_job_running(job_id)
+        assert settled == SettledJob(
+            status=BackgroundJobStatus.CANCELLED.value, result=None
+        )
 
         db.expire_all()
         row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
@@ -2298,11 +2302,16 @@ def test_claim_refuses_a_job_that_already_failed(tmp_path):
         job_id = str(job.id)
         db.rollback()
 
-        assert mark_job_running(job_id) is None
+        settled = mark_job_running(job_id)
+        assert isinstance(settled, SettledJob)
+        assert settled.status == BackgroundJobStatus.FAILED.value
 
         from xagent.web.jobs.tasks import _settled_job_result
 
-        assert _settled_job_result(job_id) == {"status": "failed", "detail": "boom"}
+        assert _settled_job_result(job_id, settled) == {
+            "status": "failed",
+            "detail": "boom",
+        }
 
         db.expire_all()
         row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
@@ -2595,5 +2604,124 @@ def test_requeue_records_broker_failure_per_job(tmp_path, monkeypatch):
         other = db.query(BackgroundJob).filter(BackgroundJob.id == job_ids[1]).first()
         assert other.status == BackgroundJobStatus.ENQUEUED.value
         assert other.celery_task_id == f"task-{job_ids[1]}"
+    finally:
+        db.close()
+
+
+def test_setup_failure_after_the_claim_still_reaches_terminal_bookkeeping(
+    tmp_path, monkeypatch
+):
+    """A durable RUNNING claim must not outlive a failure in this attempt.
+
+    ``mark_job_running`` commits RUNNING before the worker session exists, so
+    a pool checkout or initial-load failure outside the exception handlers
+    leaves the row RUNNING with no error and no attempt boundary -- exactly the
+    stuck state this PR exists to remove.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.jobs.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-setup-failure.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "setup-failure")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.setup",
+            payload={},
+            max_attempts=1,
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        def _no_session():  # noqa: ANN202
+            raise RuntimeError("pool checkout failed")
+
+        monkeypatch.setattr(tasks_module, "_open_worker_session", _no_session)
+        tasks_module.execute_background_job.apply(args=[job_id])
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert "pool checkout failed" in str(row.error_message)
+        assert int(row.attempts) == 1
+    finally:
+        db.close()
+        celery_app.conf.task_always_eager = False
+        celery_app.conf.task_eager_propagates = False
+
+
+def test_claim_does_not_clobber_a_cancel_that_lands_mid_claim(tmp_path):
+    """The terminal check and the claim must be one statement.
+
+    Read-check-write loses this race: the cancel commits after the check and
+    the claim then writes RUNNING over it. ``with_for_update()`` does not close
+    it either -- it is a no-op on SQLite. The cancel here is committed from a
+    second session while the claim's own write statement is on its way out.
+    """
+    from sqlalchemy import event
+
+    from xagent.web.models.database import get_engine
+    from xagent.web.services.background_jobs import mark_job_running
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-claim-race.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "claim-race")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type="kb.team.race",
+            payload={},
+        )
+        db.commit()
+        job_id = str(job.id)
+        db.rollback()
+
+        engine = get_engine()
+        interleaved: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _cancel_before_the_claim_write(  # noqa: ANN202
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            if interleaved or not statement.lstrip().upper().startswith(
+                "UPDATE BACKGROUND_JOBS"
+            ):
+                return
+            interleaved.append(statement)
+            other = SessionLocal()
+            try:
+                other.query(BackgroundJob).filter(BackgroundJob.id == job_id).update(
+                    {"status": BackgroundJobStatus.CANCELLED.value},
+                    synchronize_session=False,
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        try:
+            settled = mark_job_running(job_id)
+        finally:
+            event.remove(
+                engine, "before_cursor_execute", _cancel_before_the_claim_write
+            )
+
+        assert interleaved, "the claim issued no UPDATE to interleave with"
+        assert isinstance(settled, SettledJob)
+        assert settled.status == BackgroundJobStatus.CANCELLED.value
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.CANCELLED.value
+        assert int(row.attempts or 0) == 0
     finally:
         db.close()

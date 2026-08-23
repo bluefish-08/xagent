@@ -18,6 +18,8 @@ from ..models.database import (
     session_scope,
 )
 from ..services.background_jobs import (
+    TERMINAL_JOB_STATUSES,
+    SettledJob,
     get_background_job,
     mark_job_failed,
     mark_job_running,
@@ -130,56 +132,61 @@ def _execute_job_handler(db: Session, job: BackgroundJob) -> dict[str, Any]:
 def execute_background_job(self: Any, job_id: str) -> dict[str, Any]:
     _ensure_db_initialized()
 
-    attempts = mark_job_running(job_id)
-    if attempts is None:
-        return _settled_job_result(job_id)
+    claim = mark_job_running(job_id)
+    if isinstance(claim, SettledJob):
+        return _settled_job_result(job_id, claim)
 
-    db = _open_worker_session()
+    # Everything after a durable claim belongs to this attempt: a pool
+    # checkout or load failure here must reach the same retry/failure
+    # bookkeeping a handler failure does, or the row stays RUNNING forever.
+    db: Session | None = None
     try:
+        db = _open_worker_session()
         job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
         if job is None:
             raise ValueError(f"Background job not found: {job_id}")
-        max_attempts = int(job.max_attempts or 1)
-
-        try:
-            result = _execute_job_handler(db, job)
-        except BackgroundJobHandlerError as exc:
-            _end_worker_transaction(db)
-            if exc.retryable and attempts < max_attempts:
-                _mark_job_for_retry(job_id, error_message=str(exc), result=exc.result)
-                raise self.retry(exc=exc, max_retries=max_attempts)
-            mark_job_failed(job_id, error_message=str(exc), result=exc.result)
-            raise
-        except Exception as exc:  # noqa: BLE001
-            _end_worker_transaction(db)
-            if attempts < max_attempts:
-                _mark_job_for_retry(job_id, error_message=str(exc))
-                raise self.retry(exc=exc, max_retries=max_attempts)
-            mark_job_failed(job_id, error_message=str(exc))
-            raise
-
+        result = _execute_job_handler(db, job)
         _end_worker_transaction(db)
+    except BackgroundJobHandlerError as exc:
+        _end_worker_transaction(db)
+        if exc.retryable and claim.attempts < claim.max_attempts:
+            _mark_job_for_retry(job_id, error_message=str(exc), result=exc.result)
+            raise self.retry(exc=exc, max_retries=claim.max_attempts)
+        mark_job_failed(job_id, error_message=str(exc), result=exc.result)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _end_worker_transaction(db)
+        if claim.attempts < claim.max_attempts:
+            _mark_job_for_retry(job_id, error_message=str(exc))
+            raise self.retry(exc=exc, max_retries=claim.max_attempts)
+        mark_job_failed(job_id, error_message=str(exc))
+        raise
+    else:
         mark_job_succeeded(job_id, result=result)
         return result
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
-def _settled_job_result(job_id: str) -> dict[str, Any]:
-    """Report the outcome of a job the claim refused as already settled."""
-    with session_scope() as db:
-        job = get_background_job(db, job_id)
-        if job is not None and job.status == BackgroundJobStatus.SUCCEEDED.value:
-            logger.info("Skipping already completed background job %s", job_id)
-            return dict(job.result or {"status": "succeeded"})
-        if job is not None and job.status == BackgroundJobStatus.FAILED.value:
-            logger.info("Skipping already failed background job %s", job_id)
-            return dict(job.result or {"status": "failed"})
-    logger.info("Skipping cancelled background job %s", job_id)
-    return {"status": "cancelled"}
+def _settled_job_result(job_id: str, settled: SettledJob) -> dict[str, Any]:
+    """Report the outcome the claim refused this attempt for.
+
+    The snapshot comes from the claim's own transaction, so there is no second
+    query to race with a delete.
+    """
+    if settled.status not in TERMINAL_JOB_STATUSES:
+        logger.warning(
+            "Background job %s refused the claim in non-terminal status %s",
+            job_id,
+            settled.status,
+        )
+    else:
+        logger.info("Skipping already %s background job %s", settled.status, job_id)
+    return dict(settled.result or {"status": settled.status})
 
 
-def _end_worker_transaction(db: Session) -> None:
+def _end_worker_transaction(db: Session | None) -> None:
     """End the handler session's transaction before bookkeeping opens its own.
 
     Bookkeeping now runs on a second connection; leaving this one idle in
@@ -188,6 +195,8 @@ def _end_worker_transaction(db: Session) -> None:
     the failure being recorded. Handlers must commit their own writes: any
     ORM state still pending here is discarded, not committed.
     """
+    if db is None:
+        return
     try:
         db.rollback()
     except Exception:  # noqa: BLE001
