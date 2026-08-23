@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from urllib.parse import urlsplit
@@ -323,6 +324,30 @@ def _rowcount(db: Session, statement: Update) -> int:
     return cast("CursorResult[Any]", db.execute(statement)).rowcount
 
 
+def _fenced_job_update(
+    db: Session, job_id: str, *, expected: Collection[str], **values: Any
+) -> bool:
+    """Write only while the row is still in the state this pass staged.
+
+    A worker or a cancellation can settle the row between the requeue's steps;
+    a zero rowcount means one did, and the row is left alone instead of being
+    resurrected. Two sweepers racing at the same state still both match -- that
+    needs a claim token, not a state predicate.
+    """
+    return bool(
+        _rowcount(
+            db,
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.id == job_id,
+                BackgroundJob.status.in_(tuple(expected)),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False),
+        )
+    )
+
+
 def requeue_stale_background_jobs(
     db: Session,
     *,
@@ -369,56 +394,72 @@ def requeue_stale_background_jobs(
     )
 
     requeued: list[BackgroundJob] = []
-    for job in stale_jobs:
-        logger.warning(
-            "Requeueing stale background job %s type=%s status=%s",
-            job.id,
-            job.job_type,
-            job.status,
-        )
-        setattr(job, "status", BackgroundJobStatus.PENDING.value)
-        setattr(job, "celery_task_id", None)
-        setattr(job, "started_at", None)
-        setattr(job, "error_message", "Requeued stale background job")
-        setattr(
-            job,
-            "progress",
-            {"message": "Requeued stale background job", "completed": 0, "total": 1},
-        )
-        db.add(job)
-
     if not stale_jobs:
         return requeued
 
     # Snapshot dispatch identities while the attributes are still loaded --
     # after the commit each read would lazy-load on a reopened transaction.
-    dispatch_targets = [
-        (str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs
-    ]
+    targets = [(str(job.id), str(job.queue or QUEUE_DEFAULT)) for job in stale_jobs]
+    by_id = {str(job.id): job for job in stale_jobs}
+
+    claimed: list[tuple[str, str]] = []
+    for job_id, queue in targets:
+        job = by_id[job_id]
+        logger.warning(
+            "Requeueing stale background job %s type=%s status=%s",
+            job_id,
+            job.job_type,
+            job.status,
+        )
+        if _fenced_job_update(
+            db,
+            job_id,
+            expected=requeue_statuses,
+            status=BackgroundJobStatus.PENDING.value,
+            celery_task_id=None,
+            started_at=None,
+            error_message="Requeued stale background job",
+            progress={
+                "message": "Requeued stale background job",
+                "completed": 0,
+                "total": 1,
+            },
+        ):
+            claimed.append((job_id, queue))
 
     # No post-commit refresh anywhere below: reading an expired attribute
     # reopens a transaction. Every such read below is closed by the commit
     # that follows it; none spans the broker call or the return.
     db.commit()
 
-    if not get_celery_enabled():
-        return stale_jobs
+    requeued = [by_id[job_id] for job_id, _queue in claimed]
+    if not claimed or not get_celery_enabled():
+        return requeued
 
     if get_celery_broker_url() is None:
         error_message = "Celery background jobs are enabled but no broker URL is set"
-        for job in stale_jobs:
-            setattr(
-                job, "error_message", f"Failed to requeue stale job: {error_message}"
+        for job_id, _queue in claimed:
+            _fenced_job_update(
+                db,
+                job_id,
+                expected=(BackgroundJobStatus.PENDING.value,),
+                error_message=f"Failed to requeue stale job: {error_message}",
             )
-            db.add(job)
         db.commit()
-        return stale_jobs
+        return requeued
 
     from ..jobs.tasks import execute_background_job
 
-    for job in stale_jobs:
-        setattr(job, "status", BackgroundJobStatus.ENQUEUED.value)
-        db.add(job)
+    dispatch_targets = [
+        (job_id, queue)
+        for job_id, queue in claimed
+        if _fenced_job_update(
+            db,
+            job_id,
+            expected=(BackgroundJobStatus.PENDING.value,),
+            status=BackgroundJobStatus.ENQUEUED.value,
+        )
+    ]
     db.commit()
 
     task_ids: dict[str, str] = {}
@@ -434,16 +475,23 @@ def requeue_stale_background_jobs(
             logger.exception("Failed to requeue stale background job %s", job_id)
             dispatch_errors[job_id] = str(exc)
 
-    for job in stale_jobs:
-        job_id = str(job.id)
+    for job_id, _queue in dispatch_targets:
         error = dispatch_errors.get(job_id)
         if error is None:
-            setattr(job, "celery_task_id", task_ids.get(job_id))
+            _fenced_job_update(
+                db,
+                job_id,
+                expected=(BackgroundJobStatus.ENQUEUED.value,),
+                celery_task_id=task_ids.get(job_id),
+            )
         else:
-            setattr(job, "status", BackgroundJobStatus.PENDING.value)
-            setattr(job, "error_message", f"Failed to requeue stale job: {error}")
-        requeued.append(job)
-        db.add(job)
+            _fenced_job_update(
+                db,
+                job_id,
+                expected=(BackgroundJobStatus.ENQUEUED.value,),
+                status=BackgroundJobStatus.PENDING.value,
+                error_message=f"Failed to requeue stale job: {error}",
+            )
 
     db.commit()
 

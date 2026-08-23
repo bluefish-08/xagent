@@ -2783,3 +2783,123 @@ def test_claim_does_not_clobber_a_cancel_that_lands_mid_claim(tmp_path):
         assert int(row.attempts or 0) == 0
     finally:
         db.close()
+
+
+def test_requeue_does_not_resurrect_a_job_settled_during_dispatch(
+    tmp_path, monkeypatch
+):
+    """A settlement landing between staging and reconciliation must stand.
+
+    The broker-failure reconciliation used to reset the row to PENDING
+    unconditionally, so a cancel or a worker that settled the row mid-pass was
+    resurrected and dispatched again.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-settled.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "requeue-settled")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        db.commit()
+        job_id = str(job.id)
+        _age_job(db, job, updated_at=datetime.now(timezone.utc) - timedelta(hours=3))
+
+        def settling_apply_async(*_args, **_kwargs):  # noqa: ANN202
+            other = SessionLocal()
+            try:
+                other.query(BackgroundJob).filter(BackgroundJob.id == job_id).update(
+                    {"status": BackgroundJobStatus.CANCELLED.value},
+                    synchronize_session=False,
+                )
+                other.commit()
+            finally:
+                other.close()
+            raise RuntimeError("broker down")
+
+        monkeypatch.setattr(
+            tasks_module.execute_background_job, "apply_async", settling_apply_async
+        )
+
+        requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.CANCELLED.value, (
+            "the stale pass resurrected a job settled during its own dispatch"
+        )
+    finally:
+        db.close()
+
+
+def test_requeue_does_not_dispatch_a_job_settled_before_staging(tmp_path, monkeypatch):
+    """The staging write is fenced too, not just the reconciliation.
+
+    A settlement landing between the PENDING claim and the ENQUEUED staging
+    would otherwise be overwritten and the terminal job put back on the broker.
+    """
+    monkeypatch.setenv(CELERY_ENABLED, "true")
+    monkeypatch.setenv(CELERY_BROKER_URL, "memory://")
+
+    from xagent.web.jobs import tasks as tasks_module
+    from xagent.web.services import background_jobs as bg
+
+    dispatched = MagicMock(return_value=MagicMock(id="should-not-happen"))
+    monkeypatch.setattr(tasks_module.execute_background_job, "apply_async", dispatched)
+
+    SessionLocal = _init_test_db(tmp_path / "jobs-requeue-staging.db")
+    db = SessionLocal()
+    try:
+        user = _create_user(db, "requeue-staging")
+        job = create_background_job(
+            db,
+            user_id=int(user.id),
+            job_type=BackgroundJobType.KB_INGEST_WEB,
+            payload={"url": "https://example.com"},
+        )
+        db.commit()
+        job_id = str(job.id)
+        _age_job(db, job, updated_at=datetime.now(timezone.utc) - timedelta(hours=3))
+
+        settled: list[str] = []
+        real_broker_url = bg.get_celery_broker_url
+
+        def settling_broker_url():  # noqa: ANN202
+            # Called between the PENDING claim's commit and the ENQUEUED
+            # staging write -- the window another actor can settle the row in.
+            if not settled:
+                settled.append(job_id)
+                other = SessionLocal()
+                try:
+                    other.query(BackgroundJob).filter(
+                        BackgroundJob.id == job_id
+                    ).update(
+                        {"status": BackgroundJobStatus.CANCELLED.value},
+                        synchronize_session=False,
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+            return real_broker_url()
+
+        monkeypatch.setattr(bg, "get_celery_broker_url", settling_broker_url)
+
+        requeue_stale_background_jobs(db, stale_after_seconds=60)
+
+        assert settled, "the settlement window was never reached"
+        assert dispatched.call_count == 0, (
+            "a settled job was staged and dispatched anyway"
+        )
+        db.expire_all()
+        row = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        assert row.status == BackgroundJobStatus.CANCELLED.value
+    finally:
+        db.close()
