@@ -538,24 +538,31 @@ describe("useWebSocket normalized connections", () => {
   })
 
   it("reports the browser timezone so the agent clock can render local time", async () => {
-    const { result } = renderHook(() => useWebSocket({
-      url: "ws://localhost",
-      taskId: 7,
-    }))
-    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
-    const socket = MockWebSocket.instances[0]
-    act(() => socket.open())
+    // Pinned, not read back from Intl: asserting against the same source the
+    // code reads makes the test tautological on a UTC host.
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions)
+    try {
+      const { result } = renderHook(() => useWebSocket({
+        url: "ws://localhost",
+        taskId: 7,
+      }))
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+      const socket = MockWebSocket.instances[0]
+      act(() => socket.open())
 
-    const delivery = result.current.sendChatMessage("what is tomorrow", undefined, false, "tz-turn")
-    const sent = JSON.parse(socket.send.mock.calls[0][0])
-    expect(sent.context).toEqual({
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    })
-    act(() => socket.receive({
-      type: "message_accepted",
-      client_message_id: "tz-turn",
-    }))
-    await delivery
+      const delivery = result.current.sendChatMessage("what is tomorrow", undefined, false, "tz-turn")
+      const sent = JSON.parse(socket.send.mock.calls[0][0])
+      expect(sent.context).toEqual({ timezone: "America/New_York" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "tz-turn",
+      }))
+      await delivery
+    } finally {
+      resolvedOptions.mockRestore()
+    }
   })
 
   it("omits the context entirely when the browser cannot resolve a timezone", async () => {
