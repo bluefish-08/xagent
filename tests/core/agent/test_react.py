@@ -6147,17 +6147,35 @@ def _react_clock_prompt(timezone_name: str | None) -> str:
     return messages[0]["content"]
 
 
+# Verbatim pre-PR sentence, so a change to any part of the fallback instruction
+# fails rather than only a change to its "Current date" prefix.
+UTC_DATE_INSTRUCTION = (
+    "Current date (UTC): 2026-08-24. "
+    "For recent, latest, current, or time-sensitive requests, use this "
+    "date when forming search queries and judging source relevance."
+)
+
+
+def _date_instruction(prompt: str) -> str:
+    start = prompt.index("Current date (")
+    end = prompt.index("source relevance.", start) + len("source relevance.")
+    return prompt[start:end]
+
+
 def test_tool_call_date_line_keeps_utc_wording_without_a_timezone() -> None:
-    assert "Current date (UTC): 2026-08-24. " in _react_clock_prompt(None)
+    assert _date_instruction(_react_clock_prompt(None)) == UTC_DATE_INSTRUCTION
 
 
 def test_tool_call_date_line_uses_the_caller_timezone() -> None:
     prompt = _react_clock_prompt("Australia/Melbourne")
 
-    assert "Current date (Australia/Melbourne): 2026-08-25. " in prompt
+    assert _date_instruction(prompt) == UTC_DATE_INSTRUCTION.replace(
+        "Current date (UTC): 2026-08-24. ",
+        "Current date (Australia/Melbourne): 2026-08-25. ",
+    )
     # The UTC date is what produced the wrong "tomorrow" in production.
     assert "Current date (UTC)" not in prompt
 
 
 def test_tool_call_date_line_degrades_to_utc_for_an_unusable_timezone() -> None:
-    assert "Current date (UTC): 2026-08-24. " in _react_clock_prompt("Not/AZone")
+    assert _date_instruction(_react_clock_prompt("Not/AZone")) == UTC_DATE_INSTRUCTION
