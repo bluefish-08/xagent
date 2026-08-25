@@ -528,12 +528,60 @@ describe("useWebSocket normalized connections", () => {
       message: "legacy",
       task_id: 7,
       client_message_id: "legacy-turn",
+      context: { timezone: expect.any(String) },
     })
     act(() => socket.receive({
       type: "message_accepted",
       client_message_id: "legacy-turn",
     }))
     await delivery
+  })
+
+  it("reports the browser timezone so the agent clock can render local time", async () => {
+    const { result } = renderHook(() => useWebSocket({
+      url: "ws://localhost",
+      taskId: 7,
+    }))
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+    const socket = MockWebSocket.instances[0]
+    act(() => socket.open())
+
+    const delivery = result.current.sendChatMessage("what is tomorrow", undefined, false, "tz-turn")
+    const sent = JSON.parse(socket.send.mock.calls[0][0])
+    expect(sent.context).toEqual({
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    })
+    act(() => socket.receive({
+      type: "message_accepted",
+      client_message_id: "tz-turn",
+    }))
+    await delivery
+  })
+
+  it("omits the context entirely when the browser cannot resolve a timezone", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "" } as Intl.ResolvedDateTimeFormatOptions)
+    try {
+      const { result } = renderHook(() => useWebSocket({
+        url: "ws://localhost",
+        taskId: 7,
+      }))
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+      const socket = MockWebSocket.instances[0]
+      act(() => socket.open())
+
+      const delivery = result.current.sendChatMessage("hi", undefined, false, "no-tz-turn")
+      const sent = JSON.parse(socket.send.mock.calls[0][0])
+      expect("context" in sent).toBe(false)
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "no-tz-turn",
+      }))
+      await delivery
+    } finally {
+      resolvedOptions.mockRestore()
+    }
   })
 
   it("treats an explicit null connection as disabled even when legacy inputs exist", async () => {
@@ -706,6 +754,7 @@ describe("useWebSocket normalized connections", () => {
     expect(sent).toEqual({
       type: "chat",
       message: "create lazily",
+      context: { timezone: expect.any(String) },
       client_message_id: "session-turn-1",
     })
 

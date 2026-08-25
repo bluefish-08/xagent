@@ -67,6 +67,16 @@ export class MessageDeliveryError extends Error {
   }
 }
 
+const resolveBrowserTimezone = (): string | undefined => {
+  try {
+    // Defensive: neither a throwing Intl nor an empty resolved zone may block
+    // the send. The caller's truthiness check drops "".
+    return Intl.DateTimeFormat().resolvedOptions().timeZone
+  } catch {
+    return undefined
+  }
+}
+
 const deliveryError = (
   message: string,
   disposition: MessageDeliveryDisposition,
@@ -1164,10 +1174,12 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     preparationsRef.current.set(clientMessageId, claim)
 
     try {
+      const browserTimezone = resolveBrowserTimezone()
       const messageData: Record<string, unknown> = {
         type: 'chat',
         message,
         client_message_id: clientMessageId,
+        ...(browserTimezone ? { context: { timezone: browserTimezone } } : {}),
         ...(connection.chatTaskIdMode === "required" ? { task_id: currentTaskId } : {}),
       }
 
