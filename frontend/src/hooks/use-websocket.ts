@@ -77,7 +77,13 @@ export class MessageDeliveryError extends Error {
   }
 }
 
-const resolveBrowserTimezone = (): string | undefined => {
+const resolveReportedTimezone = (): string | undefined => {
+  if (typeof window !== "undefined") {
+    // widget.js copies data-timezone onto the iframe URL; an embedder that knows
+    // its user's business zone outranks the machine zone.
+    const declared = new URLSearchParams(window.location.search).get("timezone")?.trim()
+    if (declared) return declared
+  }
   try {
     // Defensive: neither a throwing Intl nor an empty resolved zone may block
     // the send. The caller's truthiness check drops "".
@@ -1200,14 +1206,14 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
     try {
       if (!attemptTimezonesRef.current.has(clientMessageId)) {
-        attemptTimezonesRef.current.set(clientMessageId, resolveBrowserTimezone())
+        attemptTimezonesRef.current.set(clientMessageId, resolveReportedTimezone())
       }
-      const browserTimezone = attemptTimezonesRef.current.get(clientMessageId)
+      const reportedTimezone = attemptTimezonesRef.current.get(clientMessageId)
       const messageData: Record<string, unknown> = {
         type: 'chat',
         message,
         client_message_id: clientMessageId,
-        ...(browserTimezone ? { context: { timezone: browserTimezone } } : {}),
+        ...(reportedTimezone ? { context: { timezone: reportedTimezone } } : {}),
         ...(connection.chatTaskIdMode === "required" ? { task_id: currentTaskId } : {}),
       }
 

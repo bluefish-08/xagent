@@ -631,6 +631,62 @@ describe("useWebSocket normalized connections", () => {
     }
   })
 
+  it("prefers the embedder-declared timezone from the iframe URL over the browser zone", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions)
+    window.history.replaceState({}, "", "/widget/chat/session?timezone=Australia%2FPerth")
+    try {
+      const { result } = renderHook(() => useWebSocket({
+        url: "ws://localhost",
+        taskId: 7,
+      }))
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+      const socket = MockWebSocket.instances[0]
+      act(() => socket.open())
+
+      const delivery = result.current.sendChatMessage("hi", undefined, false, "declared-turn")
+      const sent = JSON.parse(socket.send.mock.calls[0][0])
+      expect(sent.context).toEqual({ timezone: "Australia/Perth" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "declared-turn",
+      }))
+      await delivery
+    } finally {
+      resolvedOptions.mockRestore()
+      window.history.replaceState({}, "", "/")
+    }
+  })
+
+  it("falls back to the browser zone when the declared timezone is blank", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions)
+    window.history.replaceState({}, "", "/widget/chat/session?timezone=%20%20")
+    try {
+      const { result } = renderHook(() => useWebSocket({
+        url: "ws://localhost",
+        taskId: 7,
+      }))
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+      const socket = MockWebSocket.instances[0]
+      act(() => socket.open())
+
+      const delivery = result.current.sendChatMessage("hi", undefined, false, "blank-declared")
+      const sent = JSON.parse(socket.send.mock.calls[0][0])
+      expect(sent.context).toEqual({ timezone: "America/New_York" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "blank-declared",
+      }))
+      await delivery
+    } finally {
+      resolvedOptions.mockRestore()
+      window.history.replaceState({}, "", "/")
+    }
+  })
+
   it("omits the context entirely when the browser cannot resolve a timezone", async () => {
     const resolvedOptions = vi
       .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
