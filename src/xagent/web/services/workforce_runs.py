@@ -198,7 +198,7 @@ def _normalize_workforce_run_request(
         extra_agent_config=(
             dict(extra_agent_config) if extra_agent_config is not None else None
         ),
-        timezone=(timezone or "").strip() or None,
+        timezone=(timezone.strip() or None) if isinstance(timezone, str) else None,
     )
 
 

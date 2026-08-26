@@ -88,7 +88,10 @@ class TaskCreateRequest(BaseModel):
     # Only consumed by entry points that start the first turn inside task
     # creation. Unresolvable names degrade to UTC at the render site rather
     # than 422 here, matching how the websocket path treats the same field.
-    timezone: Optional[str] = None  # IANA name for the caller's local clock
+    # max_length bounds this guest-reachable free-text field to IANA lengths.
+    timezone: Optional[str] = Field(
+        default=None, max_length=64
+    )  # IANA name for the caller's local clock
 
     # Execution mode field
     execution_mode: Optional[str] = None  # "flash", "balanced", "think", or "auto"

@@ -299,6 +299,23 @@ def test_create_task_without_timezone_sends_no_context(mock_start_task):
     assert mock_start_task.call_args.kwargs["context"] is None
 
 
+def test_create_task_rejects_an_over_long_timezone(mock_start_task):
+    # Guest-reachable free-text field is bounded to IANA lengths (max_length=64).
+    agent_id, full_key = _create_agent_with_key()
+
+    resp = client.post(
+        "/v1/chat/tasks",
+        headers=_bearer(full_key),
+        json={
+            "agent_id": agent_id,
+            "message": {"role": "user", "content": "hello"},
+            "timezone": "A" * 65,
+        },
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
 def test_create_task_treats_a_blank_timezone_as_absent(mock_start_task):
     # The shared helper normalizes whitespace-only to None, so the SDK path
     # matches the workforce path rather than sending {"timezone": "  "}.

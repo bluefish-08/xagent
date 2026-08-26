@@ -117,6 +117,7 @@ class CreateTaskRequest(BaseModel):
     )
     timezone: Optional[str] = Field(
         default=None,
+        max_length=64,
         description=(
             "IANA timezone name for the end user's local clock, used to render "
             "the date the agent reasons from. Omit to keep UTC. An "
