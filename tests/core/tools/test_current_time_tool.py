@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone
 
 import pytest
+from pydantic import ValidationError
 
 from xagent.core.tools.adapters.vibe import current_time_tool as module
 from xagent.core.tools.adapters.vibe.base import ToolCategory
@@ -122,7 +123,7 @@ def test_json_surface_rejects_a_non_string_timezone() -> None:
     # the validation error and reports a normal failed tool call.
     tool = CurrentTimeTool()
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         tool.run_json_sync({"timezone": 42})
 
 

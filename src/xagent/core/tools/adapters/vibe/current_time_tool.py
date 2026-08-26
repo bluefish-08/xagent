@@ -39,6 +39,8 @@ class CurrentTimeResult(BaseModel):
             "to 'utc' when the zone is UTC."
         )
     )
+    # Field name is the wire contract; it locally shadows the datetime.timezone
+    # import, which this class body does not use.
     timezone: str = Field(
         description=(
             "Zone the 'local' field is expressed in. 'UTC' when none was "
