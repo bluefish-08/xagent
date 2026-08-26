@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Mapping, Optional, Type
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from pydantic import BaseModel, Field
 
@@ -47,14 +48,27 @@ class CurrentTimeResult(BaseModel):
     )
 
 
+@lru_cache(maxsize=1)
+def _zone_by_lowercase() -> dict[str, str]:
+    return {name.lower(): name for name in available_timezones()}
+
+
 def _resolve_zone(name: Optional[str]) -> Optional[ZoneInfo]:
+    # Always resolve through the canonical map rather than ZoneInfo(name)
+    # directly: ZoneInfo.key echoes whatever string it was given, and
+    # tzdata lookup is case-sensitive on Linux but not on macOS, so the
+    # reported zone would otherwise vary by input case and filesystem.
+    # The map guarantees a canonical key (e.g. "australia/melbourne" ->
+    # "Australia/Melbourne") and identical behavior across platforms.
+    # An unusable name comes from the model, so it degrades to UTC.
     if not isinstance(name, str) or not name.strip():
         return None
+    canonical = _zone_by_lowercase().get(name.strip().lower())
+    if canonical is None:
+        return None
     try:
-        return ZoneInfo(name.strip())
-    except (ZoneInfoNotFoundError, ValueError, OSError, TypeError, KeyError):
-        # The name comes from the model, so an unusable one degrades to UTC
-        # rather than failing the call. OSError covers an over-long name.
+        return ZoneInfo(canonical)
+    except (ZoneInfoNotFoundError, ValueError, OSError, KeyError):
         return None
 
 
@@ -81,7 +95,11 @@ def current_time(timezone_name: Optional[str] = None) -> CurrentTimeResult:
 class CurrentTimeTool(AbstractBaseTool):
     """Answers 'what time is it now', which the system prompt cannot."""
 
-    category = ToolCategory.BASIC
+    # OTHER (not BASIC) keeps it out of the builder's category picker: it is
+    # intrinsic (selection_gate="intrinsic"), always on for any non-NONE agent,
+    # so presenting a togglable "basic" category that cannot actually disable it
+    # would mislead. OTHER is in AGENT_CONFIG_UNASSIGNABLE_CATEGORIES.
+    category = ToolCategory.OTHER
     read_only = True  # reads a clock ⇒ concurrency-safe
 
     def __init__(self) -> None:

@@ -89,6 +89,16 @@ def test_unusable_zone_degrades_to_utc(supplied: object) -> None:
     assert result.local == result.utc == "2026-08-24 22:03:37"
 
 
+def test_resolves_a_differently_cased_zone_name() -> None:
+    # ZoneInfo is case-sensitive against tzdata filenames on Linux, so a valid
+    # but lowercased name must still resolve rather than degrade to UTC.
+    result = current_time("australia/melbourne")
+
+    assert result.timezone == "Australia/Melbourne"
+    assert result.local == "2026-08-25 08:03:37"
+    assert result.utc_offset == "+10:00"
+
+
 def test_tool_runs_through_the_json_surface() -> None:
     tool = CurrentTimeTool()
 
@@ -106,11 +116,36 @@ def test_tool_runs_through_the_json_surface() -> None:
     }
 
 
-def test_tool_declares_a_read_only_basic_identity() -> None:
+def test_json_surface_rejects_a_non_string_timezone() -> None:
+    # A non-string timezone fails pydantic validation at the JSON boundary,
+    # before _resolve_zone runs. The tool must not raise; the caller catches
+    # the validation error and reports a normal failed tool call.
+    tool = CurrentTimeTool()
+
+    with pytest.raises(Exception):
+        tool.run_json_sync({"timezone": 42})
+
+
+def test_intrinsic_category_is_not_user_assignable() -> None:
+    # D1: an always-on tool must not sit in a togglable builder category, or
+    # unchecking that category would falsely imply it disables the tool.
+    from xagent.core.tools.adapters.vibe.base import (
+        AGENT_CONFIG_UNASSIGNABLE_CATEGORIES,
+    )
+
+    assert (
+        CurrentTimeTool().metadata.category.value
+        in AGENT_CONFIG_UNASSIGNABLE_CATEGORIES
+    )
+
+
+def test_tool_declares_a_read_only_intrinsic_identity() -> None:
     metadata = CurrentTimeTool().metadata
 
     assert metadata.name == "get_current_time"
-    assert metadata.category == ToolCategory.BASIC
+    # OTHER, not BASIC: it is intrinsic (never category-gated), so it must not
+    # appear as a togglable category in the builder picker.
+    assert metadata.category == ToolCategory.OTHER
     # Reading a clock touches nothing, so the ReAct scheduler may run it
     # alongside other concurrency-safe tools.
     assert metadata.read_only is True
