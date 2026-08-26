@@ -166,6 +166,7 @@ class ToolRegistry:
                 audio_tool,
                 basic_tools,
                 browser_tools,
+                current_time_tool,
                 custom_api_factory,
                 file_ingestion_tool,
                 image_tool,
