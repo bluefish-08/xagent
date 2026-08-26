@@ -7170,18 +7170,20 @@ def _react_clock_prompt(timezone_name: str | None) -> str:
     return messages[0]["content"]
 
 
-# Verbatim pre-PR sentence, so a change to any part of the fallback instruction
-# fails rather than only a change to its "Turn-start date" prefix.
+# Covers the whole fallback instruction through the get_current_time pointer, so
+# reverting any part of it fails rather than only a change to the prefix.
 UTC_DATE_INSTRUCTION = (
     "Turn-start date (UTC): 2026-08-24. "
     "For recent, latest, current, or time-sensitive requests, use this "
-    "date when forming search queries and judging source relevance."
+    "date when forming search queries and judging source relevance. If the "
+    "exact current time matters or the turn may have crossed midnight, call "
+    "the get_current_time tool if it is available."
 )
 
 
 def _date_instruction(prompt: str) -> str:
     start = prompt.index("Turn-start date (")
-    end = prompt.index("source relevance.", start) + len("source relevance.")
+    end = prompt.index("if it is available.", start) + len("if it is available.")
     return prompt[start:end]
 
 
