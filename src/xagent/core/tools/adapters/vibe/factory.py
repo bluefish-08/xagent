@@ -196,6 +196,11 @@ class ToolRegistry:
         spec: ToolSelectionSpec | None,
         selection_gate: str | None,
     ) -> bool:
+        if selection_gate == "intrinsic":
+            # Always-available tool: assemble for every non-NONE spec, but an
+            # explicit zero-tools agent still gets nothing.
+            return spec is None or not spec.is_none()
+
         if spec is None or declared_cats is None or spec.categories is None:
             return True
 

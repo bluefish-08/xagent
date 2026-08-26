@@ -118,7 +118,7 @@ class CurrentTimeTool(AbstractBaseTool):
         return self.run_json_sync(args)
 
 
-@register_tool(categories={"basic"})
+@register_tool(selection_gate="intrinsic")
 async def create_current_time_tool(config: WebToolConfig) -> list[AbstractBaseTool]:
     """Create the current-time tool."""
     return [CurrentTimeTool()]

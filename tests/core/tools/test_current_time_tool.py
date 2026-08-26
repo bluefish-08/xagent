@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import datetime, timezone
 
 import pytest
@@ -11,6 +12,8 @@ from xagent.core.tools.adapters.vibe.current_time_tool import (
     CurrentTimeTool,
     current_time,
 )
+from xagent.core.tools.adapters.vibe.factory import ToolFactory, ToolRegistry
+from xagent.core.tools.adapters.vibe.selection_spec import ToolSelectionSpec
 
 # The instant behind the reported incident: already the next day in Melbourne.
 FROZEN = datetime(2026, 8, 24, 22, 3, 37, tzinfo=timezone.utc)
@@ -121,9 +124,101 @@ def test_description_tells_the_model_the_prompt_clock_is_stale() -> None:
     assert "timezone" in description
 
 
-def test_module_is_imported_by_the_tool_registry() -> None:
-    """Without this import the @register_tool decorator never runs."""
-    from xagent.core.tools.adapters.vibe import factory
+class _FakeConfig:
+    """Minimal config carrying only what the factory pipeline reads."""
 
-    source = factory.__loader__.get_source(factory.__name__)  # type: ignore[union-attr]
-    assert "current_time_tool," in source
+    def __init__(self, spec: ToolSelectionSpec) -> None:
+        self._spec = spec
+
+    def get_tool_selection_spec(self) -> ToolSelectionSpec:
+        return self._spec
+
+    def get_sandbox(self) -> None:
+        return None
+
+    def get_workspace_config(self) -> None:
+        return None
+
+    def get_max_output_length(self) -> None:
+        return None
+
+    def get_max_field_count(self) -> None:
+        return None
+
+    def get_max_recursion_depth(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (ToolSelectionSpec.from_raw(tool_categories=None), 1),  # ALL
+        (ToolSelectionSpec.from_raw(tool_categories=["web_search"]), 1),  # non-basic
+        (ToolSelectionSpec.from_raw(tool_categories=[]), 0),  # explicit NONE
+    ],
+)
+async def test_intrinsic_tool_is_assembled_for_non_none_specs(
+    spec: ToolSelectionSpec, expected: int
+) -> None:
+    """The full factory pipeline assembles exactly one usable
+    get_current_time for any non-NONE selection -- including one that
+    never picks the basic category -- and none for an explicit NONE."""
+    tools = await ToolFactory.create_all_tools(
+        _FakeConfig(spec), apply_user_override_filter=False
+    )
+
+    assert [t.name for t in tools].count("get_current_time") == expected
+
+
+async def test_intrinsic_creator_is_skipped_for_explicit_none() -> None:
+    """The registry gate must not even build the intrinsic tool for an
+    explicit zero-tools agent: the NONE contract wins over always-on.
+    Pinned at the registry level because the post-build name filter is a
+    second guard that would otherwise mask a broken gate."""
+    spec = ToolSelectionSpec.from_raw(tool_categories=[])
+
+    tools = await ToolRegistry.create_registered_tools(_FakeConfig(spec))
+
+    assert "get_current_time" not in [getattr(t, "name", None) for t in tools]
+
+
+async def test_registry_import_path_registers_the_tool() -> None:
+    """The tool must reach the registry through the production import list
+    in ``ToolRegistry._import_tool_modules`` -- not through this test's own
+    top-level import. Drop that import and its registration, then drive the
+    production import path from a clean state and assert it comes back."""
+    import importlib
+
+    saved_creators = list(ToolRegistry._tool_creators)
+    saved_imported = ToolRegistry._modules_imported
+    module_name = module.__name__
+    pkg_name, attr = module_name.rsplit(".", 1)
+    pkg = importlib.import_module(pkg_name)
+    saved_module = sys.modules.get(module_name)
+    saved_attr = getattr(pkg, attr, None)
+    ToolRegistry._tool_creators = [
+        entry
+        for entry in ToolRegistry._tool_creators
+        if getattr(entry[0], "__module__", None) != module_name
+    ]
+    ToolRegistry._modules_imported = False
+    # Force a genuine re-import through the production list: drop both the
+    # cached module and the parent-package attribute, or ``from . import
+    # current_time_tool`` would resolve the stale attribute and never re-run
+    # the decorator.
+    sys.modules.pop(module_name, None)
+    if hasattr(pkg, attr):
+        delattr(pkg, attr)
+    try:
+        tools = await ToolFactory.create_all_tools(
+            _FakeConfig(ToolSelectionSpec.from_raw(tool_categories=["web_search"])),
+            apply_user_override_filter=False,
+        )
+        assert [t.name for t in tools].count("get_current_time") == 1
+    finally:
+        ToolRegistry._tool_creators = saved_creators
+        ToolRegistry._modules_imported = saved_imported
+        if saved_module is not None:
+            sys.modules[module_name] = saved_module
+        if saved_attr is not None:
+            setattr(pkg, attr, saved_attr)

@@ -49,6 +49,12 @@ AGENT_CONFIG_UNASSIGNABLE_CATEGORIES: frozenset[str] = frozenset(
 # selectable in the builder's picker, so never gate them on a selection.
 BINDING_AUTHORIZED_CATEGORIES: frozenset[str] = frozenset({ToolCategory.SSH.value})
 
+# Tools available to every non-NONE agent regardless of category selection.
+# Their creator registers with ``selection_gate="intrinsic"`` and their names
+# are admitted by ``compute_allowed_names`` outside the category match. An
+# explicit NONE (zero-tools) agent still excludes them.
+INTRINSIC_TOOL_NAMES: frozenset[str] = frozenset({"get_current_time"})
+
 
 class ToolMetadata(BaseModel):
     name: str
