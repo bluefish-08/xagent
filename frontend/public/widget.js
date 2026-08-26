@@ -215,8 +215,16 @@
 
   function withTimezone(url) {
     if (!embedTimezone) return url;
-    return url + (url.indexOf('?') === -1 ? '?' : '&') +
-      'timezone=' + encodeURIComponent(embedTimezone);
+    var encoded;
+    try {
+      // A lone UTF-16 surrogate survives trim() and makes encodeURIComponent
+      // throw; the override must degrade to the browser/UTC path, never abort
+      // iframe setup.
+      encoded = encodeURIComponent(embedTimezone);
+    } catch {
+      return url;
+    }
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + 'timezone=' + encoded;
   }
 
   // Styles

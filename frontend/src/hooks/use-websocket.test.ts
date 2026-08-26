@@ -765,6 +765,43 @@ describe("useWebSocket normalized connections", () => {
     }
   })
 
+  it("frees the attempt zone after a not-sent failure so a same-id retry re-resolves", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "Australia/Melbourne" } as Intl.ResolvedDateTimeFormatOptions)
+    try {
+      const { result } = renderHook(() => useWebSocket({
+        url: "ws://localhost",
+        taskId: 7,
+      }))
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+      const socket = MockWebSocket.instances[0]
+      act(() => socket.open())
+
+      socket.send.mockImplementationOnce(() => {
+        throw new Error("socket closed during write")
+      })
+      const failed = result.current.sendChatMessage("same", undefined, false, "reuse-id")
+      await expect(failed).rejects.toThrow()
+
+      // Nothing reached the server, so the same id is free to adopt the new zone.
+      resolvedOptions.mockReturnValue(
+        { timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions,
+      )
+      const retry = result.current.sendChatMessage("same", undefined, false, "reuse-id")
+      // calls[0] is the throwing send (still records its args); the retry is calls[1].
+      expect(JSON.parse(socket.send.mock.calls[1][0]).context)
+        .toEqual({ timezone: "America/New_York" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "reuse-id",
+      }))
+      await retry
+    } finally {
+      resolvedOptions.mockRestore()
+    }
+  })
+
   it("keeps a same-id retry context-free when the first attempt had no zone", async () => {
     const resolvedOptions = vi
       .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")

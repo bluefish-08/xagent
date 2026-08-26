@@ -1329,6 +1329,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
         ) {
           clearTimeout(pending.timeout)
           pendingDeliveriesRef.current.delete(clientMessageId)
+          // Nothing reached the server, so a same-id retry may re-resolve the
+          // zone freely; drop the binding rather than leak it.
+          attemptTimezonesRef.current.delete(clientMessageId)
           pending.reject(deliveryError(
             error instanceof Error ? error.message : String(error),
             "not_sent",
@@ -1359,6 +1362,15 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
       return delivery
     } catch (error) {
+      // Pre-send failures never reached the server; free the attempt binding so
+      // abandoned drafts do not accumulate. An outcome-unknown send cannot land
+      // here (it settles through the delivery promise), so retryable bindings
+      // are untouched.
+      const disposition =
+        error instanceof MessageDeliveryError ? error.disposition : "not_sent"
+      if (disposition !== "outcome_unknown") {
+        attemptTimezonesRef.current.delete(clientMessageId)
+      }
       if (error instanceof MessageDeliveryError) throw error
       throw deliveryError(
         error instanceof Error ? error.message : String(error),

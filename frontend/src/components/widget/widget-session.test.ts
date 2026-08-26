@@ -240,6 +240,27 @@ describe("widget session mode", () => {
     expect(iframeEl()?.src).toBe(`${HOST}/widget/chat/session`)
   })
 
+  it("still loads the session iframe when data-timezone is malformed", () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, exchangeBody()))
+
+    // A lone surrogate makes encodeURIComponent throw; the widget must fall
+    // back to a plain iframe URL rather than never assigning src.
+    runWidget({ "data-encrypted-context": GRANT, "data-timezone": "\uD800" })
+
+    expect(iframeEl()?.src).toBe(`${HOST}/widget/chat/session`)
+  })
+
+  it("still loads the guest iframe when data-timezone is malformed", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ticket: "t", agent_id: 17 }))
+
+    runWidget({ "data-widget-key": "widget-secret", "data-timezone": "\uD800" })
+
+    await vi.waitFor(() => {
+      expect(iframeEl()?.src).toContain("/widget/chat/default")
+    })
+    expect(iframeEl()?.src).not.toContain("timezone=")
+  })
+
   it("navigates the iframe to the session URL and exchanges the grant immediately", () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, exchangeBody()))
     const observeSpy = vi.spyOn(MutationObserver.prototype, "observe")
