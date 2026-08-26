@@ -732,6 +732,9 @@ class _SpecByCategories(ToolSelectionSpec):
             # Intrinsic admit: an always-available tool rides along any non-NONE
             # selection regardless of the category picker (NONE never reaches
             # this subclass). Same ID-level shape as the task-runtime admit.
+            # This runs ahead of any injection-only scoping too, so an
+            # unconfigured workforce-manager spec also gets it; harmless, as the
+            # tool is read-only and grants no new capability.
             if tool_name in INTRINSIC_TOOL_NAMES:
                 names.add(tool_name)
                 continue

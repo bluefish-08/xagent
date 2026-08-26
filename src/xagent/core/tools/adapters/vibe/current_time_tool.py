@@ -17,6 +17,8 @@ def _now() -> datetime:
 
 
 class CurrentTimeArgs(BaseModel):
+    # Field name is the wire contract; it locally shadows the datetime.timezone
+    # import, which this class body does not use.
     timezone: Optional[str] = Field(
         default=None,
         description=(
@@ -84,11 +86,14 @@ def current_time(timezone_name: Optional[str] = None) -> CurrentTimeResult:
     now_utc = _now()
     zone = _resolve_zone(timezone_name)
     local = now_utc.astimezone(zone) if zone is not None else now_utc
+    # local is always aware, so utcoffset() is never None; the fallback only
+    # satisfies the type checker.
+    offset = local.utcoffset()
     return CurrentTimeResult(
         utc=now_utc.strftime(_STAMP),
         local=local.strftime(_STAMP),
         timezone=zone.key if zone is not None else "UTC",
-        utc_offset=_format_offset(local.utcoffset() or timedelta(0)),
+        utc_offset=_format_offset(offset if offset is not None else timedelta(0)),
     )
 
 
