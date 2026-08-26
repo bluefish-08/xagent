@@ -665,6 +665,7 @@ async def create_chat_task(
                 actor_user_id=actor_user_id,
                 payload=prepared.payload,
                 claimed=prepared.claimed_turn,
+                context=({"timezone": request.timezone} if request.timezone else None),
             )
         except TaskTurnError as exc:
             pop_ephemeral_runtime_values(prepared.payload.turn_id)

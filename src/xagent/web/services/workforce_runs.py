@@ -102,6 +102,7 @@ class _NormalizedWorkforceRunRequest:
     source: str
     idempotency_key: str | None
     extra_agent_config: dict[str, Any] | None
+    timezone: str | None
 
 
 def normalize_execution_mode(value: str | None) -> str:
@@ -181,6 +182,7 @@ def _normalize_workforce_run_request(
     source: str | None,
     idempotency_key: str | None,
     extra_agent_config: dict[str, Any] | None,
+    timezone: str | None = None,
 ) -> _NormalizedWorkforceRunRequest:
     """Normalize caller input once before either transaction owner runs."""
 
@@ -195,6 +197,7 @@ def _normalize_workforce_run_request(
         extra_agent_config=(
             dict(extra_agent_config) if extra_agent_config is not None else None
         ),
+        timezone=(timezone or "").strip() or None,
     )
 
 
@@ -727,6 +730,7 @@ async def _start_normalized_workforce_run(
             actor_user_id=user_id,
             payload=prepared.payload,
             claimed=prepared.claimed_turn,
+            context=({"timezone": request.timezone} if request.timezone else None),
         )
         return WorkforceRunStartResult(
             workforce_run=prepared.workforce_run,
@@ -753,6 +757,7 @@ async def create_workforce_run_by_id(
     source: str | None = None,
     idempotency_key: str | None = None,
     extra_agent_config: dict[str, Any] | None = None,
+    timezone: str | None = None,
 ) -> WorkforceRunStartResult:
     """Create a run from detached identities.
 
@@ -770,6 +775,7 @@ async def create_workforce_run_by_id(
         source=source,
         idempotency_key=idempotency_key,
         extra_agent_config=extra_agent_config,
+        timezone=timezone,
     )
     return await _start_normalized_workforce_run(
         user_id=int(user_id),
@@ -791,6 +797,7 @@ async def create_workforce_run(
     source: str | None = None,
     idempotency_key: str | None = None,
     extra_agent_config: dict[str, Any] | None = None,
+    timezone: str | None = None,
 ) -> WorkforceRunStartResult:
     """Compatibility entry point for callers that still own ORM identities."""
 
@@ -807,6 +814,7 @@ async def create_workforce_run(
         source=source,
         idempotency_key=idempotency_key,
         extra_agent_config=extra_agent_config,
+        timezone=timezone,
     )
     if not release_db_connection_if_clean(db):
         raise RuntimeError("request DB transaction is not clean at turn boundary")
