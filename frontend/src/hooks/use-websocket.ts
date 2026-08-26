@@ -930,6 +930,21 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
                   typeof data.message === "string" && data.message.trim() !== "",
                 ))
               }
+            } else if (
+              typeof clientMessageId === 'string'
+              && !pending
+              && !preparationsRef.current.has(clientMessageId)
+              && (
+                data.type === 'message_accepted'
+                || data.rejection_outcome === "not_accepted"
+              )
+            ) {
+              // Terminal ack that arrived after the 30s timeout already dropped
+              // the pending entry. isCurrentOwner (top of onmessage) fences stale
+              // sockets, and no same-id retry is in flight, so the binding can
+              // never be reused; release it. outcome_unknown is excluded so a
+              // still-allowed same-id retry keeps its first attempt's zone.
+              attemptTimezonesRef.current.delete(clientMessageId)
             }
             return
           }

@@ -840,6 +840,145 @@ describe("useWebSocket normalized connections", () => {
     }
   })
 
+  it("frees the attempt zone when a late accepted ack follows a timeout", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "Australia/Melbourne" } as Intl.ResolvedDateTimeFormatOptions)
+    const { result } = renderHook(() => useWebSocket({
+      url: "ws://localhost",
+      taskId: 7,
+    }))
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+    const socket = MockWebSocket.instances[0]
+    act(() => socket.open())
+    vi.useFakeTimers()
+    try {
+      const first = result.current.sendChatMessage("same", undefined, false, "late-id")
+      first.catch(() => {})
+      expect(JSON.parse(socket.send.mock.calls[0][0]).context)
+        .toEqual({ timezone: "Australia/Melbourne" })
+      await act(async () => {
+        vi.advanceTimersByTime(30000)
+      })
+      await expect(first).rejects.toMatchObject({ disposition: "outcome_unknown" })
+
+      resolvedOptions.mockReturnValue(
+        { timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions,
+      )
+      // Late terminal ack for the same id after the timeout removed the pending
+      // entry: the binding must be released.
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "late-id",
+      }))
+
+      const retry = result.current.sendChatMessage("same", undefined, true, "late-id")
+      expect(JSON.parse(socket.send.mock.calls[1][0]).context)
+        .toEqual({ timezone: "America/New_York" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "late-id",
+      }))
+      await retry
+    } finally {
+      vi.useRealTimers()
+      resolvedOptions.mockRestore()
+    }
+  })
+
+  it("frees the attempt zone when a late not_accepted reject follows a timeout", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "Australia/Melbourne" } as Intl.ResolvedDateTimeFormatOptions)
+    const { result } = renderHook(() => useWebSocket({
+      url: "ws://localhost",
+      taskId: 7,
+    }))
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+    const socket = MockWebSocket.instances[0]
+    act(() => socket.open())
+    vi.useFakeTimers()
+    try {
+      const first = result.current.sendChatMessage("same", undefined, false, "late-rej")
+      first.catch(() => {})
+      expect(JSON.parse(socket.send.mock.calls[0][0]).context)
+        .toEqual({ timezone: "Australia/Melbourne" })
+      await act(async () => {
+        vi.advanceTimersByTime(30000)
+      })
+      await expect(first).rejects.toMatchObject({ disposition: "outcome_unknown" })
+
+      resolvedOptions.mockReturnValue(
+        { timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions,
+      )
+      act(() => socket.receive({
+        type: "message_rejected",
+        client_message_id: "late-rej",
+        message: "rejected outright",
+        rejection_outcome: "not_accepted",
+      }))
+
+      const retry = result.current.sendChatMessage("same", undefined, true, "late-rej")
+      expect(JSON.parse(socket.send.mock.calls[1][0]).context)
+        .toEqual({ timezone: "America/New_York" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "late-rej",
+      }))
+      await retry
+    } finally {
+      vi.useRealTimers()
+      resolvedOptions.mockRestore()
+    }
+  })
+
+  it("keeps the attempt zone after a timeout until a terminal ack arrives", async () => {
+    const resolvedOptions = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "Australia/Melbourne" } as Intl.ResolvedDateTimeFormatOptions)
+    const { result } = renderHook(() => useWebSocket({
+      url: "ws://localhost",
+      taskId: 7,
+    }))
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1))
+    const socket = MockWebSocket.instances[0]
+    act(() => socket.open())
+    vi.useFakeTimers()
+    try {
+      const first = result.current.sendChatMessage("same", undefined, false, "keep-id")
+      first.catch(() => {})
+      expect(JSON.parse(socket.send.mock.calls[0][0]).context)
+        .toEqual({ timezone: "Australia/Melbourne" })
+      await act(async () => {
+        vi.advanceTimersByTime(30000)
+      })
+      await expect(first).rejects.toMatchObject({ disposition: "outcome_unknown" })
+
+      resolvedOptions.mockReturnValue(
+        { timeZone: "America/New_York" } as Intl.ResolvedDateTimeFormatOptions,
+      )
+      // A late outcome_unknown reject must NOT release the binding: a same-id
+      // retry is still permitted and must reuse the first attempt's zone.
+      act(() => socket.receive({
+        type: "message_rejected",
+        client_message_id: "keep-id",
+        message: "still ambiguous",
+      }))
+
+      const retry = result.current.sendChatMessage("same", undefined, true, "keep-id")
+      expect(JSON.parse(socket.send.mock.calls[1][0]).context)
+        .toEqual({ timezone: "Australia/Melbourne" })
+      act(() => socket.receive({
+        type: "message_accepted",
+        client_message_id: "keep-id",
+      }))
+      await retry
+    } finally {
+      vi.useRealTimers()
+      resolvedOptions.mockRestore()
+    }
+  })
+
   it("sends without a context when Intl itself throws", async () => {
     const resolvedOptions = vi
       .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
