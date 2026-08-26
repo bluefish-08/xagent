@@ -496,6 +496,14 @@ class CreateWorkforceRunRequest(BaseModel):
             "the original run rather than creating a new one."
         ),
     )
+    timezone: Optional[str] = Field(
+        default=None,
+        description=(
+            "IANA timezone name for the end user's local clock, used to render "
+            "the date the workforce reasons from. Omit to keep UTC. An "
+            "unresolvable name degrades to UTC rather than failing the request."
+        ),
+    )
 
 
 class CreateWorkforceRunResponse(BaseModel):

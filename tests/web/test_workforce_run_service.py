@@ -366,6 +366,71 @@ async def test_create_workforce_run_creates_task_run_and_starts_turn(
 
 
 @pytest.mark.asyncio
+async def test_create_preview_workforce_run_forwards_the_caller_timezone(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled = _patch_schedule_bg(monkeypatch)
+
+    user = _create_user(db_session, "preview-tz-owner")
+    manager = _create_agent(db_session, user, "Draft Manager")
+    worker_agent = _create_agent(db_session, user, "Draft Analyst")
+    db_session.commit()
+
+    result = await create_preview_workforce_run(
+        db_session,
+        user_id=user.id,
+        name="Launch Team",
+        description=None,
+        manager_agent_id=manager.id,
+        workers=[
+            {
+                "agent_id": worker_agent.id,
+                "alias": "Analyst",
+                "assignment_instructions": "Do the work.",
+            }
+        ],
+        message="how many shifts do we have on tomorrow?",
+        timezone="Australia/Melbourne",
+    )
+    await result.background_task
+
+    assert scheduled["context"] == {"timezone": "Australia/Melbourne"}
+
+
+@pytest.mark.asyncio
+async def test_create_preview_workforce_run_sends_no_context_without_a_timezone(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled = _patch_schedule_bg(monkeypatch)
+
+    user = _create_user(db_session, "preview-no-tz-owner")
+    manager = _create_agent(db_session, user, "Draft Manager")
+    worker_agent = _create_agent(db_session, user, "Draft Analyst")
+    db_session.commit()
+
+    result = await create_preview_workforce_run(
+        db_session,
+        user_id=user.id,
+        name="Launch Team",
+        description=None,
+        manager_agent_id=manager.id,
+        workers=[
+            {
+                "agent_id": worker_agent.id,
+                "alias": "Analyst",
+                "assignment_instructions": "Do the work.",
+            }
+        ],
+        message="hello",
+    )
+    await result.background_task
+
+    assert scheduled["context"] is None
+
+
+@pytest.mark.asyncio
 async def test_create_preview_workforce_run_never_persists_a_workforce(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,

@@ -31,6 +31,7 @@ from .task_orchestrator import (
     TaskTurnOrchestrator,
     TaskTurnPayload,
     _ClaimedTurn,
+    timezone_schedule_context,
 )
 from .workforce_access import ensure_workforce_access, get_workforce_policy
 from .workforce_errors import WorkforceRunError, WorkforceRunErrorCode
@@ -730,7 +731,7 @@ async def _start_normalized_workforce_run(
             actor_user_id=user_id,
             payload=prepared.payload,
             claimed=prepared.claimed_turn,
-            context=({"timezone": request.timezone} if request.timezone else None),
+            context=timezone_schedule_context(request.timezone),
         )
         return WorkforceRunStartResult(
             workforce_run=prepared.workforce_run,
@@ -837,6 +838,7 @@ async def create_preview_workforce_run(
     selected_file_ids: list[str] | None = None,
     execution_mode: str | None = None,
     source: str | None = None,
+    timezone: str | None = None,
 ) -> WorkforceRunStartResult:
     """Test-run an unsaved workforce draft: a manager + inline worker configs
     that were never persisted as a Workforce row.
@@ -863,6 +865,7 @@ async def create_preview_workforce_run(
         source=source,
         idempotency_key=None,
         extra_agent_config=None,
+        timezone=timezone,
     )
 
     async def _create_and_schedule() -> WorkforceRunStartResult:
@@ -882,6 +885,7 @@ async def create_preview_workforce_run(
             actor_user_id=user_id,
             payload=cast(TaskTurnPayload, prepared.payload),
             claimed=cast(_ClaimedTurn, prepared.claimed_turn),
+            context=timezone_schedule_context(request.timezone),
         )
         return WorkforceRunStartResult(
             workforce_run=prepared.workforce_run,
