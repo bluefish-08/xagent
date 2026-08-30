@@ -19,8 +19,8 @@ from xagent.core.tools.core.RAG_tools.storage.factory import StorageFactory
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
     LanceDBVectorIndexStore,
 )
-from xagent.web.jobs import kb_maintenance_tasks
 from xagent.web.jobs.celery_app import celery_app
+from xagent.web.services import kb_maintenance
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +70,9 @@ def test_beat_schedule_runs_maintenance_off_the_ingestion_path() -> None:
         schedule["retrain-kb-vector-indexes"]["schedule"]
         > schedule["compact-kb-storage"]["schedule"]
     )
+    # A scheduled name that no task registers is scheduled into nothing.
+    for entry in ("compact-kb-storage", "retrain-kb-vector-indexes"):
+        assert schedule[entry]["task"] in celery_app.tasks
 
 
 def test_sweep_compacts_tables_no_ingestion_told_it_about(tmp_path: Any) -> None:
@@ -87,7 +90,7 @@ def test_sweep_compacts_tables_no_ingestion_told_it_about(tmp_path: Any) -> None
             "DEFAULT_INDEX_POLICY",
             IndexPolicy(compact_fragment_threshold=10),
         ):
-            result = kb_maintenance_tasks.compact_kb_storage()
+            result = kb_maintenance.sweep_kb_storage()
 
     assert set(result["compacted"]) == {"documents", "embeddings_probe"}
     assert db.open_table("documents").stats()["fragment_stats"]["num_fragments"] == 1
@@ -122,7 +125,7 @@ def test_sweep_reports_repeated_failures_instead_of_hiding_them(
             with patch.object(db, "open_table", lambda name, **kw: broken):
                 with caplog.at_level(logging.ERROR):
                     for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
-                        failed = kb_maintenance_tasks.compact_kb_storage()
+                        failed = kb_maintenance.sweep_kb_storage()
 
                 assert failed["compacted"] == []
                 assert failed["failing"] == {
@@ -134,7 +137,7 @@ def test_sweep_reports_repeated_failures_instead_of_hiding_them(
 
                 # And a clean pass has to clear it, or the alert latches forever.
                 broken.optimize = real_optimize
-                result = kb_maintenance_tasks.compact_kb_storage()
+                result = kb_maintenance.sweep_kb_storage()
 
     assert result["compacted"] == ["documents"]
     assert result["failing"] == {}
@@ -152,7 +155,7 @@ def test_retrain_task_only_touches_embeddings_tables(tmp_path: Any) -> None:
 
     with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         with patch.object(store, "retrain_vector_index", _retrain):
-            result = kb_maintenance_tasks.retrain_kb_vector_indexes()
+            result = kb_maintenance.retrain_kb_vector_indexes()
 
     assert asked == ["embeddings_probe"]
     assert result["retrained"] == ["embeddings_probe"]
