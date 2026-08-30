@@ -96,3 +96,37 @@ async def test_loop_survives_a_failing_sweep(monkeypatch: pytest.MonkeyPatch) ->
         task.cancel()
 
     assert calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_loop_sweeps_before_its_first_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker recycled inside one interval must still get a sweep.
+
+    Gunicorn ``max_requests`` recycling is routine in exactly the deployments
+    this loop exists for, and sleeping first would mean they never sweep.
+    """
+    from xagent.web.services import kb_maintenance
+
+    swept = asyncio.Event()
+    monkeypatch.setattr(kb_maintenance, "sweep_kb_storage", lambda: swept.set())
+    task = asyncio.create_task(
+        kb_maintenance.run_kb_maintenance_loop(poll_interval_seconds=3600)
+    )
+    try:
+        await asyncio.wait_for(swept.wait(), timeout=2)
+    finally:
+        task.cancel()
+
+
+def test_startup_and_shutdown_wire_the_loop() -> None:
+    """The loop is dead code unless the lifespan starts and stops it."""
+    import inspect
+
+    assert "start_kb_maintenance_task(app)" in inspect.getsource(
+        app_module.startup_event
+    )
+    assert "await stop_kb_maintenance_task(app)" in inspect.getsource(
+        app_module.shutdown_event
+    )

@@ -9,8 +9,11 @@ lock inside ``compact_tables`` are what keep a full sweep cheap.
 
 Driven by Celery Beat where Celery is enabled, and by the in-process loop
 below where it is not (``get_celery_enabled`` defaults to False, so
-Gunicorn-only and local deployments have no worker) -- the same reasoning as
-``run_orphan_upload_gc_loop``. Only one of the two runs in a deployment.
+Gunicorn-only and local deployments have no worker). Exactly one of the two
+runs in a deployment: both would fight over the same per-table compaction
+lock, and the loser burns a full table rewrite for nothing. The in-process
+loop does compaction only -- the retrain's weekly cadence rides Beat's own
+schedule, so it does not run at all without Celery.
 """
 
 from __future__ import annotations
@@ -78,15 +81,17 @@ def retrain_kb_vector_indexes() -> dict[str, Any]:
 async def run_kb_maintenance_loop(*, poll_interval_seconds: int) -> None:
     """Run the compaction sweep on a timer inside the FastAPI process.
 
-    Compaction only. The retrain's weekly cadence rides Celery Beat's own
-    schedule; reproducing it here would need a restart-surviving last-run
+    Sweeps before sleeping, like ``run_orphan_upload_gc_loop``: a process
+    recycled more often than the interval (gunicorn ``max_requests``) would
+    otherwise never reach a single sweep. Compaction only -- reproducing the
+    retrain's weekly cadence here would need a restart-surviving last-run
     marker, and this loop keeps no state.
     """
     while True:
-        await asyncio.sleep(poll_interval_seconds)
         try:
             await asyncio.to_thread(sweep_kb_storage)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("KB index maintenance sweep failed")
+        await asyncio.sleep(poll_interval_seconds)

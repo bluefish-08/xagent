@@ -140,8 +140,8 @@ def _compaction_lock(conn: Any, table_name: str) -> Iterator[bool]:
 
     Concurrent ``optimize()`` calls each rewrite the table in full and then all
     but one lose the commit, so the losers waste a complete rewrite. A
-    non-blocking lock keeps one worker doing the work; the rest skip, which
-    costs nothing because the next ingestion compacts instead.
+    non-blocking lock keeps one worker doing the work; the rest skip and wait
+    for the next scheduled sweep, up to one maintenance interval later.
 
     Per table, not per database: the work is per table, so a database-wide lock
     would let one worker's collection starve another's embeddings table.
@@ -1738,7 +1738,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         Deliberately independent of :meth:`should_reindex`: index staleness is a
         third, unrelated problem, and ``optimize()`` bundles compaction with
         index rebuilds, so reusing that predicate would rebuild large unrelated
-        indices on every ingest.
+        indices on every maintenance pass.
         """
         from ..LanceDB.schema_manager import _safe_close_table
 
@@ -1769,16 +1769,15 @@ class LanceDBVectorIndexStore(VectorIndexStore):
     ) -> List[str]:
         """Compact the degraded tables among ``table_names``; returns those done.
 
-        Callers pass the tables they just wrote; sweeping the whole database on
-        every ingest costs more than it saves. Names that do not exist are
-        skipped without opening anything -- callers probe more than one spelling
-        of the embeddings table, so a miss is routine, not exceptional.
+        The scheduled sweep passes the whole table listing; the per-table
+        gating below is what keeps that affordable. Names that do not exist are
+        skipped without opening anything.
 
         Takes a per-table advisory lock: concurrent ``optimize()`` calls all
         rewrite the table and then all but one lose the commit, so the losers
         burn a full rewrite for nothing. Whoever cannot take a table's lock
-        skips that table -- free, the next ingestion compacts instead -- and
-        moves on to the rest, so one busy table cannot starve the others.
+        skips that table -- the next sweep picks it up, up to one maintenance
+        interval later -- and moves on, so one busy table cannot starve the rest.
 
         Best-effort maintenance: individual failures are logged, never raised.
         """
@@ -1796,9 +1795,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         candidates = [name for name in table_names if name in existing]
         if not candidates:
-            # list_table_names() returns [] rather than raising when it cannot
-            # read the listing, so without this compaction would switch itself
-            # off permanently and silently.
+            # Only reachable when the listing itself is unreadable, since the
+            # sweep's names come from it -- and list_table_names() returns []
+            # rather than raising, so this is the one signal that it did.
             logger.warning(
                 "None of the tables to compact were found in the database "
                 "listing (asked for %s); skipping compaction",
