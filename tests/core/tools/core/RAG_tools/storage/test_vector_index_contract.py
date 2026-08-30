@@ -293,3 +293,153 @@ def test_a_panicking_fts_rebuild_still_lets_optimize_run(tmp_path, monkeypatch):
     assert store.trigger_reindex("embeddings_probe") is True
 
     assert calls == ["create_fts_index", "optimize"]
+
+
+def test_retrain_rebuilds_an_existing_vector_index(indexed_table, tmp_path):
+    """A retrain must actually rebuild: optimize() alone never retrains.
+
+    ``optimize()``'s index step only assigns new rows to the partitions the
+    index already has, so recall drifts as the corpus grows (#1557 change 4).
+    """
+    db = lancedb.connect(str(tmp_path / "contract"))
+    store = _store_on(db)
+    version_before = db.open_table("embeddings_probe").version
+
+    assert store.retrain_vector_index("embeddings_probe") is True
+
+    assert db.open_table("embeddings_probe").version > version_before
+
+
+def test_retrain_skips_a_table_with_no_vector_index(tmp_path):
+    """Most tables the sweep sees carry no vector index at all."""
+    db = lancedb.connect(str(tmp_path / "retrain-no-index"))
+    db.create_table("parses", data=_rows(200))
+    store = _store_on(db)
+
+    assert store.retrain_vector_index("parses") is False
+
+
+def test_compaction_never_retrains_the_vector_index(indexed_table, tmp_path):
+    """Change 4 has to be gated apart from change 3, not run every pass.
+
+    A retrain on every maintenance pass is precisely the cost the fix for the
+    never-matching existence check removed (~114 MB and ~14 s a time).
+    """
+    db = lancedb.connect(str(tmp_path / "contract"))
+    indexed_table.add(_rows(100))
+    store = _store_on(db)
+    calls: list[str] = []
+    real_create_index = indexed_table.create_index
+
+    def create_index(*args, **kwargs):
+        calls.append("create_index")
+        return real_create_index(*args, **kwargs)
+
+    indexed_table.create_index = create_index
+    db_open = db.open_table
+    db.open_table = lambda name, **kw: indexed_table
+
+    try:
+        assert store.trigger_reindex("embeddings_probe") is True
+    finally:
+        db.open_table = db_open
+
+    assert calls == [], "compaction must not rebuild the vector index"
+
+
+def _failures():
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    return lancedb_stores.failing_maintenance_tables()
+
+
+@pytest.fixture(autouse=True)
+def _reset_maintenance_counters():
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    lancedb_stores._maintenance_failures.clear()
+    yield
+    lancedb_stores._maintenance_failures.clear()
+
+
+def test_repeated_maintenance_failures_become_visible(tmp_path, monkeypatch, caplog):
+    """Consecutive failures must be distinguishable from never having run.
+
+    Fourteen consecutive optimize failures produced fourteen identical
+    warnings and no other signal, which is why both defects went unnoticed.
+    """
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        MAINTENANCE_FAILURE_ALERT_THRESHOLD,
+    )
+
+    db = lancedb.connect(str(tmp_path / "failing"))
+    table = db.create_table("embeddings_probe", data=_rows(50))
+    table.optimize = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("disk full"))
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+
+    with caplog.at_level(logging.ERROR):
+        for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD - 1):
+            assert store.trigger_reindex("embeddings_probe") is False
+        assert not _failures(), "escalated before the threshold"
+        assert not caplog.records
+        assert store.trigger_reindex("embeddings_probe") is False
+
+    assert _failures() == {"embeddings_probe": MAINTENANCE_FAILURE_ALERT_THRESHOLD}
+    assert any(
+        "consecutive times" in r.getMessage() and r.levelno == logging.ERROR
+        for r in caplog.records
+    )
+
+
+def test_one_clean_pass_clears_the_failure_count(tmp_path, monkeypatch):
+    """A recovered table must stop alerting, or the signal latches forever."""
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        MAINTENANCE_FAILURE_ALERT_THRESHOLD,
+    )
+
+    db = lancedb.connect(str(tmp_path / "recovers"))
+    table = db.create_table("embeddings_probe", data=_rows(50))
+    real_optimize = table.optimize
+    table.optimize = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("disk full"))
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+
+    for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
+        store.trigger_reindex("embeddings_probe")
+    assert _failures()
+
+    table.optimize = real_optimize
+    assert store.trigger_reindex("embeddings_probe") is True
+
+    assert _failures() == {}
+
+
+def test_a_swallowed_fts_rebuild_failure_still_counts_as_a_failed_pass(
+    tmp_path, monkeypatch
+):
+    """Compaction succeeding is not the same as the index being current.
+
+    ``trigger_reindex`` returns True after a swallowed FTS rebuild failure, so
+    the return value alone cannot tell "current" from "silently stale".
+    """
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        MAINTENANCE_FAILURE_ALERT_THRESHOLD,
+    )
+
+    db = lancedb.connect(str(tmp_path / "fts-counts"))
+    table = db.create_table("embeddings_probe", data=_rows(200))
+    table.create_fts_index("text", with_position=True, replace=True)
+    table.create_fts_index = lambda *a, **kw: (_ for _ in ()).throw(
+        RuntimeError("index out of bounds: the len is 10791")
+    )
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+
+    for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
+        assert store.trigger_reindex("embeddings_probe") is True
+
+    assert _failures() == {"embeddings_probe": MAINTENANCE_FAILURE_ALERT_THRESHOLD}

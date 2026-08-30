@@ -1374,6 +1374,15 @@ class VectorIndexStore(ABC):
         """
         return []
 
+    def retrain_vector_index(self, table_name: str) -> bool:
+        """Rebuild a table's vector index from scratch; False if there is none.
+
+        Distinct from :meth:`trigger_reindex`, which only merges new rows into
+        the partitions the index already has. Backends without a retrainable
+        index return False.
+        """
+        return False
+
     # --- Async index management variants ---
 
     @abstractmethod

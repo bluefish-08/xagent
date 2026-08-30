@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -70,6 +71,67 @@ def _fragment_count(table: Any) -> int:
         # compaction permanently with no operator-visible signal.
         logger.warning("Could not count fragments, treating as 0: %s", e)
         return 0
+
+
+#: Consecutive incomplete maintenance passes before the failure is escalated.
+MAINTENANCE_FAILURE_ALERT_THRESHOLD = 3
+
+_maintenance_failures: Dict[str, int] = {}
+_maintenance_failures_lock = threading.Lock()
+
+
+def _record_maintenance_outcome(key: str, ok: bool) -> None:
+    """Count consecutive incomplete maintenance passes for one table.
+
+    A single warning per failure is why fourteen consecutive failures looked
+    identical to never having run (#1557).
+    """
+    with _maintenance_failures_lock:
+        if ok:
+            _maintenance_failures.pop(key, None)
+            return
+        count = _maintenance_failures.get(key, 0) + 1
+        _maintenance_failures[key] = count
+    if count >= MAINTENANCE_FAILURE_ALERT_THRESHOLD:
+        logger.error(
+            "KB index maintenance has now failed %s consecutive times for %s",
+            count,
+            key,
+        )
+
+
+def failing_maintenance_tables() -> Dict[str, int]:
+    """Tables whose maintenance has failed often enough in a row to alert on."""
+    with _maintenance_failures_lock:
+        return {
+            key: count
+            for key, count in _maintenance_failures.items()
+            if count >= MAINTENANCE_FAILURE_ALERT_THRESHOLD
+        }
+
+
+def _vector_index_params(policy: Any, row_count: int) -> Tuple[Any, Dict[str, Any]]:
+    """Pick the index type for a table of this size and its create_index kwargs."""
+    try:
+        from lancedb.index import IVF_HNSW_SQ, IVF_PQ  # type: ignore
+    except ImportError:
+        IVF_HNSW_SQ = "IVF_HNSW_SQ"
+        IVF_PQ = "IVF_PQ"
+
+    from ..core.schemas import IndexType
+
+    if row_count >= policy.ivfpq_threshold_rows:
+        recommended, index_type = IndexType.IVFPQ, IVF_PQ
+        create_params = policy.ivfpq_params or {}
+    else:
+        recommended, index_type = IndexType.HNSW, IVF_HNSW_SQ
+        create_params = policy.hnsw_params or {}
+
+    return recommended, {
+        "metric": policy.metric.value,
+        "index_type": index_type,
+        **create_params,
+    }
 
 
 @contextmanager
@@ -1376,14 +1438,6 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         from ..core.config import IndexPolicy
         from ..core.schemas import IndexResult
         from ..LanceDB.model_tag_utils import to_model_tag
-
-        # Import LanceDB index types
-        try:
-            from lancedb.index import IVF_HNSW_SQ, IVF_PQ  # type: ignore
-        except ImportError:
-            IVF_HNSW_SQ = "IVF_HNSW_SQ"
-            IVF_PQ = "IVF_PQ"
-
         from ..LanceDB.schema_manager import _safe_close_table
 
         conn = self._get_connection()
@@ -1432,13 +1486,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                     f"({policy.enable_threshold_rows}) for index creation"
                 )
             else:
-                # Auto-select index type based on scale
                 from ..core.schemas import IndexType
 
-                if row_count >= policy.ivfpq_threshold_rows:
-                    recommended_type = IndexType.IVFPQ
-                else:
-                    recommended_type = IndexType.HNSW
+                recommended_type, all_params = _vector_index_params(policy, row_count)
 
                 # Check existing indexes
                 indexes = table.list_indices()
@@ -1448,27 +1498,12 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 has_vector_index = any("vector" in idx.columns for idx in indexes)
 
                 if not has_vector_index:
-                    # Create index with recommended type
-                    if recommended_type == IndexType.IVFPQ:
-                        index_type = IVF_PQ
-                        create_params = policy.ivfpq_params or {}
-                    else:  # HNSW
-                        index_type = IVF_HNSW_SQ
-                        create_params = policy.hnsw_params or {}
-
-                    # Merge metric with create_params
-                    all_params = {
-                        "metric": policy.metric.value,
-                        "index_type": index_type,
-                        **create_params,
-                    }
-
                     table.create_index(**all_params)
                     vector_index_status = "index_building"
                     logger.info(
                         "Successfully created vector index for %s (type=%s, metric=%s)",
                         table_name,
-                        index_type,
+                        all_params["index_type"],
                         policy.metric.value,
                     )
                     if recommended_type == IndexType.IVFPQ:
@@ -1600,6 +1635,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 )
             # Must precede optimize: its incremental FTS merge is reported to
             # panic on older-writer indices, taking the index step down (lance#8310).
+            fts_ok = True
             try:
                 self._rebuild_fts_index(table, table_name)
             except (KeyboardInterrupt, SystemExit):
@@ -1607,15 +1643,20 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             except BaseException as exc:  # noqa: BLE001
                 # BaseException because pyo3 raises a Rust panic as
                 # PanicException; losing compaction costs more than stale FTS.
+                fts_ok = False
                 logger.warning("FTS rebuild failed for %s: %s", table_name, exc)
             table.optimize(cleanup_older_than=cleanup_older_than)
             # Pruning drops the versions cached handles point at, same reason
             # the delete paths invalidate after mutating a table.
             self.invalidate_table_cache(table_name)
             logger.info("Optimized %s", table_name)
+            # A swallowed FTS rebuild failure still leaves the index stale, so
+            # it counts as an incomplete pass even though compaction succeeded.
+            _record_maintenance_outcome(table_name, fts_ok)
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("Optimize failed for %s: %s", table_name, e)
+            _record_maintenance_outcome(table_name, False)
             return False
         finally:
             _safe_close_table(table)
@@ -1636,6 +1677,45 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         fts_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
         table.create_fts_index("text", replace=True, **fts_params)
         logger.info("Rebuilt FTS index for %s before optimize", table_name)
+
+    def retrain_vector_index(self, table_name: str) -> bool:
+        """Rebuild an existing vector index from scratch; False if there is none.
+
+        ``optimize()``'s index step only assigns new rows to the partitions the
+        index already has, so recall drifts as the corpus grows. Far more
+        expensive than a compaction pass, hence its own coarse schedule.
+        """
+        from ..core.config import IndexPolicy
+        from ..LanceDB.schema_manager import _safe_close_table
+
+        table = None
+        try:
+            conn = self._get_connection()
+            with _compaction_lock(conn, table_name) as acquired:
+                if not acquired:
+                    logger.debug(
+                        "%s is being maintained elsewhere; skipping", table_name
+                    )
+                    return False
+                table = conn.open_table(table_name)
+                if not any("vector" in idx.columns for idx in table.list_indices()):
+                    return False
+                policy = IndexPolicy()
+                row_count = table.count_rows()
+                _, params = _vector_index_params(policy, row_count)
+                table.create_index(**params)
+                self.invalidate_table_cache(table_name)
+                logger.info(
+                    "Retrained vector index for %s (%s rows)", table_name, row_count
+                )
+                _record_maintenance_outcome(f"{table_name}:retrain", True)
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Vector index retrain failed for %s: %s", table_name, e)
+            _record_maintenance_outcome(f"{table_name}:retrain", False)
+            return False
+        finally:
+            _safe_close_table(table)
 
     def should_compact(
         self, table_name: str, policy: Optional[IndexPolicy] = None
