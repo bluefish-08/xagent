@@ -9,7 +9,6 @@ maintenance at all once it stopped hanging off the ingestion hook.
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 
 import pytest
 
@@ -64,15 +63,15 @@ async def test_loop_stays_off_under_pytest(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_shutdown_sets_the_stop_flag_the_sweep_can_see(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_shutdown_sets_the_stop_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancelling the task cannot stop a sweep already in the executor.
 
     The flag is the only thing that thread can observe, so shutdown has to set
-    it -- cancelling alone leaves the sweep running to completion.
+    it -- cancelling alone leaves the sweep running to completion. Only that it
+    is set is pinned, not when: whether it lands before or after the cancel is
+    invisible to the coroutine, and irrelevant to the thread that reads it.
     """
-    order: list[str] = []
+    flag_seen: list[bool] = []
     running = asyncio.Event()
 
     async def fake_loop(*, poll_interval_seconds: int, stop_event) -> None:
@@ -80,7 +79,7 @@ async def test_shutdown_sets_the_stop_flag_the_sweep_can_see(
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            order.append("cancelled" if not stop_event.is_set() else "stop-then-cancel")
+            flag_seen.append(stop_event.is_set())
             raise
 
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -94,39 +93,8 @@ async def test_shutdown_sets_the_stop_flag_the_sweep_can_see(
 
     await app_module.stop_kb_maintenance_task(app_module.app)
 
-    assert order == ["stop-then-cancel"]
+    assert flag_seen == [True]
     assert app_module.app.state.kb_maintenance_stop is None
-
-
-@pytest.mark.asyncio
-async def test_shutdown_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unfinished sweep must not hold shutdown past the grace period."""
-
-    async def stubborn_loop(*, poll_interval_seconds: int, stop_event) -> None:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            # Stands in for an executor thread that ignores the cancellation.
-            await asyncio.sleep(3600)
-
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(
-        app_module, "get_kb_index_maintenance_interval_seconds", lambda: 11
-    )
-    monkeypatch.setattr(app_module, "run_kb_maintenance_loop", stubborn_loop)
-    monkeypatch.setattr(app_module, "KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", 0.1)
-
-    task = app_module.start_kb_maintenance_task(app_module.app)
-    await asyncio.sleep(0)
-
-    await asyncio.wait_for(
-        app_module.stop_kb_maintenance_task(app_module.app), timeout=2
-    )
-
-    assert task is not None and not task.done()
-    task.cancel()
-    with suppress(asyncio.CancelledError):
-        await task
 
 
 @pytest.mark.asyncio

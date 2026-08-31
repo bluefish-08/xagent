@@ -600,3 +600,24 @@ def test_a_retrain_that_gives_up_is_not_reported_as_nothing_to_do(
 
     # And it is counted, so a run of them reaches the alert threshold.
     assert lancedb_stores._maintenance_failures["embeddings_probe:retrain"] == 1
+
+
+def test_strict_listing_raises_where_the_lenient_one_returns_empty(tmp_path):
+    """The two must differ, or the strict override is dead weight and gets cut.
+
+    A patched-out strict method proves nothing: this drives the real
+    implementation against a connection whose listing fails.
+    """
+    db = lancedb.connect(str(tmp_path / "listing"))
+    db.create_table("documents", data=_rows(10))
+    store = _store_on(db)
+
+    def _boom():
+        raise OSError("lancedb path unavailable")
+
+    db.list_tables = _boom
+    db.table_names = _boom
+
+    assert store.list_table_names() == []
+    with pytest.raises(OSError):
+        store.list_table_names_strict()

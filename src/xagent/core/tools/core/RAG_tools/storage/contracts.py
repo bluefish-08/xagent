@@ -678,10 +678,12 @@ class VectorIndexStore(ABC):
         """List backend table names."""
 
     def list_table_names_strict(self) -> Sequence[str]:
-        """List backend table names, raising instead of hiding a failure.
+        """List backend table names for callers that must see a listing failure.
 
         ``list_table_names`` swallows the error and returns ``[]``, which a
-        maintenance sweep cannot tell apart from an empty database.
+        maintenance sweep cannot tell apart from an empty database. This
+        default delegates to it and so inherits that blind spot; a backend that
+        can tell the two apart overrides this and lets the error out.
         """
         return self.list_table_names()
 

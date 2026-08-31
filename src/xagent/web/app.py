@@ -642,11 +642,6 @@ async def stop_orphan_upload_gc_task(app_instance: FastAPI) -> None:
             )
 
 
-#: Shutdown grace for an in-flight sweep. Well inside Gunicorn's 30s default,
-#: since the sweep only unwinds at a table boundary.
-KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS = 10
-
-
 def start_kb_maintenance_task(
     app_instance: FastAPI,
 ) -> asyncio.Task[Any] | None:
@@ -690,11 +685,13 @@ def start_kb_maintenance_task(
 
 
 async def stop_kb_maintenance_task(app_instance: FastAPI) -> None:
-    """Signal, then drain, this process's KB index maintenance loop.
+    """Flag the sweep, then collect the coroutine.
 
-    Cancelling the task cannot stop a sweep already running in the executor, so
-    the stop flag goes first and the wait is bounded: an unfinished sweep must
-    not hold shutdown past the orchestrator's grace period.
+    Cancelling an ``asyncio.to_thread`` await settles the task at once and
+    leaves the thread running, so the flag -- not the cancel -- is what ends a
+    sweep in flight, at its next table boundary. Awaiting here therefore costs
+    nothing and bounds nothing; the unbounded join is
+    ``loop.shutdown_default_executor()`` further down the asyncio teardown.
     """
 
     stop_event = getattr(app_instance.state, "kb_maintenance_stop", None)
@@ -709,16 +706,6 @@ async def stop_kb_maintenance_task(app_instance: FastAPI) -> None:
     if not task.done():
         logger.info("Cancelling KB index maintenance loop...")
         task.cancel()
-    done, _pending = await asyncio.wait(
-        {task}, timeout=KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS
-    )
-    if not done:
-        logger.warning(
-            "KB index maintenance still running %ss after the stop signal; the "
-            "executor thread will unwind at its next table boundary",
-            KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS,
-        )
-        return
     try:
         await task
     except asyncio.CancelledError:
