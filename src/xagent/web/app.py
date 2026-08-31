@@ -19,7 +19,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ..config import (
     get_agent_runtime,
     get_background_job_sweep_interval_seconds,
-    get_celery_enabled,
     get_external_upload_dirs,
     get_file_storage_startup_sync_enabled,
     get_gmail_watch_enabled,
@@ -643,16 +642,22 @@ async def stop_orphan_upload_gc_task(app_instance: FastAPI) -> None:
             )
 
 
+#: Shutdown grace for an in-flight sweep. Well inside Gunicorn's 30s default,
+#: since the sweep only unwinds at a table boundary.
+KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS = 10
+
+
 def start_kb_maintenance_task(
     app_instance: FastAPI,
 ) -> asyncio.Task[Any] | None:
     """Start the in-process KB index maintenance loop (#1557).
 
-    The Celery Beat schedule owns this wherever a worker exists, so the loop
-    only runs when Celery is off -- otherwise both would fight over the same
-    per-table compaction lock. ``get_celery_enabled`` defaults to False, so
-    Gunicorn-only and local deployments would otherwise get no maintenance at
-    all once it stopped hanging off the ingestion hook.
+    Runs in every supported deployment, like ``start_orphan_upload_gc_task``:
+    XAGENT_CELERY_ENABLED says durable jobs go to a worker, not that Beat is
+    running (``scripts/dev_background_jobs.py --no-beat`` sets one without the
+    other), so gating on it would leave that deployment with no maintenance at
+    all. Overlapping with Beat is safe -- the per-table compaction lock is a
+    FileLock on the shared LanceDB volume and the loser skips that table.
     """
 
     existing_task = cast(
@@ -663,16 +668,18 @@ def start_kb_maintenance_task(
         return existing_task
     app_instance.state.kb_maintenance_task = None
 
-    if get_celery_enabled():
-        logger.info("Skipping in-process KB index maintenance (Celery Beat owns it)")
-        return None
     if os.getenv("PYTEST_CURRENT_TEST"):
         logger.info("Skipping in-process KB index maintenance (test environment)")
         return None
 
     poll_interval_seconds = get_kb_index_maintenance_interval_seconds()
+    stop_event = threading.Event()
+    app_instance.state.kb_maintenance_stop = stop_event
     task = asyncio.create_task(
-        run_kb_maintenance_loop(poll_interval_seconds=poll_interval_seconds)
+        run_kb_maintenance_loop(
+            poll_interval_seconds=poll_interval_seconds,
+            stop_event=stop_event,
+        )
     )
     app_instance.state.kb_maintenance_task = task
     logger.info(
@@ -683,23 +690,44 @@ def start_kb_maintenance_task(
 
 
 async def stop_kb_maintenance_task(app_instance: FastAPI) -> None:
-    """Cancel and drain this process's KB index maintenance loop."""
+    """Signal, then drain, this process's KB index maintenance loop.
+
+    Cancelling the task cannot stop a sweep already running in the executor, so
+    the stop flag goes first and the wait is bounded: an unfinished sweep must
+    not hold shutdown past the orchestrator's grace period.
+    """
+
+    stop_event = getattr(app_instance.state, "kb_maintenance_stop", None)
+    if stop_event is not None:
+        stop_event.set()
+    app_instance.state.kb_maintenance_stop = None
 
     task = getattr(app_instance.state, "kb_maintenance_task", None)
     app_instance.state.kb_maintenance_task = None
-    if task is not None and not task.done():
+    if task is None:
+        return
+    if not task.done():
         logger.info("Cancelling KB index maintenance loop...")
         task.cancel()
-    if task is not None:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.error(
-                "KB index maintenance loop stopped after failure",
-                exc_info=exc,
-            )
+    done, _pending = await asyncio.wait(
+        {task}, timeout=KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS
+    )
+    if not done:
+        logger.warning(
+            "KB index maintenance still running %ss after the stop signal; the "
+            "executor thread will unwind at its next table boundary",
+            KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        return
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.error(
+            "KB index maintenance loop stopped after failure",
+            exc_info=exc,
+        )
 
 
 def start_temp_file_cleanup_task(

@@ -305,7 +305,7 @@ def test_retrain_rebuilds_an_existing_vector_index(indexed_table, tmp_path):
     store = _store_on(db)
     version_before = db.open_table("embeddings_probe").version
 
-    assert store.retrain_vector_index("embeddings_probe") is True
+    assert store.retrain_vector_index("embeddings_probe") == "retrained"
 
     assert db.open_table("embeddings_probe").version > version_before
 
@@ -316,7 +316,7 @@ def test_retrain_skips_a_table_with_no_vector_index(tmp_path):
     db.create_table("parses", data=_rows(200))
     store = _store_on(db)
 
-    assert store.retrain_vector_index("parses") is False
+    assert store.retrain_vector_index("parses") == "no_index"
 
 
 def test_compaction_never_retrains_the_vector_index(indexed_table, tmp_path):
@@ -350,7 +350,7 @@ def test_compaction_never_retrains_the_vector_index(indexed_table, tmp_path):
 def _failures():
     from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
 
-    return lancedb_stores.failing_maintenance_tables()
+    return lancedb_stores.failing_maintenance_keys()
 
 
 @pytest.fixture(autouse=True)
@@ -443,3 +443,160 @@ def test_a_swallowed_fts_rebuild_failure_still_counts_as_a_failed_pass(
         assert store.trigger_reindex("embeddings_probe") is True
 
     assert _failures() == {"embeddings_probe": MAINTENANCE_FAILURE_ALERT_THRESHOLD}
+
+
+def test_the_alert_fires_once_per_streak_not_once_per_failure(tmp_path, caplog):
+    """One incident is one page; every failure already logs its own WARNING."""
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        MAINTENANCE_FAILURE_ALERT_THRESHOLD,
+        _record_maintenance_outcome,
+    )
+
+    def _errors():
+        return [r for r in caplog.records if r.levelno == logging.ERROR]
+
+    with caplog.at_level(logging.ERROR):
+        for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
+            _record_maintenance_outcome("documents", False)
+        assert len(_errors()) == 1
+
+        for _ in range(5):
+            _record_maintenance_outcome("documents", False)
+        assert len(_errors()) == 1, "post-threshold failures must not re-page"
+
+        # A recovered table starts a fresh streak, which must be able to alert.
+        _record_maintenance_outcome("documents", True)
+        for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
+            _record_maintenance_outcome("documents", False)
+
+    assert len(_errors()) == 2
+
+
+def test_a_failed_fts_rebuild_keeps_the_table_eligible(tmp_path, monkeypatch):
+    """Physical compaction success must not gate away an incomplete FTS pass.
+
+    ``optimize()`` clears the fragment and version thresholds, so without an
+    independent retry the stale FTS index is never rebuilt again.
+    """
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    db = lancedb.connect(str(tmp_path / "fts-eligibility"))
+    table = db.create_table("embeddings_probe", data=_rows(100))
+    for _ in range(12):
+        table.add(_rows(10))
+    table.create_fts_index("text", with_position=True, replace=True)
+
+    attempts: list[str] = []
+
+    def failing_fts(*args, **kwargs):
+        attempts.append("create_fts_index")
+        raise RuntimeError("index out of bounds: the len is 10791")
+
+    table.create_fts_index = failing_fts
+    store = _store_on(db)
+    monkeypatch.setattr(store, "_get_connection", lambda: db)
+    monkeypatch.setattr(db, "open_table", lambda name, **kw: table)
+    policy = IndexPolicy(compact_fragment_threshold=10)
+
+    assert store.compact_tables(["embeddings_probe"], policy) == ["embeddings_probe"]
+    assert len(attempts) == 1
+    # The premise: compaction really did clear the physical trigger.
+    assert store.should_compact("embeddings_probe", policy) is False
+
+    assert store.compact_tables(["embeddings_probe"], policy) == ["embeddings_probe"]
+    assert len(attempts) == 2, "the stale FTS index was never retried"
+
+
+def test_compaction_stops_at_the_next_table_when_asked(tmp_path, monkeypatch):
+    """Shutdown must not have to wait out the whole listing."""
+    import threading
+
+    from xagent.core.tools.core.RAG_tools.core.config import IndexPolicy
+
+    db = lancedb.connect(str(tmp_path / "stop"))
+    for name in ("documents", "parses", "chunks"):
+        table = db.create_table(name, data=_rows(20))
+        for _ in range(12):
+            table.add(_rows(5))
+
+    stop = threading.Event()
+    store = _store_on(db)
+    real_trigger = store.trigger_reindex
+
+    def trigger(name, **kwargs):
+        stop.set()
+        return real_trigger(name, **kwargs)
+
+    monkeypatch.setattr(store, "trigger_reindex", trigger)
+
+    compacted = store.compact_tables(
+        ["documents", "parses", "chunks"],
+        IndexPolicy(compact_fragment_threshold=10),
+        stop_event=stop,
+    )
+
+    assert len(compacted) == 1, "the sweep ran on past the stop signal"
+
+
+def test_a_retrain_waits_out_a_lock_it_lost(tmp_path, monkeypatch):
+    """The weekly retrain has no cheap next attempt, so it waits.
+
+    Hourly compaction and the weekly retrain share one per-table FileLock and
+    their default intervals are exact multiples, so collision is routine.
+    """
+    import threading
+    import time
+
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    db = lancedb.connect(str(tmp_path / "contended"))
+    table = db.create_table("embeddings_probe", data=_rows(2000))
+    table.create_index(metric="l2", index_type="IVF_HNSW_SQ", num_partitions=4)
+    store = _store_on(db)
+    monkeypatch.setattr(lancedb_stores, "RETRAIN_LOCK_WAIT_SECONDS", 10)
+
+    holder_has_lock = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock():
+        with lancedb_stores._compaction_lock(db, "embeddings_probe") as acquired:
+            assert acquired
+            holder_has_lock.set()
+            release.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_the_lock)
+    holder.start()
+    holder_has_lock.wait(timeout=5)
+
+    outcome: list[str] = []
+    waiter = threading.Thread(
+        target=lambda: outcome.append(store.retrain_vector_index("embeddings_probe"))
+    )
+    waiter.start()
+    # Long enough that a non-blocking acquire would have given up by now.
+    time.sleep(0.5)
+    release.set()
+    holder.join(timeout=10)
+    waiter.join(timeout=30)
+
+    assert outcome == ["retrained"], "the retrain gave up instead of waiting"
+
+
+def test_a_retrain_that_gives_up_is_not_reported_as_nothing_to_do(
+    tmp_path, monkeypatch
+):
+    """``contended`` and ``no_index`` must not collapse into one falsey value."""
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    db = lancedb.connect(str(tmp_path / "gives-up"))
+    table = db.create_table("embeddings_probe", data=_rows(2000))
+    table.create_index(metric="l2", index_type="IVF_HNSW_SQ", num_partitions=4)
+    store = _store_on(db)
+    monkeypatch.setattr(lancedb_stores, "RETRAIN_LOCK_WAIT_SECONDS", 0)
+
+    with lancedb_stores._compaction_lock(db, "embeddings_probe") as acquired:
+        assert acquired
+        assert store.retrain_vector_index("embeddings_probe") == "contended"
+
+    # And it is counted, so a run of them reaches the alert threshold.
+    assert lancedb_stores._maintenance_failures["embeddings_probe:retrain"] == 1

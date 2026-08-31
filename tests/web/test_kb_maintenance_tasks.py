@@ -149,9 +149,9 @@ def test_retrain_task_only_touches_embeddings_tables(tmp_path: Any) -> None:
     store = _bound_store(db)
     asked: list[str] = []
 
-    def _retrain(table_name: str) -> bool:
+    def _retrain(table_name: str) -> str:
         asked.append(table_name)
-        return True
+        return "retrained"
 
     with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
         with patch.object(store, "retrain_vector_index", _retrain):
@@ -159,3 +159,60 @@ def test_retrain_task_only_touches_embeddings_tables(tmp_path: Any) -> None:
 
     assert asked == ["embeddings_probe"]
     assert result["retrained"] == ["embeddings_probe"]
+
+
+def test_an_empty_database_is_a_successful_sweep(tmp_path: Any) -> None:
+    """A genuinely empty database is a valid boundary, not a failure."""
+    db = lancedb.connect(str(tmp_path))
+    store = _bound_store(db)
+
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
+        result = kb_maintenance.sweep_kb_storage()
+
+    assert result["status"] == "ok"
+    assert result["scanned"] == 0
+    assert result["failing"] == {}
+
+
+def test_a_listing_outage_is_not_reported_as_an_empty_database(tmp_path: Any) -> None:
+    """``list_table_names`` returns [] on I/O failure, which read as healthy.
+
+    A dead database and an empty one produced the same `status: ok, scanned: 0`
+    while every table went unmaintained.
+    """
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        MAINTENANCE_FAILURE_ALERT_THRESHOLD,
+    )
+    from xagent.web.services.kb_maintenance import LISTING_FAILURE_KEY
+
+    db = _fragmented_db(tmp_path, "documents")
+    store = _bound_store(db)
+
+    def _unreachable() -> list[str]:
+        raise OSError("lancedb path unavailable")
+
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
+        with patch.object(store, "list_table_names_strict", _unreachable):
+            for _ in range(MAINTENANCE_FAILURE_ALERT_THRESHOLD):
+                result = kb_maintenance.sweep_kb_storage()
+            retrain = kb_maintenance.retrain_kb_vector_indexes()
+
+    assert result["status"] == "listing_failed"
+    assert retrain["status"] == "listing_failed"
+    assert result["failing"] == {
+        LISTING_FAILURE_KEY: MAINTENANCE_FAILURE_ALERT_THRESHOLD
+    }
+
+
+def test_a_contended_retrain_is_not_reported_as_a_clean_pass(tmp_path: Any) -> None:
+    """Losing the only weekly retrain must not read as `status: ok`."""
+    db = _fragmented_db(tmp_path, "embeddings_probe")
+    store = _bound_store(db)
+
+    with patch.object(StorageFactory, "get_vector_index_store", return_value=store):
+        with patch.object(store, "retrain_vector_index", lambda _n: "contended"):
+            result = kb_maintenance.retrain_kb_vector_indexes()
+
+    assert result["status"] == "contended"
+    assert result["contended"] == ["embeddings_probe"]
+    assert result["retrained"] == []

@@ -1,13 +1,15 @@
 """In-process KB index maintenance loop wiring (#1557).
 
-``get_celery_enabled`` defaults to False, so Gunicorn-only and local
-deployments have no worker and no Beat; without this loop they would get no
-KB maintenance at all once it stopped hanging off the ingestion hook.
+The loop runs in every deployment: XAGENT_CELERY_ENABLED says durable jobs go
+to a worker, not that Beat exists (``dev_background_jobs.py --no-beat`` sets
+one without the other), so gating on it would leave that deployment with no
+maintenance at all once it stopped hanging off the ingestion hook.
 """
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 
 import pytest
 
@@ -15,7 +17,7 @@ from xagent.web import app as app_module
 
 
 def _patch_loop(monkeypatch: pytest.MonkeyPatch, started: asyncio.Event) -> None:
-    async def fake_loop(*, poll_interval_seconds: int) -> None:
+    async def fake_loop(*, poll_interval_seconds: int, stop_event=None) -> None:
         assert poll_interval_seconds == 11
         started.set()
         await asyncio.Event().wait()
@@ -26,11 +28,19 @@ def _patch_loop(monkeypatch: pytest.MonkeyPatch, started: asyncio.Event) -> None
     monkeypatch.setattr(app_module, "run_kb_maintenance_loop", fake_loop)
 
 
+@pytest.mark.parametrize("celery_enabled", [False, True])
 @pytest.mark.asyncio
-async def test_loop_runs_when_celery_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_loop_runs_whatever_celery_is_set_to(
+    monkeypatch: pytest.MonkeyPatch, celery_enabled: bool
+) -> None:
+    """Celery being enabled is not evidence that Beat is running.
+
+    ``dev_background_jobs.py --no-beat`` sets XAGENT_CELERY_ENABLED=true and
+    starts no Beat; gating on it left that deployment with zero maintenance.
+    """
     started = asyncio.Event()
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(app_module, "get_celery_enabled", lambda: False)
+    monkeypatch.setenv("XAGENT_CELERY_ENABLED", str(celery_enabled).lower())
     _patch_loop(monkeypatch, started)
 
     task = app_module.start_kb_maintenance_task(app_module.app)
@@ -39,23 +49,6 @@ async def test_loop_runs_when_celery_is_off(monkeypatch: pytest.MonkeyPatch) -> 
     await asyncio.wait_for(started.wait(), timeout=1)
 
     await app_module.stop_kb_maintenance_task(app_module.app)
-    assert task.cancelled()
-    assert app_module.app.state.kb_maintenance_task is None
-
-
-@pytest.mark.asyncio
-async def test_loop_stays_off_when_celery_beat_owns_maintenance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both running would fight over the same per-table compaction lock."""
-    started = asyncio.Event()
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(app_module, "get_celery_enabled", lambda: True)
-    _patch_loop(monkeypatch, started)
-
-    assert app_module.start_kb_maintenance_task(app_module.app) is None
-
-    assert not started.is_set()
     assert app_module.app.state.kb_maintenance_task is None
 
 
@@ -63,12 +56,77 @@ async def test_loop_stays_off_when_celery_beat_owns_maintenance(
 async def test_loop_stays_off_under_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
     started = asyncio.Event()
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test")
-    monkeypatch.setattr(app_module, "get_celery_enabled", lambda: False)
     _patch_loop(monkeypatch, started)
 
     assert app_module.start_kb_maintenance_task(app_module.app) is None
 
     assert not started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_sets_the_stop_flag_the_sweep_can_see(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling the task cannot stop a sweep already in the executor.
+
+    The flag is the only thing that thread can observe, so shutdown has to set
+    it -- cancelling alone leaves the sweep running to completion.
+    """
+    order: list[str] = []
+    running = asyncio.Event()
+
+    async def fake_loop(*, poll_interval_seconds: int, stop_event) -> None:
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            order.append("cancelled" if not stop_event.is_set() else "stop-then-cancel")
+            raise
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        app_module, "get_kb_index_maintenance_interval_seconds", lambda: 11
+    )
+    monkeypatch.setattr(app_module, "run_kb_maintenance_loop", fake_loop)
+
+    app_module.start_kb_maintenance_task(app_module.app)
+    await asyncio.wait_for(running.wait(), timeout=1)
+
+    await app_module.stop_kb_maintenance_task(app_module.app)
+
+    assert order == ["stop-then-cancel"]
+    assert app_module.app.state.kb_maintenance_stop is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unfinished sweep must not hold shutdown past the grace period."""
+
+    async def stubborn_loop(*, poll_interval_seconds: int, stop_event) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Stands in for an executor thread that ignores the cancellation.
+            await asyncio.sleep(3600)
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(
+        app_module, "get_kb_index_maintenance_interval_seconds", lambda: 11
+    )
+    monkeypatch.setattr(app_module, "run_kb_maintenance_loop", stubborn_loop)
+    monkeypatch.setattr(app_module, "KB_MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", 0.1)
+
+    task = app_module.start_kb_maintenance_task(app_module.app)
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(
+        app_module.stop_kb_maintenance_task(app_module.app), timeout=2
+    )
+
+    assert task is not None and not task.done()
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
@@ -79,7 +137,7 @@ async def test_loop_survives_a_failing_sweep(monkeypatch: pytest.MonkeyPatch) ->
     calls = 0
     third = asyncio.Event()
 
-    def boom() -> dict:
+    def boom(stop_event=None) -> dict:
         nonlocal calls
         calls += 1
         if calls >= 3:
@@ -110,7 +168,9 @@ async def test_loop_sweeps_before_its_first_sleep(
     from xagent.web.services import kb_maintenance
 
     swept = asyncio.Event()
-    monkeypatch.setattr(kb_maintenance, "sweep_kb_storage", lambda: swept.set())
+    monkeypatch.setattr(
+        kb_maintenance, "sweep_kb_storage", lambda stop_event=None: swept.set()
+    )
     task = asyncio.create_task(
         kb_maintenance.run_kb_maintenance_loop(poll_interval_seconds=3600)
     )
