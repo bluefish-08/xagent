@@ -67,8 +67,9 @@ describe("waitForBackgroundJob", () => {
     await expect(waitForBackgroundJob("http://api.local", job("running"))).rejects.toThrow(
       "Failed to fetch background job job-1",
     )
-    // First failure at 1s opens a window closing at 11s; nothing may reject earlier.
-    expect(elapsedSeconds()).toBeGreaterThanOrEqual(11)
+    // First failure at 1s opens a window closing at 11s: the rejection lands on that
+    // boundary exactly, so pin it from both sides.
+    expect(elapsedSeconds()).toBe(11)
   })
 
   it("rejects a slow auth-refresh failure without waiting for ten of them", async () => {
