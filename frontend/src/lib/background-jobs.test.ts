@@ -9,10 +9,7 @@ vi.mock("@/lib/api-wrapper", async () => {
   return { ...actual, apiRequest: apiRequestMock }
 })
 
-import {
-  waitForBackgroundJob,
-  type BackgroundJobResponse,
-} from "@/lib/background-jobs"
+import { waitForBackgroundJob, type BackgroundJobResponse } from "@/lib/background-jobs"
 
 function job(status: string): BackgroundJobResponse {
   return {
@@ -32,14 +29,22 @@ function ok(status: string) {
 
 const badGateway = { ok: false, status: 502, json: async () => ({}) } as unknown as Response
 
+// The loop's own pacing and a poll's duration both spend the same budget, so the clock
+// only advances where the code under test would really wait.
+let clock = 0
+function elapsedSeconds() {
+  return clock / 1000
+}
+
 beforeEach(() => {
   apiRequestMock.mockReset()
-  // Every poll sleeps 1s; collapse it to a macrotask so the loop advances without
-  // wall time while still yielding, or a non-terminating regression hangs the worker
-  // instead of failing the test.
+  clock = 0
+  vi.spyOn(Date, "now").mockImplementation(() => clock)
   const realSetTimeout = window.setTimeout
-  vi.spyOn(window, "setTimeout").mockImplementation(((fn: () => void) =>
-    realSetTimeout(fn, 0)) as unknown as typeof window.setTimeout)
+  vi.spyOn(window, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+    clock += ms ?? 0
+    return realSetTimeout(fn, 0)
+  }) as unknown as typeof window.setTimeout)
 })
 
 afterEach(() => {
@@ -47,29 +52,40 @@ afterEach(() => {
 })
 
 describe("waitForBackgroundJob", () => {
-  it("survives transient poll failures and returns the terminal job", async () => {
-    apiRequestMock
-      .mockResolvedValueOnce(badGateway)
-      .mockRejectedValueOnce(new Error("network down"))
-      .mockResolvedValueOnce(ok("running"))
-      .mockResolvedValueOnce(badGateway)
-      .mockResolvedValueOnce(ok("succeeded"))
+  it("rides out a burst of instant failures and returns the terminal job", async () => {
+    for (let i = 0; i < 9; i++) apiRequestMock.mockResolvedValueOnce(badGateway)
+    apiRequestMock.mockResolvedValueOnce(ok("succeeded"))
 
     await expect(waitForBackgroundJob("http://api.local", job("running"))).resolves.toMatchObject({
       status: "succeeded",
     })
   })
 
-  it("gives up once failures are consecutive enough to be real", async () => {
+  it("rejects once instant failures outlast the window, not before", async () => {
     apiRequestMock.mockResolvedValue(badGateway)
 
     await expect(waitForBackgroundJob("http://api.local", job("running"))).rejects.toThrow(
       "Failed to fetch background job job-1",
     )
-    expect(apiRequestMock).toHaveBeenCalledTimes(10)
+    // First failure at 1s opens a window closing at 11s; nothing may reject earlier.
+    expect(elapsedSeconds()).toBeGreaterThanOrEqual(11)
   })
 
-  it("counts failures consecutively, not cumulatively", async () => {
+  it("rejects a slow auth-refresh failure without waiting for ten of them", async () => {
+    // A 401 whose refresh times out burns AUTH_REFRESH_TIMEOUT_MS before returning.
+    apiRequestMock.mockImplementation(async () => {
+      clock += 15_000
+      return { ok: false, status: 401, json: async () => ({}) } as unknown as Response
+    })
+
+    await expect(waitForBackgroundJob("http://api.local", job("running"))).rejects.toThrow(
+      "Failed to fetch background job job-1",
+    )
+    expect(apiRequestMock).toHaveBeenCalledTimes(2)
+    expect(elapsedSeconds()).toBeLessThan(60)
+  })
+
+  it("reopens the full window after any successful poll", async () => {
     for (let i = 0; i < 9; i++) apiRequestMock.mockResolvedValueOnce(badGateway)
     apiRequestMock.mockResolvedValueOnce(ok("running"))
     for (let i = 0; i < 9; i++) apiRequestMock.mockResolvedValueOnce(badGateway)

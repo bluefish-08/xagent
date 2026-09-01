@@ -79,11 +79,13 @@ export function getBackgroundJobFailureMessage(
   return job.error_message || fallbackMessage
 }
 
-// An ingest polls for minutes while the worker runs independently of this loop,
-// so a gap the proxy can close on its own must not fail the job. At one poll per
-// second this covers the proxy's 10s DNS re-resolve window; a backend that stays
-// down longer than that is a real failure and still surfaces as one.
-const MAX_CONSECUTIVE_POLL_FAILURES = 10
+// An ingest polls for minutes while the worker runs independently of this loop, so a
+// gap the proxy can close on its own must not fail the job. The budget is wall-clock
+// rather than a poll count because a failing poll takes anywhere from no time at all
+// to the api-wrapper's 15s auth-refresh timeout. It bounds when the streak may end,
+// not when the rejection lands: a single failure that outlasts the window is only
+// seen once it returns.
+const TRANSIENT_POLL_FAILURE_WINDOW_MS = 10_000
 
 export async function waitForBackgroundJob(
   apiUrl: string,
@@ -91,7 +93,7 @@ export async function waitForBackgroundJob(
   onUpdate?: (job: BackgroundJobResponse) => void
 ): Promise<BackgroundJobResponse> {
   let job = initialJob
-  let consecutiveFailures = 0
+  let failureWindowExpiresAt: number | null = null
   onUpdate?.(job)
 
   while (!isBackgroundJobTerminal(job)) {
@@ -104,14 +106,18 @@ export async function waitForBackgroundJob(
       }
       data = await response.json()
     } catch (error) {
-      consecutiveFailures += 1
-      if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) throw error
+      const now = Date.now()
+      if (failureWindowExpiresAt === null) {
+        failureWindowExpiresAt = now + TRANSIENT_POLL_FAILURE_WINDOW_MS
+      } else if (now >= failureWindowExpiresAt) {
+        throw error
+      }
       continue
     }
     if (!isBackgroundJobResponse(data)) {
       throw new Error(`Invalid background job response for ${job.id}`)
     }
-    consecutiveFailures = 0
+    failureWindowExpiresAt = null
     job = data
     onUpdate?.(job)
   }
