@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const apiRequestMock = vi.hoisted(() => vi.fn())
 
@@ -40,6 +40,10 @@ beforeEach(() => {
   const realSetTimeout = window.setTimeout
   vi.spyOn(window, "setTimeout").mockImplementation(((fn: () => void) =>
     realSetTimeout(fn, 0)) as unknown as typeof window.setTimeout)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe("waitForBackgroundJob", () => {
