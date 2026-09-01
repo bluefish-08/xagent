@@ -79,24 +79,39 @@ export function getBackgroundJobFailureMessage(
   return job.error_message || fallbackMessage
 }
 
+// An ingest polls for minutes while the worker runs independently of this loop,
+// so a gap the proxy can close on its own must not fail the job. At one poll per
+// second this covers the proxy's 10s DNS re-resolve window; a backend that stays
+// down longer than that is a real failure and still surfaces as one.
+const MAX_CONSECUTIVE_POLL_FAILURES = 10
+
 export async function waitForBackgroundJob(
   apiUrl: string,
   initialJob: BackgroundJobResponse,
   onUpdate?: (job: BackgroundJobResponse) => void
 ): Promise<BackgroundJobResponse> {
   let job = initialJob
+  let consecutiveFailures = 0
   onUpdate?.(job)
 
   while (!isBackgroundJobTerminal(job)) {
     await new Promise(resolve => window.setTimeout(resolve, 1000))
-    const response = await apiRequest(`${apiUrl}/api/jobs/${job.id}`)
-    if (!response.ok) {
-      throw new Error(`Failed to fetch background job ${job.id}`)
+    let data: unknown
+    try {
+      const response = await apiRequest(`${apiUrl}/api/jobs/${job.id}`)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch background job ${job.id}`)
+      }
+      data = await response.json()
+    } catch (error) {
+      consecutiveFailures += 1
+      if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) throw error
+      continue
     }
-    const data = await response.json()
     if (!isBackgroundJobResponse(data)) {
       throw new Error(`Invalid background job response for ${job.id}`)
     }
+    consecutiveFailures = 0
     job = data
     onUpdate?.(job)
   }
