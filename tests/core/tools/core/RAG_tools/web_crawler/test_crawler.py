@@ -982,11 +982,16 @@ class TestRobotsAtCrawlLevel:
         client.__aexit__ = AsyncMock()
         return client
 
+    def _robots(self, monkeypatch, status, text=""):
+        client = MagicMock()
+        client.return_value.__enter__.return_value.get.return_value = MagicMock(
+            status_code=status, text=text
+        )
+        monkeypatch.setattr(httpx, "Client", client)
+
     @pytest.mark.asyncio
     async def test_absent_robots_txt_does_not_stop_at_the_start_page(self, monkeypatch):
-        monkeypatch.setattr(
-            httpx, "get", lambda url, **kw: MagicMock(status_code=404, text="")
-        )
+        self._robots(monkeypatch, 404)
         config = WebCrawlConfig(
             start_url="https://example.com",
             max_pages=10,
@@ -1002,13 +1007,7 @@ class TestRobotsAtCrawlLevel:
 
     @pytest.mark.asyncio
     async def test_real_disallow_still_stops_the_crawl(self, monkeypatch):
-        monkeypatch.setattr(
-            httpx,
-            "get",
-            lambda url, **kw: MagicMock(
-                status_code=200, text="User-agent: *\nDisallow: /\n"
-            ),
-        )
+        self._robots(monkeypatch, 200, "User-agent: *\nDisallow: /\n")
         config = WebCrawlConfig(
             start_url="https://example.com",
             max_pages=10,

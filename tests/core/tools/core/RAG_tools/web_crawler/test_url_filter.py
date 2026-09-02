@@ -1,5 +1,9 @@
 """Unit tests for URL filter."""
 
+from functools import partial
+from unittest.mock import MagicMock
+
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -187,21 +191,12 @@ class TestRobotsTxtAvailability:
     """
 
     def _filter_with_robots_response(
-        self, monkeypatch, response, *, raises=False
+        self, monkeypatch, response=None, *, error=None
     ) -> URLFilter:
-        import httpx
-
-        self.requested: list[str] = []
-        self.request_kwargs: dict = {}
-
-        def fake_get(url, **kwargs):
-            self.requested.append(url)
-            self.request_kwargs = kwargs
-            if raises:
-                raise OSError("connection refused")
-            return response
-
-        monkeypatch.setattr(httpx, "get", fake_get)
+        self.client = MagicMock()
+        self.get = self.client.return_value.__enter__.return_value.get
+        self.get.side_effect = error or (lambda url: response)
+        monkeypatch.setattr(httpx, "Client", self.client)
         return URLFilter("https://example.com", respect_robots_txt=True)
 
     @pytest.mark.parametrize("status", [404, 403, 410])
@@ -212,6 +207,14 @@ class TestRobotsTxtAvailability:
         assert f.is_allowed("https://example.com/docs/intro") is True
         assert f.should_crawl("https://example.com/docs/intro") is True
 
+    @pytest.mark.parametrize("status", [200, 204, 206])
+    def test_any_2xx_robots_is_parsed(self, monkeypatch, status):
+        """A CDN answering /robots.txt with 204 No Content has said the site
+        has no rules; an exact match on 200 would drop it into the deny-all
+        branch and invert that."""
+        f = self._filter_with_robots_response(monkeypatch, _FakeResponse(status))
+        assert f.should_crawl("https://example.com/docs/intro") is True
+
     @pytest.mark.parametrize("status", [500, 503])
     def test_5xx_robots_blocks_the_crawl(self, monkeypatch, status):
         """RFC 9309 s2.3.1.4: an unreachable robots.txt is undefined, and an
@@ -220,22 +223,50 @@ class TestRobotsTxtAvailability:
         f = self._filter_with_robots_response(monkeypatch, _FakeResponse(status))
         assert f.should_crawl("https://example.com/docs/intro") is False
 
-    def test_unreachable_robots_blocks_the_crawl(self, monkeypatch):
-        f = self._filter_with_robots_response(
-            monkeypatch, _FakeResponse(200), raises=True
-        )
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("connection refused"),
+            httpx.ConnectTimeout("timed out"),
+            httpx.ConnectError("name resolution failed"),
+            httpx.TooManyRedirects("redirect loop"),
+        ],
+    )
+    def test_unreachable_robots_blocks_the_crawl(self, monkeypatch, error):
+        """TooManyRedirects is included on purpose: s2.3.1.2 permits treating a
+        too-long chain as unavailable (allow), and this takes the stricter of
+        the two readings."""
+        f = self._filter_with_robots_response(monkeypatch, error=error)
         assert f.should_crawl("https://example.com/docs/intro") is False
 
-    def test_fetch_opts_into_following_redirects(self, monkeypatch):
-        """A kwarg-contract assertion, not a behavioural one: the fetch calls
-        module-level httpx.get, so a stub cannot exercise httpx's own redirect
-        machinery. httpx defaults follow_redirects to False, and an unfollowed
-        3xx would land in neither the 200 nor the 4xx branch, discarding the
-        Disallow rules waiting at the redirect target -- http->https and www
-        canonicalisation redirect /robots.txt routinely."""
+    def test_redirect_chain_is_bounded(self, monkeypatch):
+        """timeout is per-request, so the redirect limit is what bounds the
+        total wait."""
         self._filter_with_robots_response(monkeypatch, _FakeResponse(404))
 
-        assert self.request_kwargs.get("follow_redirects") is True
+        assert self.client.call_args.kwargs["max_redirects"] == 5
+
+    def test_disallow_rules_behind_a_redirect_are_honoured(self, monkeypatch):
+        """http->https and www canonicalisation redirect /robots.txt routinely.
+        httpx defaults follow_redirects to False, which would land the 3xx in
+        the deny-all branch and discard the rules at the redirect target."""
+
+        def handler(request):
+            if request.url.host == "example.com":
+                return httpx.Response(
+                    301, headers={"Location": "https://www.example.com/robots.txt"}
+                )
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
+
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            partial(httpx.Client, transport=httpx.MockTransport(handler)),
+        )
+        f = URLFilter("https://example.com", respect_robots_txt=True)
+
+        assert f.should_crawl("https://example.com/private/secret") is False
+        assert f.should_crawl("https://example.com/public/page") is True
 
     def test_soft_404_html_body_still_allows_the_crawl(self, monkeypatch):
         """Static hosts often answer /robots.txt with HTTP 200 and an HTML
@@ -251,7 +282,9 @@ class TestRobotsTxtAvailability:
     def test_robots_is_fetched_from_the_site_root(self, monkeypatch):
         self._filter_with_robots_response(monkeypatch, _FakeResponse(404))
 
-        assert self.requested == ["https://example.com/robots.txt"]
+        assert [c.args[0] for c in self.get.call_args_list] == [
+            "https://example.com/robots.txt"
+        ]
 
     def test_real_robots_rules_are_still_enforced(self, monkeypatch):
         f = self._filter_with_robots_response(

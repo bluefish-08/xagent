@@ -59,7 +59,10 @@ class URLFilter:
                 self.robots_parser = None
 
     def _fetch_robots_txt(self) -> None:
-        """Fetch and parse robots.txt."""
+        """Fetch robots.txt and apply the three-way RFC 9309 s2.3 policy: parse
+        it on a 2xx, drop the parser on a 4xx (unavailable means unrestricted),
+        and leave it unread on a 5xx or transport error (undefined means
+        complete disallow)."""
         import httpx
 
         if not self.robots_parser or not self.robots_url:
@@ -68,9 +71,15 @@ class URLFilter:
         try:
             # follow_redirects is required, not incidental: httpx defaults to
             # False, and an unfollowed 3xx would land in the branch below and
-            # discard the Disallow rules waiting at the redirect target.
-            response = httpx.get(self.robots_url, timeout=10, follow_redirects=True)
-            if response.status_code == 200:
+            # discard the Disallow rules waiting at the redirect target. Client
+            # rather than httpx.get because only Client takes max_redirects, and
+            # timeout is per-request: 20 default hops stretch the ceiling to
+            # ~200s. Five is the threshold RFC 9309 s2.3.1.2 suggests.
+            with httpx.Client(
+                timeout=10, follow_redirects=True, max_redirects=5
+            ) as client:
+                response = client.get(self.robots_url)
+            if 200 <= response.status_code < 300:
                 self.robots_parser.parse(response.text.splitlines())
                 logger.info("Loaded robots.txt from %s", self.robots_url)
             elif 400 <= response.status_code < 500:
@@ -80,7 +89,8 @@ class URLFilter:
                 # which silently reduces a site with no robots.txt to its start
                 # page alone. 5xx and transport errors deliberately fall through
                 # to that deny-all state instead: s2.3.1.4 makes an undefined
-                # robots.txt a complete disallow.
+                # robots.txt a complete disallow. 429 is knowingly grouped here:
+                # s2.3.1.3 draws the line at the status class, not at intent.
                 self.robots_parser = None
                 logger.info(
                     "No robots.txt restrictions from %s (HTTP %s)",
@@ -89,15 +99,23 @@ class URLFilter:
                 )
             else:
                 logger.warning(
-                    "robots.txt undefined at %s (HTTP %s); crawling nothing",
+                    "robots.txt undefined at %s (HTTP %s); only the start URL "
+                    "will be fetched, discovered links will be skipped",
                     self.robots_url,
                     response.status_code,
                 )
         except Exception as e:
+            # Deliberately broad: narrowing to transport errors would let a bug
+            # in here escape to __init__, which clears the parser and so fails
+            # open on the whole site instead of closed.
             logger.warning("Could not fetch robots.txt from %s: %s", self.robots_url, e)
 
     def is_allowed(self, url: str, user_agent: str = "*") -> bool:
         """Check if URL is allowed by robots.txt.
+
+        A parser of None is the upstream decision that the site has no rules
+        (see _fetch_robots_txt), not a defensive fallback: returning True there
+        is what makes a site without robots.txt crawlable.
 
         Args:
             url: URL to check
