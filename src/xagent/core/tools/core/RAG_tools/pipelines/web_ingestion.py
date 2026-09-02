@@ -34,12 +34,28 @@ from ..utils.string_utils import sanitize_for_doc_id
 from ..utils.user_scope import resolve_user_scope
 from ..web_crawler import WebCrawler
 from ..web_crawler.crawler import STOPPED_NO_ELIGIBLE_LINKS
+from ..web_crawler.url_filter import (
+    REJECTED_EXCLUDED,
+    REJECTED_NOT_INCLUDED,
+    REJECTED_OFF_DOMAIN,
+    REJECTED_ROBOTS,
+    REJECTED_UNPARSABLE,
+)
 from .document_ingestion import run_document_ingestion
 
 if TYPE_CHECKING:
     from ..kb import KBPipelineCompatibilityFacade
 
 logger = logging.getLogger(__name__)
+
+# Reason keys are internal identifiers; this message reaches an end user.
+_REJECTION_LABELS = {
+    REJECTED_OFF_DOMAIN: "blocked by the same-domain rule",
+    REJECTED_EXCLUDED: "blocked by an exclude pattern",
+    REJECTED_NOT_INCLUDED: "outside the include patterns",
+    REJECTED_ROBOTS: "blocked by robots.txt rules",
+    REJECTED_UNPARSABLE: "not a crawlable http(s) link",
+}
 
 FileHandlerCallback = Callable[..., Any]
 
@@ -916,7 +932,7 @@ async def _run_web_ingestion_impl(
                 )
     elif blocked_stop:
         refused = ", ".join(
-            f"{count} {reason}"
+            f"{count} {_REJECTION_LABELS.get(reason, reason)}"
             for reason, count in sorted(crawl_stats.get("link_rejections", {}).items())
         )
         message = (
@@ -932,6 +948,7 @@ async def _run_web_ingestion_impl(
 
     result = WebIngestionResult(
         status=status,
+        crawl_blocked_by_site=blocked_stop,
         collection=collection,
         total_urls_found=crawler.total_urls_found,
         pages_crawled=pages_crawled,

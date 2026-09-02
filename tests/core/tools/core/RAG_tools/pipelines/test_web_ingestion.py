@@ -1433,7 +1433,8 @@ class TestCrawlStopReasonDrivesStatus:
 
         assert result.status == "partial"
         assert "every link found was refused" in result.message
-        assert "5 robots_txt" in result.message
+        assert "5 blocked by robots.txt rules" in result.message
+        assert "robots_txt" not in result.message
 
     @pytest.mark.asyncio
     async def test_page_cap_is_a_success(self, crawl_config, ingestion_config):

@@ -13,19 +13,19 @@ from ..core.web_url_utils import normalize_web_url
 
 logger = logging.getLogger(__name__)
 
-# Why a discovered link was not queued. The first three are the operator's own
-# configuration doing its job; the last two mean the site pushed back.
+# Why a discovered link was not queued.
 REJECTED_OFF_DOMAIN = "off_domain"
 REJECTED_EXCLUDED = "excluded_pattern"
 REJECTED_NOT_INCLUDED = "not_included_pattern"
 REJECTED_ROBOTS = "robots_txt"
 REJECTED_UNPARSABLE = "unparsable"
 
-# Rejections that reflect how the crawl was configured, so a crawl that ends
-# with only these is doing what it was asked to do.
-CONFIGURED_REJECTIONS = frozenset(
-    {REJECTED_OFF_DOMAIN, REJECTED_EXCLUDED, REJECTED_NOT_INCLUDED}
-)
+# Only robots.txt speaks for the site. Scope rules belong to the operator and
+# an unsupported scheme (ftp:, data:, intent:) is this crawler's own limit, so
+# neither may make the site look responsible for a crawl that went nowhere.
+# Membership, never the complement: a reason added later is not a refusal
+# until someone says it is.
+SITE_REJECTIONS = frozenset({REJECTED_ROBOTS})
 
 
 class URLFilter:

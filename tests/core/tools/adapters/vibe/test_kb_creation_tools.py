@@ -354,6 +354,64 @@ async def test_create_kb_from_url_empty_crawl_publishes_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_kb_from_url_partial_crawl_is_not_reported_as_success(monkeypatch):
+    """A site that refused every link past the start page yields documents and
+    no failures. Reporting success there lets an agent build on a knowledge
+    base holding one page, which is what this status exists to prevent."""
+    monkeypatch.setenv(WEB_CRAWL_TLS_IMPERSONATE, "auto")
+
+    ingest_result = WebIngestionResult(
+        status="partial",
+        crawl_blocked_by_site=True,
+        collection="agent_url_kb",
+        total_urls_found=5,
+        pages_crawled=1,
+        pages_failed=0,
+        documents_created=1,
+        chunks_created=6,
+        embeddings_created=6,
+        crawled_urls=["https://example.com"],
+        failed_urls={},
+        message=(
+            "Web ingestion incomplete: 1 documents from 1 page(s). No further "
+            "pages could be crawled - every link found was refused "
+            "(5 blocked by robots.txt rules)."
+        ),
+        warnings=[],
+        elapsed_time_ms=1,
+    )
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_url_kb")
+    service.publish_collection = AsyncMock()
+    service.collection_exists = AsyncMock(return_value=False)
+    service.cleanup_failed_collection = AsyncMock()
+    service.refresh_collection_metadata = AsyncMock()
+
+    with (
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.web_ingestion.run_web_ingestion",
+            new=AsyncMock(return_value=ingest_result),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromUrlTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"url": "https://example.com", "collection_name": "agent_url_kb"}
+        )
+
+    assert result["success"] is False
+    assert "blocked by robots.txt rules" in result["message"]
+    assert result["pages_crawled"] == 1
+    # The one page that did land is kept: re-importing would re-crawl it, and
+    # discarding it helps nobody.
+    service.publish_collection.assert_awaited_once()
+    service.cleanup_failed_collection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_create_kb_from_url_uses_shared_service(monkeypatch):
     monkeypatch.setenv(WEB_CRAWL_TLS_IMPERSONATE, "auto")
 

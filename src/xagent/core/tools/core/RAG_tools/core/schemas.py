@@ -2271,6 +2271,15 @@ class WebIngestionResult(BaseModel):
         ...,
         description="Overall status: success|error|partial",
     )
+    crawl_blocked_by_site: bool = Field(
+        default=False,
+        description=(
+            "The crawl ended because the site refused every link past the "
+            "start page. Callers need this to tell such a partial from one "
+            "caused by individual pages failing to parse, which is not the "
+            "site's doing and keeps its existing success policy."
+        ),
+    )
     collection: str = Field(..., description="Target collection name")
 
     # Crawl statistics

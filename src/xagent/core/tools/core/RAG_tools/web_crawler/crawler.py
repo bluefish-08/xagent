@@ -16,7 +16,7 @@ import httpx
 from ..core.schemas import CrawlResult, WebCrawlConfig
 from .content_cleaner import ContentCleaner
 from .link_extractor import LinkExtractor
-from .url_filter import CONFIGURED_REJECTIONS, URLFilter
+from .url_filter import REJECTED_ROBOTS, URLFilter
 
 logger = logging.getLogger(__name__)
 
@@ -527,11 +527,14 @@ class WebCrawler:
         self.crawl_results: List[CrawlResult] = []
         self.failed_urls: Dict[str, str] = {}
 
-        # Statistics. total_urls_found counts raw extractor output; the two
-        # below count what survived URLFilter and why the rest did not, which
-        # is what tells a configured stop from an unexpected one.
+        # Statistics. total_urls_found counts raw extractor output and
+        # total_links_eligible what survived URLFilter; both are diagnostic.
+        # Only total_links_queued tracks actual frontier progress - a link can
+        # survive every filter and still queue nothing, having been seen
+        # already or sitting past max_depth.
         self.total_urls_found = 0
         self.total_links_eligible = 0
+        self.total_links_queued = 0
         self.link_rejections: Counter = Counter()
         self.stop_reason: str = STOPPED_UNKNOWN
         self.start_time: Optional[float] = None
@@ -866,28 +869,22 @@ class WebCrawler:
 
         if len(self.visited_urls) >= self.config.max_pages:
             self.stop_reason = STOPPED_PAGE_CAP
-        elif self.total_links_eligible == 0 and self._refusals_dominate():
+        elif self._site_refused_the_frontier():
             self.stop_reason = STOPPED_NO_ELIGIBLE_LINKS
         else:
             self.stop_reason = STOPPED_NO_LINKS
 
-    def _refusals_dominate(self) -> bool:
-        """Whether the site, rather than this crawl's own configuration, is
-        what kept every link out.
+    def _site_refused_the_frontier(self) -> bool:
+        """Whether the site's own policy is why there was nothing left to crawl.
 
-        Presence is not enough: a scoped crawl that rejects fifty off-domain
-        links and happens to meet one robots-disallowed link was still doing
-        what it was configured to do.
+        Asks about the frontier, not about rejection counts: a crawl that
+        queued a page was making progress whatever else it turned away. Depth
+        needs no separate guard - max_depth is at least 1, so a page dropped
+        for depth is always behind one that was queued.
         """
-        total = sum(self.link_rejections.values())
-        if not total:
+        if self.total_links_queued:
             return False
-        refused = sum(
-            count
-            for reason, count in self.link_rejections.items()
-            if reason not in CONFIGURED_REJECTIONS
-        )
-        return refused * 2 > total
+        return self.link_rejections[REJECTED_ROBOTS] > 0
 
     async def _crawl_page(
         self,
@@ -1082,6 +1079,7 @@ class WebCrawler:
             # Only add if not visited and not already pending
             if link not in self.visited_urls and link not in pending_urls_set:
                 self.pending_urls.append((link, next_depth))
+                self.total_links_queued += 1
 
     def get_statistics(self) -> dict:
         """Get crawl statistics.
@@ -1092,6 +1090,7 @@ class WebCrawler:
         return {
             "total_urls_found": self.total_urls_found,
             "total_links_eligible": self.total_links_eligible,
+            "total_links_queued": self.total_links_queued,
             "link_rejections": dict(self.link_rejections),
             "stop_reason": self.stop_reason,
             "visited_urls": len(self.visited_urls),
