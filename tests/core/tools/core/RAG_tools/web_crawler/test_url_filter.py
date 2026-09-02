@@ -195,9 +195,20 @@ class TestRobotsTxtAvailability:
     ) -> URLFilter:
         self.client = MagicMock()
         self.get = self.client.return_value.__enter__.return_value.get
-        self.get.side_effect = error or (lambda url: response)
+        self.get.side_effect = error or (lambda url, headers=None: response)
         monkeypatch.setattr(httpx, "Client", self.client)
         return URLFilter("https://example.com", respect_robots_txt=True)
+
+    def test_robots_is_fetched_with_the_crawl_user_agent(self, monkeypatch):
+        """A WAF that 403s an unrecognised UA would otherwise be read as "no
+        rules" while the crawl itself proceeds under a browser UA."""
+        self.client = MagicMock()
+        self.get = self.client.return_value.__enter__.return_value.get
+        self.get.side_effect = lambda url, headers=None: _FakeResponse(404)
+        monkeypatch.setattr(httpx, "Client", self.client)
+        URLFilter("https://example.com", user_agent="XagentBot/1.0")
+
+        assert self.get.call_args.kwargs["headers"] == {"User-Agent": "XagentBot/1.0"}
 
     @pytest.mark.parametrize("status", [404, 403, 410])
     def test_4xx_robots_allows_every_path(self, monkeypatch, status):
@@ -239,17 +250,45 @@ class TestRobotsTxtAvailability:
         f = self._filter_with_robots_response(monkeypatch, error=error)
         assert f.should_crawl("https://example.com/docs/intro") is False
 
-    def test_redirect_chain_is_bounded(self, monkeypatch):
-        """timeout is per-request, so the redirect limit is what bounds the
-        total wait."""
+    def test_429_blocks_the_crawl(self, monkeypatch):
+        """s2.3.1.3 judges by meaning, not by status class: a server asking us
+        to slow down has not said it has no rules."""
+        f = self._filter_with_robots_response(monkeypatch, _FakeResponse(429))
+        assert f.should_crawl("https://example.com/docs/intro") is False
+
+    def test_fetch_is_bounded_in_time(self, monkeypatch):
+        """timeout is per-request, so it and the redirect limit together are
+        what bound the total wait."""
         self._filter_with_robots_response(monkeypatch, _FakeResponse(404))
 
+        assert self.client.call_args.kwargs["timeout"] == 10
         assert self.client.call_args.kwargs["max_redirects"] == 5
+
+    def test_endless_redirects_block_the_crawl(self, monkeypatch):
+        """The kwarg assertion above cannot show the sixth hop is refused.
+        s2.3.1.2 permits treating an over-long chain as unavailable (allow);
+        this takes the stricter reading, so it needs a behavioural anchor."""
+        self._patch_client_with_handler(
+            monkeypatch,
+            lambda request: httpx.Response(
+                301, headers={"Location": f"{request.url}/again"}
+            ),
+        )
+        f = URLFilter("https://example.com", respect_robots_txt=True)
+
+        assert f.should_crawl("https://example.com/docs/intro") is False
+
+    def _patch_client_with_handler(self, monkeypatch, handler):
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            partial(httpx.Client, transport=httpx.MockTransport(handler)),
+        )
 
     def test_disallow_rules_behind_a_redirect_are_honoured(self, monkeypatch):
         """http->https and www canonicalisation redirect /robots.txt routinely.
-        httpx defaults follow_redirects to False, which would land the 3xx in
-        the deny-all branch and discard the rules at the redirect target."""
+        httpx defaults follow_redirects to False, which would leave the rules
+        unread at the redirect target and deny the whole site."""
 
         def handler(request):
             if request.url.host == "example.com":
@@ -258,11 +297,7 @@ class TestRobotsTxtAvailability:
                 )
             return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
 
-        monkeypatch.setattr(
-            httpx,
-            "Client",
-            partial(httpx.Client, transport=httpx.MockTransport(handler)),
-        )
+        self._patch_client_with_handler(monkeypatch, handler)
         f = URLFilter("https://example.com", respect_robots_txt=True)
 
         assert f.should_crawl("https://example.com/private/secret") is False

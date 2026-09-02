@@ -28,6 +28,7 @@ class URLFilter:
         url_patterns: Optional[list[str]] = None,
         exclude_patterns: Optional[list[str]] = None,
         respect_robots_txt: bool = True,
+        user_agent: Optional[str] = None,
     ):
         """Initialize URL filter.
 
@@ -37,6 +38,9 @@ class URLFilter:
             url_patterns: Regex patterns for allowed URLs
             exclude_patterns: Regex patterns for excluded URLs
             respect_robots_txt: Whether to check robots.txt
+            user_agent: UA to send when fetching robots.txt. Must be the one
+                the crawl itself sends: a WAF that 403s an unrecognised UA
+                would otherwise be read as "this site has no rules".
         """
         normalized_base_url = normalize_web_url(base_url)
         self.base_domain = urlparse(normalized_base_url or base_url).netloc.lower()
@@ -44,6 +48,7 @@ class URLFilter:
         self.url_patterns = [re.compile(p) for p in (url_patterns or [])]
         self.exclude_patterns = [re.compile(p) for p in (exclude_patterns or [])]
         self.respect_robots_txt = respect_robots_txt
+        self.user_agent = user_agent
 
         # Initialize robots.txt parser
         self.robots_parser: Optional[RobotFileParser] = None
@@ -70,27 +75,31 @@ class URLFilter:
 
         try:
             # follow_redirects is required, not incidental: httpx defaults to
-            # False, and an unfollowed 3xx would land in the branch below and
-            # discard the Disallow rules waiting at the redirect target. Client
-            # rather than httpx.get because only Client takes max_redirects, and
-            # timeout is per-request: 20 default hops stretch the ceiling to
-            # ~200s. Five is the threshold RFC 9309 s2.3.1.2 suggests.
+            # False, so a 3xx would reach the final branch below and deny the
+            # whole site, with the Disallow rules left unread at the redirect
+            # target. Client rather than httpx.get because only Client takes
+            # max_redirects, and timeout is per-request: 20 default hops
+            # stretch the ceiling to ~200s. Five is the floor RFC 9309
+            # s2.3.1.2 asks crawlers to follow.
+            headers = {"User-Agent": self.user_agent} if self.user_agent else None
             with httpx.Client(
                 timeout=10, follow_redirects=True, max_redirects=5
             ) as client:
-                response = client.get(self.robots_url)
+                response = client.get(self.robots_url, headers=headers)
             if 200 <= response.status_code < 300:
                 self.robots_parser.parse(response.text.splitlines())
                 logger.info("Loaded robots.txt from %s", self.robots_url)
-            elif 400 <= response.status_code < 500:
+            elif 400 <= response.status_code < 500 and response.status_code != 429:
                 # RFC 9309 s2.3.1.3: unavailable means the crawler may access
                 # anything. Dropping the parser is what expresses that - keeping
                 # an unread RobotFileParser makes can_fetch() deny every URL,
                 # which silently reduces a site with no robots.txt to its start
                 # page alone. 5xx and transport errors deliberately fall through
                 # to that deny-all state instead: s2.3.1.4 makes an undefined
-                # robots.txt a complete disallow. 429 is knowingly grouped here:
-                # s2.3.1.3 draws the line at the status class, not at intent.
+                # robots.txt a complete disallow. s2.3.1.3 judges by meaning
+                # ("the resource is unavailable") and only cites 400-499 as an
+                # example, so 429 is excluded: a server asking us to slow down
+                # has not said it has no rules.
                 self.robots_parser = None
                 logger.info(
                     "No robots.txt restrictions from %s (HTTP %s)",

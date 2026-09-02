@@ -989,6 +989,18 @@ class TestRobotsAtCrawlLevel:
         )
         monkeypatch.setattr(httpx, "Client", client)
 
+    def test_robots_fetch_inherits_the_crawl_user_agent(self):
+        """Probing robots.txt as python-httpx while crawling as a browser lets
+        a WAF 403 read as "this site has no rules"."""
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            user_agent="XagentBot/1.0",
+            tls_impersonate=None,
+            respect_robots_txt=False,
+        )
+
+        assert WebCrawler(config).url_filter.user_agent == "XagentBot/1.0"
+
     @pytest.mark.asyncio
     async def test_absent_robots_txt_does_not_stop_at_the_start_page(self, monkeypatch):
         self._robots(monkeypatch, 404)
