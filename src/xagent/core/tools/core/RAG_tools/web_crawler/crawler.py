@@ -5,7 +5,7 @@ import importlib
 import importlib.util
 import logging
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +16,7 @@ import httpx
 from ..core.schemas import CrawlResult, WebCrawlConfig
 from .content_cleaner import ContentCleaner
 from .link_extractor import LinkExtractor
-from .url_filter import URLFilter
+from .url_filter import CONFIGURED_REJECTIONS, URLFilter
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,16 @@ _WEAK_CHALLENGE_PAGE_MARKERS: Tuple[str, ...] = (
     "just a moment",
     "needs to review the security",
 )
+
+# Why the crawl loop ended. NO_LINKS and PAGE_CAP are the crawl doing what it
+# was configured to do; NO_ELIGIBLE_LINKS means links existed but the site
+# refused them, which is the case worth surfacing to the user. UNKNOWN is the
+# fail-loud default: the loop assigns a real reason in its epilogue, so this
+# value surviving means it never got there.
+STOPPED_UNKNOWN = "unknown"
+STOPPED_NO_LINKS = "no_more_links"
+STOPPED_PAGE_CAP = "page_cap_reached"
+STOPPED_NO_ELIGIBLE_LINKS = "no_eligible_links"
 
 _MIN_MARKDOWN_TEXT_LENGTH = 10
 _SHORT_TEXT_LENGTH = 200
@@ -517,8 +527,13 @@ class WebCrawler:
         self.crawl_results: List[CrawlResult] = []
         self.failed_urls: Dict[str, str] = {}
 
-        # Statistics
+        # Statistics. total_urls_found counts raw extractor output; the two
+        # below count what survived URLFilter and why the rest did not, which
+        # is what tells a configured stop from an unexpected one.
         self.total_urls_found = 0
+        self.total_links_eligible = 0
+        self.link_rejections: Counter = Counter()
+        self.stop_reason: str = STOPPED_UNKNOWN
         self.start_time: Optional[float] = None
 
     async def crawl(self) -> List[CrawlResult]:
@@ -849,6 +864,31 @@ class WebCrawler:
                         self.config.max_pages,
                     )
 
+        if len(self.visited_urls) >= self.config.max_pages:
+            self.stop_reason = STOPPED_PAGE_CAP
+        elif self.total_links_eligible == 0 and self._refusals_dominate():
+            self.stop_reason = STOPPED_NO_ELIGIBLE_LINKS
+        else:
+            self.stop_reason = STOPPED_NO_LINKS
+
+    def _refusals_dominate(self) -> bool:
+        """Whether the site, rather than this crawl's own configuration, is
+        what kept every link out.
+
+        Presence is not enough: a scoped crawl that rejects fifty off-domain
+        links and happens to meet one robots-disallowed link was still doing
+        what it was configured to do.
+        """
+        total = sum(self.link_rejections.values())
+        if not total:
+            return False
+        refused = sum(
+            count
+            for reason, count in self.link_rejections.items()
+            if reason not in CONFIGURED_REJECTIONS
+        )
+        return refused * 2 > total
+
     async def _crawl_page(
         self,
         sessions: Dict[Optional[str], Any],
@@ -981,10 +1021,16 @@ class WebCrawler:
                 # consistent with what the WAF actually sees.
                 valid_links = set()
                 for link in links:
-                    if self.url_filter.should_crawl(link, self._policy_user_agent):
+                    reason = self.url_filter.rejection_reason(
+                        link, self._policy_user_agent
+                    )
+                    if reason is None:
                         valid_links.add(link)
+                    else:
+                        self.link_rejections[reason] += 1
 
                 self.total_urls_found += len(links)
+                self.total_links_eligible += len(valid_links)
 
                 # Create result
                 result = CrawlResult(
@@ -1045,6 +1091,9 @@ class WebCrawler:
         """
         return {
             "total_urls_found": self.total_urls_found,
+            "total_links_eligible": self.total_links_eligible,
+            "link_rejections": dict(self.link_rejections),
+            "stop_reason": self.stop_reason,
             "visited_urls": len(self.visited_urls),
             "successful_pages": len(self.crawl_results),
             "failed_pages": len(self.failed_urls),

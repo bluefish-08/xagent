@@ -33,6 +33,7 @@ from ..utils.config_utils import coerce_ingestion_config
 from ..utils.string_utils import sanitize_for_doc_id
 from ..utils.user_scope import resolve_user_scope
 from ..web_crawler import WebCrawler
+from ..web_crawler.crawler import STOPPED_NO_ELIGIBLE_LINKS
 from .document_ingestion import run_document_ingestion
 
 if TYPE_CHECKING:
@@ -857,6 +858,18 @@ async def _run_web_ingestion_impl(
     if rollback_failed_urls:
         status = "error"
 
+    # A crawl can end with zero failures and still not be what the user asked
+    # for: every link the start page offered was refused by the site. Configured
+    # stops (page cap, depth, deliberate filtering) are not this case, which is
+    # why the reason comes from the crawler rather than from link counts.
+    crawl_stats = crawler.get_statistics()
+    blocked_stop = (
+        status == "success"
+        and crawl_stats.get("stop_reason") == STOPPED_NO_ELIGIBLE_LINKS
+    )
+    if blocked_stop:
+        status = "partial"
+
     crawled_urls_list = [r.url for r in crawl_results if r.status == "success"]
 
     # Build a status-aware message. Previously this was unconditionally
@@ -901,6 +914,16 @@ async def _run_web_ingestion_impl(
                     f"{pages_crawled} pages, {len(failed_urls)} failed "
                     f"(first: {first_url} returned {first_err})"
                 )
+    elif blocked_stop:
+        refused = ", ".join(
+            f"{count} {reason}"
+            for reason, count in sorted(crawl_stats.get("link_rejections", {}).items())
+        )
+        message = (
+            f"Web ingestion incomplete: {documents_created} documents from "
+            f"{pages_crawled} page(s). No further pages could be crawled - "
+            f"every link found was refused ({refused})."
+        )
     else:
         message = (
             f"Web ingestion completed: {documents_created} documents, "

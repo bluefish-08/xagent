@@ -13,6 +13,20 @@ from ..core.web_url_utils import normalize_web_url
 
 logger = logging.getLogger(__name__)
 
+# Why a discovered link was not queued. The first three are the operator's own
+# configuration doing its job; the last two mean the site pushed back.
+REJECTED_OFF_DOMAIN = "off_domain"
+REJECTED_EXCLUDED = "excluded_pattern"
+REJECTED_NOT_INCLUDED = "not_included_pattern"
+REJECTED_ROBOTS = "robots_txt"
+REJECTED_UNPARSABLE = "unparsable"
+
+# Rejections that reflect how the crawl was configured, so a crawl that ends
+# with only these is doing what it was asked to do.
+CONFIGURED_REJECTIONS = frozenset(
+    {REJECTED_OFF_DOMAIN, REJECTED_EXCLUDED, REJECTED_NOT_INCLUDED}
+)
+
 
 class URLFilter:
     """URL filtering and validation.
@@ -185,6 +199,38 @@ class URLFilter:
         """
         return any(pattern.search(url) for pattern in self.exclude_patterns)
 
+    def rejection_reason(self, url: str, user_agent: str = "*") -> Optional[str]:
+        """Return why this URL will not be crawled, or None if it will be.
+
+        Callers aggregate these to tell a crawl that stopped because the
+        operator configured it that way from one that stopped unexpectedly.
+        Every configured rule is therefore checked before robots.txt: a link
+        that is both out of scope and robots-disallowed was never going to be
+        crawled regardless of what the site said, so attributing it to the site
+        would blame it for the operator's own filtering.
+        """
+        normalized = self.normalize_url(url)
+        if not normalized:
+            return REJECTED_UNPARSABLE
+
+        if self.same_domain_only and not self.is_same_domain(normalized):
+            logger.debug("Skipping %s: different domain", normalized)
+            return REJECTED_OFF_DOMAIN
+
+        if self.is_excluded(normalized):
+            logger.debug("Skipping %s: matches exclusion pattern", normalized)
+            return REJECTED_EXCLUDED
+
+        if not self.matches_patterns(normalized):
+            logger.debug("Skipping %s: does not match inclusion pattern", normalized)
+            return REJECTED_NOT_INCLUDED
+
+        if self.respect_robots_txt and not self.is_allowed(normalized, user_agent):
+            logger.debug("Skipping %s: disallowed by robots.txt", normalized)
+            return REJECTED_ROBOTS
+
+        return None
+
     def should_crawl(self, url: str, user_agent: str = "*") -> bool:
         """Check if URL should be crawled based on all rules.
 
@@ -195,32 +241,7 @@ class URLFilter:
         Returns:
             True if URL should be crawled, False otherwise
         """
-        # Normalize URL
-        normalized = self.normalize_url(url)
-        if not normalized:
-            return False
-
-        # Check domain
-        if self.same_domain_only and not self.is_same_domain(normalized):
-            logger.debug("Skipping %s: different domain", normalized)
-            return False
-
-        # Check robots.txt
-        if self.respect_robots_txt and not self.is_allowed(normalized, user_agent):
-            logger.debug("Skipping %s: disallowed by robots.txt", normalized)
-            return False
-
-        # Check exclusion patterns
-        if self.is_excluded(normalized):
-            logger.debug("Skipping %s: matches exclusion pattern", normalized)
-            return False
-
-        # Check inclusion patterns
-        if not self.matches_patterns(normalized):
-            logger.debug("Skipping %s: does not match inclusion pattern", normalized)
-            return False
-
-        return True
+        return self.rejection_reason(url, user_agent) is None
 
     def normalize_url(self, url: str, base_url: Optional[str] = None) -> Optional[str]:
         """Normalize URL by handling relative URLs and removing fragments.

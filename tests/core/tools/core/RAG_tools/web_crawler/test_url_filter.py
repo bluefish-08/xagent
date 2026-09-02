@@ -8,7 +8,14 @@ import pytest
 from pydantic import ValidationError
 
 from xagent.core.tools.core.RAG_tools.core.schemas import WebCrawlConfig
-from xagent.core.tools.core.RAG_tools.web_crawler.url_filter import URLFilter
+from xagent.core.tools.core.RAG_tools.web_crawler.url_filter import (
+    CONFIGURED_REJECTIONS,
+    REJECTED_EXCLUDED,
+    REJECTED_NOT_INCLUDED,
+    REJECTED_OFF_DOMAIN,
+    REJECTED_ROBOTS,
+    URLFilter,
+)
 
 
 class TestURLFilter:
@@ -328,3 +335,93 @@ class TestRobotsTxtAvailability:
         )
         assert f.should_crawl("https://example.com/private/secret") is False
         assert f.should_crawl("https://example.com/public/page") is True
+
+
+class TestRejectionReason:
+    """should_crawl only says no; callers need to know which rule said it."""
+
+    def test_reason_is_none_when_crawlable(self):
+        f = URLFilter("https://example.com", respect_robots_txt=False)
+        assert f.rejection_reason("https://example.com/docs") is None
+
+    def test_off_domain_is_reported_as_configuration(self):
+        f = URLFilter(
+            "https://example.com", same_domain_only=True, respect_robots_txt=False
+        )
+        assert f.rejection_reason("https://other.com/x") == REJECTED_OFF_DOMAIN
+        assert REJECTED_OFF_DOMAIN in CONFIGURED_REJECTIONS
+
+    def test_exclusion_is_reported_as_configuration(self):
+        f = URLFilter(
+            "https://example.com",
+            exclude_patterns=[r"/private"],
+            respect_robots_txt=False,
+        )
+        assert f.rejection_reason("https://example.com/private/x") == REJECTED_EXCLUDED
+        assert REJECTED_EXCLUDED in CONFIGURED_REJECTIONS
+
+    def test_robots_is_not_configuration(self, monkeypatch):
+        """The site refusing us is not the operator configuring us."""
+        import httpx
+
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda url, **kw: _FakeResponse(200, "User-agent: *\nDisallow: /private\n"),
+        )
+        f = URLFilter("https://example.com", respect_robots_txt=True)
+        assert f.rejection_reason("https://example.com/private/x") == REJECTED_ROBOTS
+        assert REJECTED_ROBOTS not in CONFIGURED_REJECTIONS
+
+    def test_configured_rules_win_over_robots(self, monkeypatch):
+        """A link that is both out of scope and robots-disallowed was never
+        going to be crawled regardless of what the site said, so blaming the
+        site would report the operator's own filtering as a refusal."""
+        import httpx
+
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda url, **kw: _FakeResponse(200, "User-agent: *\nDisallow: /blog\n"),
+        )
+        f = URLFilter(
+            "https://example.com", url_patterns=[r"/docs"], respect_robots_txt=True
+        )
+
+        assert f.rejection_reason("https://example.com/blog/post") == (
+            REJECTED_NOT_INCLUDED
+        )
+        assert REJECTED_NOT_INCLUDED in CONFIGURED_REJECTIONS
+
+    def test_excluded_wins_over_robots(self, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda url, **kw: _FakeResponse(200, "User-agent: *\nDisallow: /blog\n"),
+        )
+        f = URLFilter(
+            "https://example.com", exclude_patterns=[r"/blog"], respect_robots_txt=True
+        )
+
+        assert f.rejection_reason("https://example.com/blog/post") == REJECTED_EXCLUDED
+
+    def test_robots_still_reported_when_no_configured_rule_applies(self, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda url, **kw: _FakeResponse(200, "User-agent: *\nDisallow: /blog\n"),
+        )
+        f = URLFilter("https://example.com", respect_robots_txt=True)
+
+        assert f.rejection_reason("https://example.com/blog/post") == REJECTED_ROBOTS
+
+    def test_should_crawl_still_agrees_with_the_reason(self):
+        f = URLFilter(
+            "https://example.com", same_domain_only=True, respect_robots_txt=False
+        )
+        for url in ("https://example.com/ok", "https://other.com/no"):
+            assert f.should_crawl(url) is (f.rejection_reason(url) is None)
