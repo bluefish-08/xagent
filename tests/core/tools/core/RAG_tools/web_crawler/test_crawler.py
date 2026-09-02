@@ -957,3 +957,67 @@ class TestWebCrawler:
         assert "All TLS fingerprints failed" in caplog.text
         assert "chrome116:TimeoutError" in caplog.text
         assert "https://example.com" in crawler.failed_urls
+
+
+class TestRobotsAtCrawlLevel:
+    """The url_filter unit tests cannot catch this on their own: the start URL
+    never passes through should_crawl, so a deny-all filter still yields one
+    page and a non-zero total_urls_found. Only page count across a real crawl
+    distinguishes "robots absent" from "robots denied everything"."""
+
+    HTML = """
+        <html><body><h1>Docs</h1>
+        <p>Enough body text here to pass the content length check.</p>
+        <a href="/a">A</a><a href="/b">B</a>
+        </body></html>
+    """
+
+    def _client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.text = self.HTML
+        client = AsyncMock()
+        client.get.return_value = response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_absent_robots_txt_does_not_stop_at_the_start_page(self, monkeypatch):
+        monkeypatch.setattr(
+            httpx, "get", lambda url, **kw: MagicMock(status_code=404, text="")
+        )
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            respect_robots_txt=True,
+        )
+        with patch("httpx.AsyncClient", return_value=self._client()):
+            results = await WebCrawler(config).crawl()
+
+        assert len(results) > 1
+
+    @pytest.mark.asyncio
+    async def test_real_disallow_still_stops_the_crawl(self, monkeypatch):
+        monkeypatch.setattr(
+            httpx,
+            "get",
+            lambda url, **kw: MagicMock(
+                status_code=200, text="User-agent: *\nDisallow: /\n"
+            ),
+        )
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            respect_robots_txt=True,
+        )
+        with patch("httpx.AsyncClient", return_value=self._client()):
+            results = await WebCrawler(config).crawl()
+
+        assert len(results) == 1

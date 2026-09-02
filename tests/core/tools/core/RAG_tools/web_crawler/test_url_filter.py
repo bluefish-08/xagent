@@ -170,3 +170,93 @@ def test_web_crawl_config_rejects_invalid_start_urls():
         match="Invalid start_url: URL must include a hostname",
     ):
         WebCrawlConfig(start_url="http://@")
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class TestRobotsTxtAvailability:
+    """A missing robots.txt must not lock the crawler out of the whole site.
+
+    RobotFileParser denies everything until it has been read, so any branch
+    that leaves the parser untouched silently reduces a crawl to its start
+    page: on a real documentation site this turned 42 reachable pages into 1.
+    """
+
+    def _filter_with_robots_response(
+        self, monkeypatch, response, *, raises=False
+    ) -> URLFilter:
+        import httpx
+
+        self.requested: list[str] = []
+        self.request_kwargs: dict = {}
+
+        def fake_get(url, **kwargs):
+            self.requested.append(url)
+            self.request_kwargs = kwargs
+            if raises:
+                raise OSError("connection refused")
+            return response
+
+        monkeypatch.setattr(httpx, "get", fake_get)
+        return URLFilter("https://example.com", respect_robots_txt=True)
+
+    @pytest.mark.parametrize("status", [404, 403, 410])
+    def test_4xx_robots_allows_every_path(self, monkeypatch, status):
+        f = self._filter_with_robots_response(
+            monkeypatch, _FakeResponse(status, "<html>Page Not Found</html>")
+        )
+        assert f.is_allowed("https://example.com/docs/intro") is True
+        assert f.should_crawl("https://example.com/docs/intro") is True
+
+    @pytest.mark.parametrize("status", [500, 503])
+    def test_5xx_robots_blocks_the_crawl(self, monkeypatch, status):
+        """RFC 9309 s2.3.1.4: an unreachable robots.txt is undefined, and an
+        undefined robots.txt is a complete disallow. Unlike 4xx, a server error
+        says nothing about whether rules exist."""
+        f = self._filter_with_robots_response(monkeypatch, _FakeResponse(status))
+        assert f.should_crawl("https://example.com/docs/intro") is False
+
+    def test_unreachable_robots_blocks_the_crawl(self, monkeypatch):
+        f = self._filter_with_robots_response(
+            monkeypatch, _FakeResponse(200), raises=True
+        )
+        assert f.should_crawl("https://example.com/docs/intro") is False
+
+    def test_fetch_opts_into_following_redirects(self, monkeypatch):
+        """A kwarg-contract assertion, not a behavioural one: the fetch calls
+        module-level httpx.get, so a stub cannot exercise httpx's own redirect
+        machinery. httpx defaults follow_redirects to False, and an unfollowed
+        3xx would land in neither the 200 nor the 4xx branch, discarding the
+        Disallow rules waiting at the redirect target -- http->https and www
+        canonicalisation redirect /robots.txt routinely."""
+        self._filter_with_robots_response(monkeypatch, _FakeResponse(404))
+
+        assert self.request_kwargs.get("follow_redirects") is True
+
+    def test_soft_404_html_body_still_allows_the_crawl(self, monkeypatch):
+        """Static hosts often answer /robots.txt with HTTP 200 and an HTML
+        404 page. Parsing that yields no rules, which must read as "no
+        restrictions" rather than deny-all."""
+        f = self._filter_with_robots_response(
+            monkeypatch,
+            _FakeResponse(200, "<html><body>Page Not Found</body></html>"),
+        )
+
+        assert f.should_crawl("https://example.com/docs/intro") is True
+
+    def test_robots_is_fetched_from_the_site_root(self, monkeypatch):
+        self._filter_with_robots_response(monkeypatch, _FakeResponse(404))
+
+        assert self.requested == ["https://example.com/robots.txt"]
+
+    def test_real_robots_rules_are_still_enforced(self, monkeypatch):
+        f = self._filter_with_robots_response(
+            monkeypatch,
+            _FakeResponse(200, "User-agent: *\nDisallow: /private\n"),
+        )
+        assert f.should_crawl("https://example.com/private/secret") is False
+        assert f.should_crawl("https://example.com/public/page") is True

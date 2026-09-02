@@ -66,12 +66,35 @@ class URLFilter:
             return
 
         try:
-            response = httpx.get(self.robots_url, timeout=10)
+            # follow_redirects is required, not incidental: httpx defaults to
+            # False, and an unfollowed 3xx would land in the branch below and
+            # discard the Disallow rules waiting at the redirect target.
+            response = httpx.get(self.robots_url, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 self.robots_parser.parse(response.text.splitlines())
                 logger.info("Loaded robots.txt from %s", self.robots_url)
+            elif 400 <= response.status_code < 500:
+                # RFC 9309 s2.3.1.3: unavailable means the crawler may access
+                # anything. Dropping the parser is what expresses that - keeping
+                # an unread RobotFileParser makes can_fetch() deny every URL,
+                # which silently reduces a site with no robots.txt to its start
+                # page alone. 5xx and transport errors deliberately fall through
+                # to that deny-all state instead: s2.3.1.4 makes an undefined
+                # robots.txt a complete disallow.
+                self.robots_parser = None
+                logger.info(
+                    "No robots.txt restrictions from %s (HTTP %s)",
+                    self.robots_url,
+                    response.status_code,
+                )
+            else:
+                logger.warning(
+                    "robots.txt undefined at %s (HTTP %s); crawling nothing",
+                    self.robots_url,
+                    response.status_code,
+                )
         except Exception as e:
-            logger.warning("Failed to fetch robots.txt: %s", e)
+            logger.warning("Could not fetch robots.txt from %s: %s", self.robots_url, e)
 
     def is_allowed(self, url: str, user_agent: str = "*") -> bool:
         """Check if URL is allowed by robots.txt.
