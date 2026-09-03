@@ -11,9 +11,31 @@ import pytest
 
 from xagent.core.tools.core.RAG_tools.core.schemas import WebCrawlConfig
 from xagent.core.tools.core.RAG_tools.web_crawler.crawler import (
+    STOPPED_NO_ELIGIBLE_LINKS,
+    STOPPED_NO_LINKS,
+    STOPPED_PAGE_CAP,
+    STOPPED_UNKNOWN,
     WebCrawler,
     _get_httpx_accept_encoding,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_robots_fetch(monkeypatch):
+    """URLFilter fetches robots.txt synchronously in __init__, but these tests
+    patch only httpx.AsyncClient. Without this, every crawler built with the
+    default respect_robots_txt fires a real request at example.com - silently,
+    since the fetch swallows its own exception, so an offline CI would quietly
+    exercise a different code path instead of failing.
+
+    404 keeps the behaviour these tests were already getting from the live
+    request, minus the network.
+    """
+    client = MagicMock()
+    client.return_value.__enter__.return_value.get.return_value = MagicMock(
+        status_code=404, text=""
+    )
+    monkeypatch.setattr(httpx, "Client", client)
 
 
 class TestWebCrawler:
@@ -1032,3 +1054,279 @@ class TestRobotsAtCrawlLevel:
             results = await WebCrawler(config).crawl()
 
         assert len(results) == 1
+
+
+class TestStopReason:
+    """The crawl loop records why it ended, so ingestion can tell a configured
+    stop from a site that refused every link."""
+
+    @staticmethod
+    def _mock_client(html: str):
+        response = MagicMock()
+        response.status_code = 200
+        response.text = html
+        client = AsyncMock()
+        client.get.return_value = response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock()
+        return client
+
+    HTML_WITH_LINKS = """
+        <html><body><h1>Docs</h1>
+        <p>Enough body text here to pass the content length check.</p>
+        <a href="/a">A</a><a href="/b">B</a>
+        </body></html>
+    """
+
+    HTML_NO_LINKS = """
+        <html><body><h1>Only page</h1>
+        <p>Enough body text here to pass the content length check.</p>
+        </body></html>
+    """
+
+    @pytest.mark.asyncio
+    async def test_robots_refusing_every_link_is_flagged(self):
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            # Site allows the start page but refuses everything it links to.
+            crawler.url_filter.rejection_reason = lambda url, ua="*": "robots_txt"
+            await crawler.crawl()
+
+        assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
+        assert crawler.total_links_queued == 0
+        assert crawler.link_rejections["robots_txt"] == 2
+
+    @pytest.mark.asyncio
+    async def test_off_domain_links_only_is_not_flagged(self):
+        """Deliberate filtering is the crawl doing what it was told. Uses the
+        real filter: same_domain_only is what has to reject these."""
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            respect_robots_txt=False,
+        )
+        html = """
+            <html><body><h1>Docs</h1>
+            <p>Enough body text here to pass the content length check.</p>
+            <a href="https://other.com/a">A</a><a href="https://other.com/b">B</a>
+            </body></html>
+        """
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert crawler.link_rejections["off_domain"] == 2
+        assert crawler.stop_reason == STOPPED_NO_LINKS
+
+    @pytest.mark.asyncio
+    async def test_one_in_scope_refusal_outweighs_many_out_of_scope_links(self):
+        """Links that were never in scope cannot vouch for the site. A ratio
+        over all rejections lets fifty off-domain links bury the one refusal
+        that actually closed the crawl."""
+        html = (
+            "<html><body><h1>Docs</h1><p>Enough body text to pass the check.</p>"
+            + "".join(f'<a href="https://other{i}.com/x">O</a>' for i in range(50))
+            + '<a href="/blocked">B</a></body></html>'
+        )
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            crawler.url_filter.rejection_reason = (
+                lambda url, ua="*": "robots_txt"
+                if url.startswith("https://example.com/")
+                else "off_domain"
+            )
+            await crawler.crawl()
+
+        assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
+
+    @pytest.mark.asyncio
+    async def test_unsupported_schemes_alone_are_not_a_refusal(self):
+        """ftp:/data:/intent: anchors are this crawler's own limit. No site
+        policy was consulted, so a one-page import stays a success."""
+        html = """
+            <html><body><h1>Only page</h1>
+            <p>Enough body text here to pass the content length check.</p>
+            <a href="ftp://example.com/f">F</a><a href="data:text/plain,x">D</a>
+            </body></html>
+        """
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            respect_robots_txt=False,
+        )
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert crawler.link_rejections["unparsable"] > 0
+        assert crawler.stop_reason == STOPPED_NO_LINKS
+
+    @pytest.mark.asyncio
+    async def test_an_already_seen_link_is_not_frontier_progress(self):
+        """A self link survives every filter and queues nothing. Counting it as
+        progress hides that the only forward page was refused."""
+        html = """
+            <html><body><h1>Docs</h1>
+            <p>Enough body text here to pass the content length check.</p>
+            <a href="https://example.com">home</a><a href="/child">C</a>
+            </body></html>
+        """
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            crawler.url_filter.rejection_reason = (
+                lambda url, ua="*": "robots_txt" if url.endswith("/child") else None
+            )
+            await crawler.crawl()
+
+        assert crawler.total_links_queued == 0
+        assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_alongside_real_progress_is_not_a_blocked_crawl(self):
+        """The common shape: robots forbids /private and the rest crawls fine.
+        A refusal only closed the door if nothing was queued behind it."""
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            crawler.url_filter.rejection_reason = (
+                lambda url, ua="*": "robots_txt" if url.endswith("/b") else None
+            )
+            await crawler.crawl()
+
+        assert crawler.link_rejections["robots_txt"] > 0
+        assert crawler.total_links_queued > 0
+        assert crawler.stop_reason == STOPPED_NO_LINKS
+
+    @pytest.mark.asyncio
+    async def test_a_shared_link_is_counted_once_across_pages(self):
+        """A nav or footer link rejected on every page is one refused link, not
+        one per page. The count reaches the user, so inflating it misstates how
+        much the site turned away."""
+        html = """
+            <html><body><h1>Docs</h1>
+            <p>Enough body text here to pass the content length check.</p>
+            <a href="/next">next</a><a href="https://other.com/nav">nav</a>
+            </body></html>
+        """
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            respect_robots_txt=False,
+        )
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert len(crawler.visited_urls) > 1
+        assert crawler.link_rejections["off_domain"] == 1
+
+    @pytest.mark.asyncio
+    async def test_page_cap_is_recorded(self):
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=1,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert crawler.stop_reason == STOPPED_PAGE_CAP
+
+    @pytest.mark.asyncio
+    async def test_an_out_of_scope_link_does_not_excuse_a_refusal(self):
+        """Presence is not dominance: a scoped crawl that rejects many
+        off-domain links and meets one robots-disallowed link was doing what it
+        was configured to do."""
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            reasons = iter(["off_domain", "robots_txt"])
+            crawler.url_filter.rejection_reason = lambda url, ua="*": next(
+                reasons, "off_domain"
+            )
+            await crawler.crawl()
+
+        assert crawler.link_rejections["off_domain"] == 1
+        assert crawler.link_rejections["robots_txt"] == 1
+        # The off-domain link was never a candidate, so it cannot vouch for a
+        # site that refused the only one that was.
+        assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
+
+    def test_stop_reason_defaults_to_unknown_before_the_loop_runs(self):
+        """A success-implying default would misreport a crawl that raised
+        before the loop epilogue assigned a real reason."""
+        config = WebCrawlConfig(
+            start_url="https://example.com", request_delay=0, tls_impersonate=None
+        )
+        assert WebCrawler(config).stop_reason == STOPPED_UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_site_with_no_links_is_not_flagged(self):
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_NO_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert crawler.stop_reason == STOPPED_NO_LINKS
+        assert crawler.link_rejections == {}
