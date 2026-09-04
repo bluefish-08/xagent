@@ -76,10 +76,11 @@ _WEAK_CHALLENGE_PAGE_MARKERS: Tuple[str, ...] = (
 
 # Why the crawl loop ended. NO_LINKS and PAGE_CAP are the crawl doing what it
 # was configured to do; NO_ELIGIBLE_LINKS means links existed but the site
-# refused them, which is the case worth surfacing to the user. UNKNOWN is an
-# inert placeholder, not a signal: nothing reads it, and the loop's epilogue
-# always overwrites it. It exists so an unset stop_reason cannot read as one
-# of the three real answers.
+# refused them, which is the case worth surfacing to the user. UNKNOWN is what
+# get_statistics() reports when the loop did not reach its epilogue, which
+# happens when an exception propagates out of it - crawl() has no try/finally.
+# No caller handles it today; it exists so that state cannot be mistaken for
+# one of the three real answers.
 STOPPED_UNKNOWN = "unknown"
 STOPPED_NO_LINKS = "no_more_links"
 STOPPED_PAGE_CAP = "page_cap_reached"
@@ -531,11 +532,13 @@ class WebCrawler:
         # total_urls_found counts raw extractor output and is diagnostic. Only
         # total_links_queued tracks frontier progress - a link can survive every
         # filter and still queue nothing, having been seen already or sitting
-        # past max_depth.
+        # past max_depth. It counts queue insertions, which are keyed on the raw
+        # link, so /a#x and /a#y each count; deduplicating those would change
+        # which pages get fetched, so it does not belong in this PR.
         self.total_urls_found = 0
         self.total_links_queued = 0
         self.rejected_urls: Set[str] = set()
-        self.link_rejections: Counter = Counter()
+        self.link_rejections: Counter[str] = Counter()
         self.stop_reason: str = STOPPED_UNKNOWN
         self.start_time: Optional[float] = None
 
@@ -1024,11 +1027,14 @@ class WebCrawler:
                     )
                     if reason is None:
                         valid_links.add(link)
-                    elif link not in self.rejected_urls:
-                        # Counted per distinct URL: a nav link rejected on every
-                        # page is one refused link, not one per page.
-                        self.rejected_urls.add(link)
-                        self.link_rejections[reason] += 1
+                    else:
+                        # Keyed on the normalized URL because that is what
+                        # rejection_reason judged: /a#x, /a#y and //EXAMPLE.com/a
+                        # are one refused link, as is a nav link on every page.
+                        seen = self.url_filter.normalize_url(link) or link
+                        if seen not in self.rejected_urls:
+                            self.rejected_urls.add(seen)
+                            self.link_rejections[reason] += 1
 
                 self.total_urls_found += len(links)
 
@@ -1092,7 +1098,9 @@ class WebCrawler:
             total_urls_found (raw extractor output, before filtering),
             total_links_queued (links that actually entered the frontier),
             link_rejections (count per rejection reason, per distinct URL),
-            and stop_reason (one of the STOPPED_* values).
+            and stop_reason (one of the STOPPED_* values). The page cap is
+            checked first, so with max_pages=1 a crawl reports
+            page_cap_reached even if the site also refused every link.
         """
         return {
             "total_urls_found": self.total_urls_found,

@@ -234,8 +234,9 @@ class URLFilter:
     def should_crawl(self, url: str, user_agent: str = "*") -> bool:
         """Check if URL should be crawled based on all rules.
 
-        A convenience wrapper kept for external callers; the crawler itself
-        uses rejection_reason() because it needs to record why.
+        No production caller: the crawler uses rejection_reason() because it
+        needs to record why. Kept because it is public API on an exported
+        class, and the tests read better through it.
 
         Args:
             url: URL to check

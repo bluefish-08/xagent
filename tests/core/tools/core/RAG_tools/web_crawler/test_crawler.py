@@ -18,6 +18,12 @@ from xagent.core.tools.core.RAG_tools.web_crawler.crawler import (
     WebCrawler,
     _get_httpx_accept_encoding,
 )
+from xagent.core.tools.core.RAG_tools.web_crawler.url_filter import (
+    REJECTED_EXCLUDED,
+    REJECTED_OFF_DOMAIN,
+    REJECTED_ROBOTS,
+    REJECTED_UNPARSABLE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1098,12 +1104,12 @@ class TestStopReason:
         ):
             crawler = WebCrawler(config)
             # Site allows the start page but refuses everything it links to.
-            crawler.url_filter.rejection_reason = lambda url, ua="*": "robots_txt"
+            crawler.url_filter.rejection_reason = lambda url, ua="*": REJECTED_ROBOTS
             await crawler.crawl()
 
         assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
         assert crawler.total_links_queued == 0
-        assert crawler.link_rejections["robots_txt"] == 2
+        assert crawler.link_rejections[REJECTED_ROBOTS] == 2
 
     @pytest.mark.asyncio
     async def test_off_domain_links_only_is_not_flagged(self):
@@ -1127,7 +1133,7 @@ class TestStopReason:
             crawler = WebCrawler(config)
             await crawler.crawl()
 
-        assert crawler.link_rejections["off_domain"] == 2
+        assert crawler.link_rejections[REJECTED_OFF_DOMAIN] == 2
         assert crawler.stop_reason == STOPPED_NO_LINKS
 
     @pytest.mark.asyncio
@@ -1150,9 +1156,9 @@ class TestStopReason:
         with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
             crawler = WebCrawler(config)
             crawler.url_filter.rejection_reason = (
-                lambda url, ua="*": "robots_txt"
+                lambda url, ua="*": REJECTED_ROBOTS
                 if url.startswith("https://example.com/")
-                else "off_domain"
+                else REJECTED_OFF_DOMAIN
             )
             await crawler.crawl()
 
@@ -1180,7 +1186,7 @@ class TestStopReason:
             crawler = WebCrawler(config)
             await crawler.crawl()
 
-        assert crawler.link_rejections["unparsable"] > 0
+        assert crawler.link_rejections[REJECTED_UNPARSABLE] > 0
         assert crawler.stop_reason == STOPPED_NO_LINKS
 
     @pytest.mark.asyncio
@@ -1203,7 +1209,7 @@ class TestStopReason:
         with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
             crawler = WebCrawler(config)
             crawler.url_filter.rejection_reason = (
-                lambda url, ua="*": "robots_txt" if url.endswith("/child") else None
+                lambda url, ua="*": REJECTED_ROBOTS if url.endswith("/child") else None
             )
             await crawler.crawl()
 
@@ -1226,11 +1232,11 @@ class TestStopReason:
         ):
             crawler = WebCrawler(config)
             crawler.url_filter.rejection_reason = (
-                lambda url, ua="*": "robots_txt" if url.endswith("/b") else None
+                lambda url, ua="*": REJECTED_ROBOTS if url.endswith("/b") else None
             )
             await crawler.crawl()
 
-        assert crawler.link_rejections["robots_txt"] > 0
+        assert crawler.link_rejections[REJECTED_ROBOTS] > 0
         assert crawler.total_links_queued > 0
         assert crawler.stop_reason == STOPPED_NO_LINKS
 
@@ -1258,7 +1264,34 @@ class TestStopReason:
             await crawler.crawl()
 
         assert len(crawler.visited_urls) > 1
-        assert crawler.link_rejections["off_domain"] == 1
+        assert crawler.link_rejections[REJECTED_OFF_DOMAIN] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_same_link_written_differently_is_counted_once(self):
+        """rejection_reason() judges the normalized URL, so the count has to be
+        keyed on it too. Keying on the raw href counts one refused link three
+        times, which is the number the user is shown."""
+        html = """
+            <html><body><h1>Docs</h1>
+            <p>Enough body text here to pass the content length check.</p>
+            <a href="/blog#top">a</a><a href="/blog#new">b</a>
+            <a href="https://EXAMPLE.com/blog">c</a>
+            </body></html>
+        """
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=10,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+            exclude_patterns=[r"/blog"],
+            respect_robots_txt=False,
+        )
+        with patch("httpx.AsyncClient", return_value=self._mock_client(html)):
+            crawler = WebCrawler(config)
+            await crawler.crawl()
+
+        assert crawler.link_rejections[REJECTED_EXCLUDED] == 1
 
     @pytest.mark.asyncio
     async def test_page_cap_is_recorded(self):
@@ -1293,14 +1326,14 @@ class TestStopReason:
             "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
         ):
             crawler = WebCrawler(config)
-            reasons = iter(["off_domain", "robots_txt"])
+            reasons = iter([REJECTED_OFF_DOMAIN, REJECTED_ROBOTS])
             crawler.url_filter.rejection_reason = lambda url, ua="*": next(
-                reasons, "off_domain"
+                reasons, REJECTED_OFF_DOMAIN
             )
             await crawler.crawl()
 
-        assert crawler.link_rejections["off_domain"] == 1
-        assert crawler.link_rejections["robots_txt"] == 1
+        assert crawler.link_rejections[REJECTED_OFF_DOMAIN] == 1
+        assert crawler.link_rejections[REJECTED_ROBOTS] == 1
         # The off-domain link was never a candidate, so it cannot vouch for a
         # site that refused the only one that was.
         assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
