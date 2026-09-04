@@ -26,24 +26,6 @@ from xagent.core.tools.core.RAG_tools.web_crawler.url_filter import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _no_real_robots_fetch(monkeypatch):
-    """URLFilter fetches robots.txt synchronously in __init__, but these tests
-    patch only httpx.AsyncClient. Without this, every crawler built with the
-    default respect_robots_txt fires a real request at example.com - silently,
-    since the fetch swallows its own exception, so an offline CI would quietly
-    exercise a different code path instead of failing.
-
-    404 keeps the behaviour these tests were already getting from the live
-    request, minus the network.
-    """
-    client = MagicMock()
-    client.return_value.__enter__.return_value.get.return_value = MagicMock(
-        status_code=404, text=""
-    )
-    monkeypatch.setattr(httpx, "Client", client)
-
-
 class TestWebCrawler:
     """Test web crawler functionality."""
 
@@ -1057,9 +1039,14 @@ class TestRobotsAtCrawlLevel:
             respect_robots_txt=True,
         )
         with patch("httpx.AsyncClient", return_value=self._client()):
-            results = await WebCrawler(config).crawl()
+            crawler = WebCrawler(config)
+            results = await crawler.crawl()
 
         assert len(results) == 1
+        # Every other stop_reason test stubs rejection_reason. This is the one
+        # place the real URLFilter decides, so it is where the signal has to be
+        # checked against an actual Disallow rule.
+        assert crawler.stop_reason == STOPPED_NO_ELIGIBLE_LINKS
 
 
 class TestStopReason:
@@ -1292,6 +1279,29 @@ class TestStopReason:
             await crawler.crawl()
 
         assert crawler.link_rejections[REJECTED_EXCLUDED] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_page_cap_outranks_a_refusal(self):
+        """Documented in get_statistics(): at max_pages=1 the cap wins even
+        when the site also refused every link. The crawl was told to fetch one
+        page and did, so the refusal did not change the outcome."""
+        config = WebCrawlConfig(
+            start_url="https://example.com",
+            max_pages=1,
+            max_depth=2,
+            request_delay=0,
+            tls_impersonate=None,
+        )
+        with patch(
+            "httpx.AsyncClient", return_value=self._mock_client(self.HTML_WITH_LINKS)
+        ):
+            crawler = WebCrawler(config)
+            crawler.url_filter.rejection_reason = lambda url, ua="*": REJECTED_ROBOTS
+            await crawler.crawl()
+
+        assert crawler.link_rejections[REJECTED_ROBOTS] > 0
+        assert crawler.total_links_queued == 0
+        assert crawler.stop_reason == STOPPED_PAGE_CAP
 
     @pytest.mark.asyncio
     async def test_page_cap_is_recorded(self):

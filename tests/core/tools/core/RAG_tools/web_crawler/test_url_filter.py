@@ -184,11 +184,16 @@ def test_web_crawl_config_rejects_invalid_start_urls():
         WebCrawlConfig(start_url="http://@")
 
 
+# Captured at import, before the autouse fixture in conftest replaces
+# httpx.Client - these tests need the real one to drive redirects and rules.
+_REAL_HTTPX_CLIENT = httpx.Client
+
+
 def _patch_client_with_handler(monkeypatch, handler):
     monkeypatch.setattr(
         httpx,
         "Client",
-        partial(httpx.Client, transport=httpx.MockTransport(handler)),
+        partial(_REAL_HTTPX_CLIENT, transport=httpx.MockTransport(handler)),
     )
 
 
