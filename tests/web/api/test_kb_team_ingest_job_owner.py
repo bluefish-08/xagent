@@ -11,6 +11,7 @@ tests only ever used a personally owned collection, where the swap is a no-op
 and the two ids coincide, and the team-scope tests never create a job.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -47,8 +48,10 @@ def _client(actor: User) -> TestClient:
     return TestClient(app)
 
 
-def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
-    captured: dict[str, int] = {}
+def _capture_owner(
+    captured: dict[str, int], job_id: str, job_type: BackgroundJobType
+) -> Callable[..., BackgroundJob]:
+    """Record both ids the endpoint assigns, and hand back a usable job row."""
 
     def capture_create(
         db: object, *, user_id: int, payload: dict[str, Any], **kwargs: object
@@ -56,9 +59,9 @@ def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
         captured["job_user_id"] = user_id
         captured["payload_user_id"] = int(payload["user_id"])
         return BackgroundJob(
-            id="job-1",
+            id=job_id,
             user_id=user_id,
-            job_type=BackgroundJobType.KB_INGEST_WEB.value,
+            job_type=job_type.value,
             queue="kb_ingest",
             status=BackgroundJobStatus.ENQUEUED.value,
             payload=payload,
@@ -66,9 +69,15 @@ def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
             max_attempts=3,
         )
 
-    async def passthrough(db: object, job: BackgroundJob) -> BackgroundJob:
-        return job
+    return capture_create
 
+
+async def _passthrough(db: object, job: BackgroundJob) -> BackgroundJob:
+    return job
+
+
+def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
+    captured: dict[str, int] = {}
     actor = _actor()
     team_access = KnowledgeBaseAccess(
         name="team-handbook", storage_user_id=STORAGE_ID, team_owned=True
@@ -93,9 +102,15 @@ def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
             "get_non_terminal_background_job_by_idempotency_key",
             return_value=None,
         ),
-        patch.object(kb_module, "create_background_job", side_effect=capture_create),
         patch.object(
-            kb_module, "_enqueue_background_job_or_503_async", side_effect=passthrough
+            kb_module,
+            "create_background_job",
+            side_effect=_capture_owner(
+                captured, "job-1", BackgroundJobType.KB_INGEST_WEB
+            ),
+        ),
+        patch.object(
+            kb_module, "_enqueue_background_job_or_503_async", side_effect=_passthrough
         ),
     ):
         response = _client(actor).post(
@@ -115,26 +130,6 @@ def test_document_ingest_job_owner_is_actor_not_team_storage_tenant(
 ) -> None:
     """The path the reported 404 came from: a file upload into a team KB."""
     captured: dict[str, int] = {}
-
-    def capture_create(
-        db: object, *, user_id: int, payload: dict[str, Any], **kwargs: object
-    ) -> BackgroundJob:
-        captured["job_user_id"] = user_id
-        captured["payload_user_id"] = int(payload["user_id"])
-        return BackgroundJob(
-            id="job-2",
-            user_id=user_id,
-            job_type=BackgroundJobType.KB_INGEST_DOCUMENT.value,
-            queue="kb_ingest",
-            status=BackgroundJobStatus.ENQUEUED.value,
-            payload=payload,
-            attempts=0,
-            max_attempts=3,
-        )
-
-    async def passthrough(db: object, job: BackgroundJob) -> BackgroundJob:
-        return job
-
     actor = _actor()
     team_access = KnowledgeBaseAccess(
         name="team-handbook", storage_user_id=STORAGE_ID, team_owned=True
@@ -168,11 +163,17 @@ def test_document_ingest_job_owner_is_actor_not_team_storage_tenant(
             "get_non_terminal_background_job_by_idempotency_key",
             return_value=None,
         ),
-        patch.object(kb_module, "create_background_job", side_effect=capture_create),
+        patch.object(
+            kb_module,
+            "create_background_job",
+            side_effect=_capture_owner(
+                captured, "job-2", BackgroundJobType.KB_INGEST_DOCUMENT
+            ),
+        ),
         patch.object(kb_module, "admit_kb_ingest_target"),
         patch.object(kb_module, "_cleanup_background_ingest_staging_file"),
         patch.object(
-            kb_module, "_enqueue_background_job_or_503_async", side_effect=passthrough
+            kb_module, "_enqueue_background_job_or_503_async", side_effect=_passthrough
         ),
     ):
         response = _client(actor).post(
