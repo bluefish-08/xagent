@@ -158,6 +158,14 @@ class TestSplitBySeparatorsCore:
 
         assert result == ["attach ", "documents ", "and ", "more"]
 
+    def test_adjacent_separators_do_not_form_a_punctuation_chunk(self) -> None:
+        """A separator that follows another separator has a delimiter but no
+        text of its own. Judging the piece by the whole string counts the
+        punctuation as content and emits a chunk holding only that."""
+        result = _split_by_separators_core("hello 。 world", None)
+
+        assert result == ["hello 。 ", "world"]
+
     def test_empty_separators_list_uses_default(self) -> None:
         text = "a\n\nb"
         result = _split_by_separators_core(text, [])

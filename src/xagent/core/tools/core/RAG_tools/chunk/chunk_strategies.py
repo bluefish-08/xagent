@@ -80,12 +80,13 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
         chunk = text_part + delimiter_part
         if not chunk:
             continue
-        if chunk.strip():
+        if text_part.strip():
             chunks.append(chunk)
         elif chunks:
-            # Whitespace-only runs (adjacent separators, e.g. "。 ") carry no
-            # text but are still part of the document. Dropping them silently
-            # deleted characters; they belong to the chunk they follow.
+            # Adjacent separators ("。 " after a space) leave a piece with a
+            # delimiter but no text. It is still part of the document, so it
+            # joins the chunk it follows - dropping it deleted characters, and
+            # keeping it standalone made a chunk of pure punctuation.
             chunks[-1] += chunk
         else:
             chunks.append(chunk)
