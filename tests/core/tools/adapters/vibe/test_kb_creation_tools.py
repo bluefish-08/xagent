@@ -31,6 +31,9 @@ from xagent.core.tools.core.RAG_tools.kb.operation_compatibility import (
     RollbackStatus,
     SideEffectPlane,
 )
+from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
+    _blocked_crawl_explanation,
+)
 
 
 class _FakeMetadataStore:
@@ -373,10 +376,13 @@ async def test_create_kb_from_url_blocked_crawl_is_not_reported_as_success(monke
         embeddings_created=6,
         crawled_urls=["https://example.com"],
         failed_urls={},
-        message=(
-            "Web ingestion incomplete: 1 documents from 1 page(s). No further "
-            "pages could be crawled - every link found was refused "
-            "(5 blocked by robots.txt rules)."
+        # Built by the pipeline rather than hand-written, so a change to the
+        # wording cannot leave this fixture asserting a format that no longer
+        # exists.
+        message=_blocked_crawl_explanation(
+            {"link_rejections": {"robots_txt": 5}},
+            documents_created=1,
+            pages_crawled=1,
         ),
         warnings=[],
         elapsed_time_ms=1,
@@ -405,7 +411,7 @@ async def test_create_kb_from_url_blocked_crawl_is_not_reported_as_success(monke
 
     assert result["success"] is False
     assert "blocked by robots.txt rules" in result["message"]
-    assert "Do not re-import" in result["message"]
+    assert "same crawl settings will hit the same refusals" in result["message"]
     assert result["pages_crawled"] == 1
     # The one page that did land is kept: re-importing would re-crawl it, and
     # discarding it helps nobody.

@@ -2279,9 +2279,9 @@ class WebIngestionResult(BaseModel):
         default=False,
         description=(
             "The crawl ended because the site refused every link past the "
-            "start page. Callers need this to tell such a partial from one "
-            "caused by individual pages failing to parse, which is not the "
-            "site's doing and keeps its existing success policy."
+            "start page. Only ever set alongside status='success' - a run with "
+            "page failures is already partial or error, and this flag is about "
+            "what the site did rather than about how ingestion went."
         ),
     )
     collection: str = Field(..., description="Target collection name")

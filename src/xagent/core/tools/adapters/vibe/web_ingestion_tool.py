@@ -206,8 +206,8 @@ async def _create_knowledge_base_from_url_impl(
                 collection_name=collection_name,
                 message=(
                     f"{result.message} '{collection_name}' is published and "
-                    f"usable with what did land. Do not re-import; the site "
-                    f"will refuse the same links again."
+                    f"usable with what did land. Re-importing under the same "
+                    f"crawl settings will hit the same refusals."
                 ),
                 pages_crawled=result.pages_crawled,
             ).model_dump()

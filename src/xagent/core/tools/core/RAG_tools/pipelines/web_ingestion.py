@@ -34,14 +34,7 @@ from ..utils.string_utils import sanitize_for_doc_id
 from ..utils.user_scope import resolve_user_scope
 from ..web_crawler import WebCrawler
 from ..web_crawler.crawler import STOPPED_NO_ELIGIBLE_LINKS
-from ..web_crawler.url_filter import (
-    REJECTED_EXCLUDED,
-    REJECTED_NOT_INCLUDED,
-    REJECTED_OFF_DOMAIN,
-    REJECTED_ROBOTS,
-    REJECTED_UNPARSABLE,
-    SITE_REJECTIONS,
-)
+from ..web_crawler.url_filter import REJECTED_ROBOTS, SITE_REJECTIONS
 from .document_ingestion import run_document_ingestion
 
 if TYPE_CHECKING:
@@ -49,13 +42,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Reason keys are internal identifiers; this text reaches an end user.
+# Reason keys are internal identifiers; this text reaches an end user. Only
+# SITE_REJECTIONS reasons are ever rendered, so this covers exactly those -
+# a reason added to that set needs a label here too.
 _REJECTION_LABELS = {
-    REJECTED_OFF_DOMAIN: "blocked by the same-domain rule",
-    REJECTED_EXCLUDED: "blocked by an exclude pattern",
-    REJECTED_NOT_INCLUDED: "outside the include patterns",
     REJECTED_ROBOTS: "blocked by robots.txt rules",
-    REJECTED_UNPARSABLE: "not a crawlable http(s) link",
 }
 
 
@@ -73,10 +64,13 @@ def _blocked_crawl_explanation(
         for reason in sorted(SITE_REJECTIONS)
         if rejections.get(reason)
     )
+    # Unreachable today - the stop reason this message explains requires a site
+    # rejection - but an empty parenthetical would read as a formatting bug.
+    cause = f" ({refused})" if refused else ""
     return (
         f"Only {documents_created} document(s) from {pages_crawled} page(s) "
-        f"could be imported: every link found was refused ({refused}). The "
-        f"pages that were reachable have been ingested."
+        f"could be imported: every link found was refused{cause}. The pages "
+        f"that were reachable have been ingested."
     )
 
 
