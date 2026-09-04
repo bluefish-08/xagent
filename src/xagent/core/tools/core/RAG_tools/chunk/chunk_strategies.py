@@ -64,22 +64,31 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
         separators = DEFAULT_SEPARATORS
 
     escaped_separators = [re.escape(sep) for sep in separators]
-    pattern = "|".join(f"({escaped_sep})" for escaped_sep in escaped_separators)
+    # One capturing group around the whole alternation, not one per separator:
+    # re.split emits an element for *every* group on each match, so N groups
+    # make the stride N+1 while the loop below walks it in twos. With the eight
+    # default separators that dropped every other delimiter, gluing words
+    # together ("CSV integration" -> "CSVintegration").
+    pattern = "(" + "|".join(escaped_separators) + ")"
 
     parts = re.split(pattern, text)
 
     chunks: List[str] = []
     for i in range(0, len(parts), 2):
-        if i + 1 < len(parts):
-            text_part = parts[i] if parts[i] is not None else ""
-            delimiter_part = parts[i + 1] if parts[i + 1] is not None else ""
-            chunk = text_part + delimiter_part
-            if chunk.strip():
-                chunks.append(chunk)
+        text_part = parts[i] or ""
+        delimiter_part = (parts[i + 1] or "") if i + 1 < len(parts) else ""
+        chunk = text_part + delimiter_part
+        if not chunk:
+            continue
+        if chunk.strip():
+            chunks.append(chunk)
+        elif chunks:
+            # Whitespace-only runs (adjacent separators, e.g. "。 ") carry no
+            # text but are still part of the document. Dropping them silently
+            # deleted characters; they belong to the chunk they follow.
+            chunks[-1] += chunk
         else:
-            text_part = parts[i] if parts[i] is not None else ""
-            if text_part.strip():
-                chunks.append(text_part)
+            chunks.append(chunk)
 
     return chunks
 

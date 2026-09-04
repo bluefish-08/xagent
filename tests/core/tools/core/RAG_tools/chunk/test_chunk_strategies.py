@@ -126,6 +126,38 @@ class TestSplitBySeparatorsCore:
         assert "block1" in result[0]
         assert "block2" in result[1] or "block3" in result[1]
 
+    def test_splitting_is_lossless(self) -> None:
+        """The one invariant a splitter owes its caller: rejoining the pieces
+        reproduces the input exactly. Nothing else here checked that, and every
+        other case uses a single separator, so a bug that dropped every other
+        delimiter across mixed separators went unseen."""
+        texts = [
+            "attach documents and Qualifications in bulk using our CSV integration.",
+            "Line one\n\nLine two\nLine three with words",
+            "第一句。第二句！第三句？结束",
+            "a, b, c. d e f",
+            "mixed\n\npara, with. all 。 separators！ present？ here",
+        ]
+        for text in texts:
+            assert "".join(_split_by_separators_core(text, None)) == text
+
+    def test_words_keep_their_spaces(self) -> None:
+        """The default separators include ' ', and one capturing group per
+        separator made re.split emit N elements per match while the reader
+        walked them in twos - so every other space vanished and words fused."""
+        text = "attach documents and Qualifications in bulk using our CSV integration."
+
+        assert "".join(_split_by_separators_core(text, None)) == text
+        assert "CSVintegration" not in "".join(_split_by_separators_core(text, None))
+
+    def test_delimiters_attach_to_the_preceding_chunk(self) -> None:
+        """The docstring's contract. One capturing group per separator makes
+        re.split emit N elements per match, so a two-step read lands on the
+        wrong element and delimiters end up leading the *next* chunk instead."""
+        result = _split_by_separators_core("attach documents and more", None)
+
+        assert result == ["attach ", "documents ", "and ", "more"]
+
     def test_empty_separators_list_uses_default(self) -> None:
         text = "a\n\nb"
         result = _split_by_separators_core(text, [])
