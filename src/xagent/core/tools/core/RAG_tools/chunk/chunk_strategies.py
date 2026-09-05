@@ -58,7 +58,9 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
         separators: List of separator strings to use for splitting (defaults applied inside)
 
     Returns:
-        List of text chunks with delimiters attached to the previous chunk
+        List of text chunks with delimiters attached to the previous chunk.
+        Joining them reproduces the input exactly - no character is dropped,
+        including runs that consist only of separators.
     """
     if not separators:
         separators = DEFAULT_SEPARATORS
@@ -75,8 +77,8 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
 
     chunks: List[str] = []
     for i in range(0, len(parts), 2):
-        text_part = parts[i] or ""
-        delimiter_part = (parts[i + 1] or "") if i + 1 < len(parts) else ""
+        text_part = parts[i]
+        delimiter_part = parts[i + 1] if i + 1 < len(parts) else ""
         chunk = text_part + delimiter_part
         if not chunk:
             continue
@@ -104,13 +106,21 @@ def _split_by_separators_with_metadata(
     separators: Optional[List[str]],
     source_paragraph: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Wrapper: returns structured chunks with metadata using the core splitter."""
+    """Wrapper: returns structured chunks with metadata using the core splitter.
+
+    Carries the core splitter's guarantee: joining the units reproduces the
+    input. A unit with no text of its own joins the one before it rather than
+    being dropped - between two protected regions that unit is the separator
+    holding them apart, and discarding it deletes it from the document.
+    """
     units = _split_by_separators_core(text, separators)
-    return [
-        {"text": unit, "source_paragraph": source_paragraph}
-        for unit in units
-        if unit.strip()
-    ]
+    out: List[Dict[str, Any]] = []
+    for unit in units:
+        if unit.strip() or not out:
+            out.append({"text": unit, "source_paragraph": source_paragraph})
+        else:
+            out[-1]["text"] += unit
+    return out
 
 
 def _find_protected_ranges(

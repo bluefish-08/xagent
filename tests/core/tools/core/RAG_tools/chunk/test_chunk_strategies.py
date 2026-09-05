@@ -1,9 +1,13 @@
 """Unit tests for chunk strategies (P0 token merge, P1 protected content & headers, custom separators)."""
 
+import pytest
+
 from xagent.core.tools.core.RAG_tools.chunk.chunk_strategies import (
     _find_protected_ranges,
     _split_by_headers,
     _split_by_separators_core,
+    _split_by_separators_with_metadata,
+    _split_by_separators_with_metadata_and_protection,
     apply_markdown_strategy,
     apply_recursive_strategy,
     attach_media_context,
@@ -166,12 +170,61 @@ class TestSplitBySeparatorsCore:
 
         assert result == ["hello 。 ", "world"]
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "x",
+            "no separators present here at all",
+            "。leading delimiter then text",
+            "trailing delimiter then nothing。",
+        ],
+    )
+    def test_splitting_is_lossless_at_the_edges(self, text: str) -> None:
+        assert "".join(_split_by_separators_core(text, None)) == text
+
+    def test_splitting_is_lossless_with_custom_separators(self) -> None:
+        """Every other case here uses the defaults, so a bug that only showed
+        up with a caller-supplied list would go unseen."""
+        text = "one|two||three|four"
+        assert "".join(_split_by_separators_core(text, ["||", "|"])) == text
+
     def test_empty_separators_list_uses_default(self) -> None:
         text = "a\n\nb"
         result = _split_by_separators_core(text, [])
         assert len(result) == 2
         assert "a" in result[0]
         assert "b" in result[1]
+
+
+class TestSplitWithMetadataIsLossless:
+    """The core splitter's guarantee has to survive the wrappers. It did not:
+    the metadata wrapper dropped whitespace-only units, and the protected-content
+    path - which apply_recursive_strategy uses by default - runs the wrapper once
+    per segment between fenced regions, so the separator holding two code blocks
+    apart was deleted."""
+
+    def test_metadata_wrapper_keeps_every_character(self) -> None:
+        text = "alpha beta\n\ngamma delta"
+        units = _split_by_separators_with_metadata(text, None)
+
+        assert "".join(u["text"] for u in units) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "intro text\n\n```\ncode here\n```\n\ntail words",
+            "a\n\n```\nx\n```\n\n```\ny\n```\n\nb",
+            "```\nonly a fence\n```",
+            "no fence anywhere in this text",
+        ],
+    )
+    def test_protected_regions_keep_the_text_between_them(self, text: str) -> None:
+        units = _split_by_separators_with_metadata_and_protection(
+            text, None, None, None
+        )
+
+        assert "".join(u["text"] for u in units) == text
 
 
 class TestApplyRecursiveStrategyCustomSeparators:
