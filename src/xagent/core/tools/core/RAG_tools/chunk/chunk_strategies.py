@@ -59,8 +59,9 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
 
     Returns:
         List of text chunks with delimiters attached to the previous chunk.
-        Joining them reproduces the input exactly - no character is dropped,
-        including runs that consist only of separators.
+        Joining *these* chunks reproduces the input exactly, separator-only
+        runs included. The guarantee is this function's alone: callers further
+        up strip and drop blank windows by design.
     """
     if not separators:
         separators = DEFAULT_SEPARATORS
@@ -91,6 +92,8 @@ def _split_by_separators_core(text: str, separators: Optional[List[str]]) -> Lis
             # keeping it standalone made a chunk of pure punctuation.
             chunks[-1] += chunk
         else:
+            # Only reachable for the very first fragment, when the text opens
+            # with a separator and there is nothing yet to attach it to.
             chunks.append(chunk)
 
     return chunks
@@ -108,19 +111,13 @@ def _split_by_separators_with_metadata(
 ) -> List[Dict[str, Any]]:
     """Wrapper: returns structured chunks with metadata using the core splitter.
 
-    Carries the core splitter's guarantee: joining the units reproduces the
-    input. A unit with no text of its own joins the one before it rather than
-    being dropped - between two protected regions that unit is the separator
-    holding them apart, and discarding it deletes it from the document.
+    Passes every unit through, which is what carries the core splitter's
+    lossless guarantee to this level. Filtering blank units here used to drop
+    the separator between two protected regions - the whole of a segment can be
+    blank when a code fence ends and the next one begins.
     """
     units = _split_by_separators_core(text, separators)
-    out: List[Dict[str, Any]] = []
-    for unit in units:
-        if unit.strip() or not out:
-            out.append({"text": unit, "source_paragraph": source_paragraph})
-        else:
-            out[-1]["text"] += unit
-    return out
+    return [{"text": unit, "source_paragraph": source_paragraph} for unit in units]
 
 
 def _find_protected_ranges(

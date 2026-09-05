@@ -145,15 +145,6 @@ class TestSplitBySeparatorsCore:
         for text in texts:
             assert "".join(_split_by_separators_core(text, None)) == text
 
-    def test_words_keep_their_spaces(self) -> None:
-        """The default separators include ' ', and one capturing group per
-        separator made re.split emit N elements per match while the reader
-        walked them in twos - so every other space vanished and words fused."""
-        text = "attach documents and Qualifications in bulk using our CSV integration."
-
-        assert "".join(_split_by_separators_core(text, None)) == text
-        assert "CSVintegration" not in "".join(_split_by_separators_core(text, None))
-
     def test_delimiters_attach_to_the_preceding_chunk(self) -> None:
         """The docstring's contract. One capturing group per separator makes
         re.split emit N elements per match, so a two-step read lands on the
@@ -204,10 +195,15 @@ class TestSplitWithMetadataIsLossless:
     per segment between fenced regions, so the separator holding two code blocks
     apart was deleted."""
 
-    def test_metadata_wrapper_keeps_every_character(self) -> None:
-        text = "alpha beta\n\ngamma delta"
+    def test_metadata_wrapper_keeps_a_blank_leading_unit(self) -> None:
+        """Text opening with a separator makes the core splitter emit a blank
+        first unit. Filtering blank units here is what deleted the separator
+        between two protected regions, so the input has to contain one - a
+        string with no blank unit passes whether or not the filter is there."""
+        text = "\n\nalpha beta"
         units = _split_by_separators_with_metadata(text, None)
 
+        assert [u["text"] for u in units] == ["\n\n", "alpha ", "beta"]
         assert "".join(u["text"] for u in units) == text
 
     @pytest.mark.parametrize(
@@ -225,6 +221,27 @@ class TestSplitWithMetadataIsLossless:
         )
 
         assert "".join(u["text"] for u in units) == text
+
+
+class TestApplyRecursiveStrategyKeepsWordsApart:
+    """The bug reached users through this entry point, not through the private
+    helpers, so the regression guard belongs here too. Every other test around
+    it asserts chunk counts and substring presence, neither of which notices
+    words fusing together."""
+
+    def test_words_are_not_fused(self) -> None:
+        """chunk_size is a character budget, so it is set well above the text
+        to keep the window from cutting words itself - what is under test is
+        the separator handling, not where the window lands."""
+        text = "attach documents and Qualifications in bulk using our CSV integration"
+        chunks = apply_recursive_strategy(
+            [{"text": text}], {"chunk_size": 500, "chunk_overlap": 0}
+        )
+
+        joined = " ".join(c["text"] for c in chunks)
+        for glued in ("CSVintegration", "documentsand", "inbulk", "usingour"):
+            assert glued not in joined
+        assert "CSV integration" in joined
 
 
 class TestApplyRecursiveStrategyCustomSeparators:
