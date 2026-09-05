@@ -17,10 +17,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import xagent.web.api.jobs as jobs_module
 import xagent.web.api.kb as kb_module
+from xagent.web.api.jobs import jobs_router
 from xagent.web.api.kb import _EffectiveKnowledgeBaseUser, kb_router
 from xagent.web.auth_dependencies import get_current_user
 from xagent.web.models.background_job import (
@@ -40,11 +43,22 @@ def _actor() -> User:
     return User(id=ACTOR_ID, username="member", email="m@example.com", is_admin=False)
 
 
+def _mock_db() -> MagicMock:
+    """Pin the one query the ingest paths make, as the sibling ingest tests do.
+
+    Left unpinned, ``UploadedFile ... .first()`` answers a truthy MagicMock and
+    the document path silently takes its "file already registered" branch.
+    """
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    return db
+
+
 def _client(actor: User) -> TestClient:
     app = FastAPI()
     app.include_router(kb_router)
     app.dependency_overrides[get_current_user] = lambda: actor
-    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[get_db] = _mock_db
     return TestClient(app)
 
 
@@ -74,6 +88,42 @@ def _capture_owner(
 
 async def _passthrough(db: object, job: BackgroundJob) -> BackgroundJob:
     return job
+
+
+@pytest.mark.parametrize(
+    ("owner_id", "expected_status"),
+    [(ACTOR_ID, 200), (STORAGE_ID, 404)],
+    ids=["owned-by-actor", "owned-by-storage-tenant"],
+)
+def test_member_polls_their_own_job_but_not_a_tenant_owned_one(
+    owner_id: int, expected_status: int
+) -> None:
+    """The 404 -> 200 transition itself, through the real ``_authorize_job``.
+
+    The ingest tests above pin which id the endpoint assigns; this pins what
+    that choice costs the member at the endpoint the browser actually polls.
+    ``owner_id=STORAGE_ID`` is the pre-fix state and reproduces the reported
+    failure verbatim.
+    """
+    job = BackgroundJob(
+        id="job-1",
+        user_id=owner_id,
+        job_type=BackgroundJobType.KB_INGEST_DOCUMENT.value,
+        queue="kb_ingest",
+        status=BackgroundJobStatus.ENQUEUED.value,
+        payload={"user_id": STORAGE_ID},
+        attempts=0,
+        max_attempts=3,
+    )
+    app = FastAPI()
+    app.include_router(jobs_router)
+    app.dependency_overrides[get_current_user] = _actor
+    app.dependency_overrides[get_db] = _mock_db
+
+    with patch.object(jobs_module, "get_background_job", return_value=job):
+        response = TestClient(app).get("/api/jobs/job-1")
+
+    assert response.status_code == expected_status
 
 
 def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
@@ -121,6 +171,8 @@ def test_web_ingest_job_owner_is_actor_not_team_storage_tenant() -> None:
     assert response.status_code == 202, response.text
     # Owned by the real member, so their own /api/jobs/{id} poll authorizes.
     assert captured["job_user_id"] == ACTOR_ID
+    # The id the browser reads back and polls with.
+    assert response.json()["user_id"] == ACTOR_ID
     # The worker still writes into the team storage tenant.
     assert captured["payload_user_id"] == STORAGE_ID
 
@@ -170,7 +222,7 @@ def test_document_ingest_job_owner_is_actor_not_team_storage_tenant(
                 captured, "job-2", BackgroundJobType.KB_INGEST_DOCUMENT
             ),
         ),
-        patch.object(kb_module, "admit_kb_ingest_target"),
+        patch.object(kb_module, "admit_kb_ingest_target") as admit,
         patch.object(kb_module, "_cleanup_background_ingest_staging_file"),
         patch.object(
             kb_module, "_enqueue_background_job_or_503_async", side_effect=_passthrough
@@ -184,4 +236,8 @@ def test_document_ingest_job_owner_is_actor_not_team_storage_tenant(
 
     assert response.status_code == 202, response.text
     assert captured["job_user_id"] == ACTOR_ID
+    assert response.json()["user_id"] == ACTOR_ID
     assert captured["payload_user_id"] == STORAGE_ID
+    # The per-target concurrency lock must stay tenant-keyed, or two members
+    # writing the same file would each take their own lock.
+    assert admit.call_args.kwargs["user_id"] == STORAGE_ID
