@@ -14,6 +14,7 @@ regression fails the suite instead of hanging CI.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from typing import Any, List
 from unittest.mock import patch
@@ -26,7 +27,7 @@ from xagent.providers.vector_store.lancedb import (
     get_async_connection_from_env,
 )
 
-JOIN_TIMEOUT = 30
+JOIN_TIMEOUT = 5
 
 
 @pytest.fixture(autouse=True)
@@ -113,12 +114,14 @@ def test_many_loops_reuse_one_pooled_connection() -> None:
     assert len(created) == 1, f"connect_async ran {len(created)} times, expected 1"
 
 
-def test_clear_connection_cache_drops_and_closes_async_connections() -> None:
+def test_clear_connection_cache_forces_a_fresh_async_connection() -> None:
     """``reset_rag_storage_for_tests`` relies on this to reset *all* state.
 
-    Before the pool existed, the async connection died with the store instance
-    that `StorageFactory.reset_all()` threw away; now it outlives that, so the
-    cache clear has to take it down.
+    Before the pool existed, the async connection went away with the store
+    instance that `StorageFactory.reset_all()` dropped; now it outlives that,
+    so clearing the cache is what forces the next connect. The pooled
+    connection is deliberately *not* closed -- stores hold theirs across
+    awaits, so closing here would strand an in-flight coroutine.
     """
     connect_async, created = _slow_connect_async(delay=0.0)
     results: List[Any] = []
@@ -127,13 +130,15 @@ def test_clear_connection_cache_drops_and_closes_async_connections() -> None:
     with patch.object(lancedb_module.lancedb, "connect_async", connect_async):
         thread = _run_in_own_loop(get_async_connection_from_env, results, errors)
         thread.join(timeout=JOIN_TIMEOUT)
+        assert not thread.is_alive()
         assert not errors and len(results) == 1
 
         clear_connection_cache()
-        assert created[0].closed, "cleared async connection was not closed"
+        assert not created[0].closed, "a pooled connection must not be closed"
 
         thread = _run_in_own_loop(get_async_connection_from_env, results, errors)
         thread.join(timeout=JOIN_TIMEOUT)
+        assert not thread.is_alive()
 
     assert not errors, f"async connection init raised: {errors}"
     assert len(created) == 2, "cache clear must force a fresh connect_async"
@@ -169,3 +174,41 @@ def test_store_async_methods_share_the_pool_across_loops() -> None:
     assert all(conn is results[0] for conn in results)
     assert not hasattr(vector_store, "_async_lock")
     assert not hasattr(status_store, "_async_lock")
+
+
+def test_real_async_connection_survives_a_second_event_loop() -> None:
+    """The premise the pool rests on, checked against real lancedb.
+
+    Every other test here fakes ``connect_async``, so none of them would notice
+    if a lancedb upgrade started binding connections to their creating loop.
+    This one does the crossing for real: build and write on one loop, then read
+    and write the same connection from another after the first is gone.
+    """
+    import lancedb
+
+    holder: dict = {}
+    errors: List[str] = []
+
+    async def create() -> int:
+        conn = await lancedb.connect_async(os.environ["LANCEDB_DIR"])
+        table = await conn.create_table("crossloop", data=[{"x": 1}])
+        holder["conn"] = conn
+        return await table.count_rows()
+
+    async def reuse() -> int:
+        table = await holder["conn"].open_table("crossloop")
+        await table.add([{"x": 2}])
+        return await table.count_rows()
+
+    first: List[Any] = []
+    thread = _run_in_own_loop(create, first, errors)
+    thread.join(timeout=JOIN_TIMEOUT)
+    assert not thread.is_alive()
+    assert not errors, f"creating loop raised: {errors}"
+
+    second: List[Any] = []
+    thread = _run_in_own_loop(reuse, second, errors)
+    thread.join(timeout=JOIN_TIMEOUT)
+    assert not thread.is_alive(), "reusing the connection on a second loop hung"
+    assert not errors, f"second loop raised: {errors}"
+    assert first == [1] and second == [2]
