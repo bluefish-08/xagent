@@ -669,9 +669,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         if not use_cache:
             return table
         discarded = None
-        # Unlocked, this read-modify-write is atomic only by grace of the GIL,
-        # so no test can trip it on CPython 3.12; the lock is what keeps it
-        # correct under free-threading.
+        # Unlocked, an insert landing inside invalidate_table_cache's own
+        # critical section is dropped by its clear() while absent from its
+        # stale snapshot, so that handle is never cached and never closed.
         with self._table_cache_lock:
             existing = self._table_cache.get(table_name)
             if existing is not None:

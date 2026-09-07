@@ -16,9 +16,9 @@ What actually trips these tests on an unguarded cache is the crash -- a
 ``move_to_end`` racing a concurrent ``clear``/``pop`` raises ``KeyError``.
 The conservation law is what catches a dropped ``_safe_close_table``.
 
-Note what is NOT reachable from a test: the cache-insert section's
-read-modify-write is atomic under the GIL, so removing its lock cannot be made
-to fail on CPython 3.12. That lock earns its place under free-threading only.
+Both locks are load-bearing: dropping either one loses the conservation law,
+because an unlocked insert can land inside the other's critical section and be
+erased by its ``clear()`` without ever appearing in its stale snapshot.
 """
 
 from __future__ import annotations
@@ -117,10 +117,17 @@ def test_concurrent_open_of_one_table_leaks_no_handle() -> None:
 
 
 def test_concurrent_get_and_invalidate_leaks_no_handle() -> None:
-    """Interleaved cache fills and invalidations must stay consistent."""
+    """Interleaved cache fills and invalidations must stay consistent.
+
+    Dropping ``invalidate_table_cache``'s lock fails this every run. Dropping
+    the insert-section lock fails it about one run in five: that window is only
+    a few bytecodes wide, and widening it further would mean a test hook inside
+    ``_get_table``. The table and invalidator counts below are tuned for those
+    odds -- raising the duration does not help, the window is what limits it.
+    """
     connection = _RacyConnection(delay=0.001, close_delay=0.002)
     store = _store_on(connection)
-    names = [f"table_{index}" for index in range(6)]
+    names = [f"table_{index}" for index in range(48)]
     errors: List[BaseException] = []
     stop = threading.Event()
 
@@ -140,7 +147,7 @@ def test_concurrent_get_and_invalidate_leaks_no_handle() -> None:
             errors.append(exc)
 
     threads = [threading.Thread(target=filler, args=(name,)) for name in names]
-    threads += [threading.Thread(target=invalidator) for _ in range(2)]
+    threads += [threading.Thread(target=invalidator) for _ in range(4)]
     for thread in threads:
         thread.start()
     threading.Event().wait(0.5)
