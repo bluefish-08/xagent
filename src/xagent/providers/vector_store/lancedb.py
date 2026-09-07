@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import lancedb
@@ -29,6 +29,7 @@ __all__ = [
     "LanceDBConnectionManager",
     "LanceDBVectorStore",
     "clear_connection_cache",
+    "get_async_connection_from_env",
     "get_connection",
     "get_connection_from_env",
 ]
@@ -37,18 +38,67 @@ __all__ = [
 _connection_cache: Dict[str, Tuple[DBConnection, float]] = {}
 _cache_lock = RLock()
 
+# Async connections are cached separately: they carry no TTL and are guarded by
+# a threading lock rather than an asyncio one, so a single cached connection is
+# reachable from every event loop in the process. An asyncio.Lock here would
+# bind to whichever loop first contended it and deadlock the others.
+_async_connection_cache: Dict[str, Any] = {}
+_async_cache_lock = Lock()
+
 # Connection TTL (seconds), default 5 minutes
 CONNECTION_TTL = int(os.getenv("LANCEDB_CONNECTION_TTL", "300"))
 
 
 def clear_connection_cache() -> None:
-    """Clear the global LanceDB connection cache.
+    """Clear the global LanceDB connection caches, sync and async.
 
     This is primarily intended for test isolation to avoid reusing cached
     connections across different `LANCEDB_DIR` values.
     """
     with _cache_lock:
         _connection_cache.clear()
+    with _async_cache_lock:
+        stale = list(_async_connection_cache.values())
+        _async_connection_cache.clear()
+    for conn in stale:
+        try:
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Error closing cached async connection: %s", exc)
+
+
+async def get_async_connection_from_env(env_var: str = "LANCEDB_DIR") -> Any:
+    """Get a process-wide async LanceDB connection for the env-configured dir.
+
+    The URI is taken from the sync connection so both planes always agree on
+    the directory.
+    """
+    sync_conn = get_connection_from_env(env_var)
+    uri = getattr(sync_conn, "uri", None)
+    if uri is None:
+        uri = LanceDBConnectionManager.get_default_lancedb_dir()
+
+    with _async_cache_lock:
+        cached = _async_connection_cache.get(uri)
+    if cached is not None:
+        return cached
+
+    # connect_async is awaited outside the lock; a concurrent opener may win the
+    # insert below, in which case this connection is closed.
+    conn = await lancedb.connect_async(uri)  # type: ignore[attr-defined]
+    discarded = None
+    with _async_cache_lock:
+        existing = _async_connection_cache.get(uri)
+        if existing is not None:
+            discarded, conn = conn, existing
+        else:
+            _async_connection_cache[uri] = conn
+    if discarded is not None:
+        try:
+            discarded.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Error closing superseded async connection: %s", exc)
+    return conn
 
 
 class LanceDBConnectionManager:
