@@ -31,6 +31,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+    LanceDBIngestionStatusStore,
+    LanceDBMainPointerStore,
+    LanceDBMetadataStore,
+    LanceDBPromptTemplateStore,
     LanceDBVectorIndexStore,
 )
 
@@ -187,20 +191,37 @@ async def test_concurrent_to_thread_handle_calls_share_no_mutable_connection() -
     _assert_every_handle_cached_or_closed(connection, store)
 
 
+@pytest.mark.parametrize(
+    ("store_class", "getter_name", "cache_attr"),
+    [
+        (LanceDBMetadataStore, "get_raw_connection", "_conn"),
+        (LanceDBVectorIndexStore, "_get_connection", "_conn"),
+        (LanceDBIngestionStatusStore, "_get_sync_connection", "_sync_conn"),
+        (LanceDBPromptTemplateStore, "_get_sync_connection", "_sync_conn"),
+        (LanceDBMainPointerStore, "_get_sync_connection", "_sync_conn"),
+    ],
+)
 @patch(
     "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
 )
-def test_connection_is_not_cached_on_the_instance(mock_get_connection: Mock) -> None:
+def test_connection_is_not_cached_on_the_instance(
+    mock_get_connection: Mock,
+    store_class: type,
+    getter_name: str,
+    cache_attr: str,
+) -> None:
     """Connections come from the process-wide pool, which holds its own lock.
 
     A per-instance cache would be unguarded shared state and would also outlive
-    both the pool's TTL and ``clear_connection_cache()``.
+    both the pool's TTL and ``clear_connection_cache()``. Every store that was
+    carrying one is covered, so re-adding a cache to any of them fails here.
     """
     conn: Any = Mock()
     mock_get_connection.return_value = conn
-    store = LanceDBVectorIndexStore()
+    store = store_class()
+    getter = getattr(store, getter_name)
 
-    assert not hasattr(store, "_conn")
-    assert store._get_connection() is conn
-    assert store._get_connection() is conn
+    assert not hasattr(store, cache_attr)
+    assert getter() is conn
+    assert getter() is conn
     assert mock_get_connection.call_count == 2
