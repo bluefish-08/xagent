@@ -669,6 +669,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         if not use_cache:
             return table
         discarded = None
+        # Unlocked, this read-modify-write is atomic only by grace of the GIL,
+        # so no test can trip it on CPython 3.12; the lock is what keeps it
+        # correct under free-threading.
         with self._table_cache_lock:
             existing = self._table_cache.get(table_name)
             if existing is not None:
@@ -684,8 +687,8 @@ class LanceDBVectorIndexStore(VectorIndexStore):
     def invalidate_table_cache(self, table_name: str | None = None) -> None:
         """Clear table cache after drop/delete to avoid stale handles.
 
-        Handles are dropped from the cache under the lock and closed outside
-        it, so underlying file descriptors are released promptly.
+        Handles are dropped from the cache under the lock, then closed outside
+        it so a blocking close never runs while the lock is held.
         """
         from ..LanceDB.schema_manager import _safe_close_table
 

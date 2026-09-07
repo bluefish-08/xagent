@@ -3,13 +3,22 @@
 The coordinator offloads blocking handle calls with ``asyncio.to_thread``. Once
 those are awaited concurrently on a shared loop, several worker threads reach a
 single process-wide store instance at the same time. These tests pin the two
-pieces of shared state that made that unsafe: the table-handle cache, and the
-per-instance connection cache that no longer exists.
+pieces of *synchronous* shared state that made that unsafe: the table-handle
+cache, and the per-instance sync connection cache that no longer exists.
+
+Async connection init is NOT covered here and is not safe yet: ``_async_conn``
+is still guarded by an ``asyncio.Lock`` that deadlocks when reached from more
+than one event loop. Tracked in #2200.
 
 The table-cache assertion is a conservation law rather than a race detector:
 every handle ``open_table`` returns must end up either in the cache or closed.
-An unguarded cache loses that -- two threads opening the same table overwrite
-one another, and the loser is neither cached nor closed, leaking its handle.
+What actually trips these tests on an unguarded cache is the crash -- a
+``move_to_end`` racing a concurrent ``clear``/``pop`` raises ``KeyError``.
+The conservation law is what catches a dropped ``_safe_close_table``.
+
+Note what is NOT reachable from a test: the cache-insert section's
+read-modify-write is atomic under the GIL, so removing its lock cannot be made
+to fail on CPython 3.12. That lock earns its place under free-threading only.
 """
 
 from __future__ import annotations
