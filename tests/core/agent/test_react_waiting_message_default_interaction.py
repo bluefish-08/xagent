@@ -256,6 +256,131 @@ async def test_model_supplied_interactions_are_not_augmented() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "picker_type", ["select_one", "select_multiple", "action_cards"]
+)
+async def test_a_picker_whose_options_were_all_blank_is_replaced(
+    picker_type: str,
+) -> None:
+    """The list is non-empty and still unanswerable.
+
+    ``_normalize_ask_user_interactions`` drops blank options but keeps the
+    interaction itself, so a picker whose every option was blank arrives here
+    as an entry with ``options == []`` -- a control with nothing to select,
+    which is the same dead end an empty list is. An emptiness test lets it
+    through; the answerability test replaces it.
+    """
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Which one?",
+            "interactions": [
+                {
+                    "type": picker_type,
+                    "field": "choice",
+                    "label": "Choice",
+                    "options": [{"label": "  ", "value": ""}],
+                }
+            ],
+        },
+    )
+    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
+    """``_normalize_ask_user_interactions`` warns about a non-list ``options``
+    and then leaves it exactly as the model wrote it. A truthy non-list is
+    still nothing the render surface can iterate, so answerability has to test
+    the type, not just truthiness."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Which one?",
+            "interactions": [
+                {
+                    "type": "select_one",
+                    "field": "choice",
+                    "label": "Choice",
+                    "options": "auto",
+                }
+            ],
+        },
+    )
+    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        {"type": "confirm", "field": "ok", "label": "Proceed?"},
+        {"type": "file_upload", "field": "doc", "label": "Upload"},
+        {"type": "number_input", "field": "n", "label": "How many?"},
+        {"type": "text_input", "field": "note", "label": "Note"},
+        {"type": "something_new", "field": "x", "label": "X"},
+    ],
+    ids=["confirm", "file_upload", "number_input", "text_input", "unknown_type"],
+)
+async def test_a_type_that_needs_no_options_is_left_alone(
+    interaction: dict[str, Any],
+) -> None:
+    """The answerability test must not fire on the types that never render
+    options -- replacing one of those would throw away the model's real
+    question. An unrecognized type counts as answerable too: refusing it is
+    the write side's job, not this substitution's."""
+
+    _, runtime = await _run(
+        "ask_user_question", {"message": "Well?", "interactions": [interaction]}
+    )
+    published = _published_interactions(runtime)
+    assert [item["type"] for item in published] == [interaction["type"]]
+
+
+@pytest.mark.asyncio
+async def test_one_answerable_field_keeps_the_whole_list() -> None:
+    """The substitution is all-or-nothing: one usable control is enough, and
+    the unusable one beside it is published as the model wrote it rather than
+    being pruned. Pruning is the write side's decision, not this one's."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Which city?",
+            "interactions": [
+                {"type": "select_one", "field": "empty", "label": "E", "options": []},
+                {
+                    "type": "select_one",
+                    "field": "city",
+                    "label": "City",
+                    "options": [{"label": "Paris", "value": "paris"}],
+                },
+            ],
+        },
+    )
+    assert [item["field"] for item in _published_interactions(runtime)] == [
+        "empty",
+        "city",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_each_substitution_publishes_its_own_copy() -> None:
+    """The default lives in a module-level dict. Publishing it by reference
+    would let any reader that edits what it was handed corrupt every later
+    waiting message in the process."""
+
+    _, first = await _run("ask_user_question", {"message": "One?"})
+    published = _published_interactions(first)
+    published[0]["field"] = "mutated"
+
+    _, second = await _run("ask_user_question", {"message": "Two?"})
+    assert _published_interactions(second) == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
 async def test_default_field_passes_the_write_side_validator() -> None:
     """The injected field has to survive the same admissibility rules the
     model-supplied ones do, or the substitution buys nothing."""

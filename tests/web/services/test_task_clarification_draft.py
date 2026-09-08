@@ -470,17 +470,16 @@ def test_payload_round_trip_matches_the_legacy_reader_shape_for_a_send_message_d
     for the legacy transcript path -- checked against that real function,
     not against this module's own return-type promise.
 
-    ``send_message`` is the source that actually reaches this comparison
-    with no interactions: its waiting request never carries an
-    ``"interactions"`` key at all (see the ``send_message`` branch of
-    ``ReActPattern._handle_control_tool`` in ``react.py``), so
-    ``draft_from_waiting_request`` always builds it with an empty
-    ``interactions`` tuple, and the websocket outbound-message path that
-    persists the matching chat row (``websocket.py``, the
-    ``expect_response`` branch) never passes an ``interactions`` keyword
-    either, leaving the column ``NULL``. Both readers must call that "no
-    interactions", i.e. ``None`` -- never ``[]``, which would claim a form
-    existed when none did.
+    The keyless waiting request built below is the shape a ``send_message``
+    pause used to produce and the shape an older checkpoint still holds; a
+    live run now carries the engine's substituted free-text field instead
+    (see ``ReActPattern._send_waiting_message`` in ``react.py``). What is
+    pinned here is the no-interactions comparison itself, which that legacy
+    shape is what still reaches: ``draft_from_waiting_request`` builds an
+    empty ``interactions`` tuple from it, and the row persisted below passes
+    no ``interactions`` keyword, leaving the column ``NULL``. Both readers
+    must call that "no interactions", i.e. ``None`` -- never ``[]``, which
+    would claim a form existed when none did.
     """
 
     engine = _engine(tmp_path)

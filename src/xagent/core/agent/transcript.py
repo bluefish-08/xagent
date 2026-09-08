@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ..context_ref import CONTEXT_REFS_KEY, normalize_context_references
+from ..tools.adapters.vibe.interaction_types import DEFAULT_WAITING_INTERACTION
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,11 @@ def build_assistant_transcript_content(
     if interactions:
         interaction_lines: List[str] = []
         for interaction in interactions:
+            # The engine substitutes this field wherever a suspending message
+            # would carry no control at all; it says nothing the prose does
+            # not, and every waiting turn would otherwise replay it.
+            if interaction == DEFAULT_WAITING_INTERACTION:
+                continue
             interaction_type = _get_interaction_attr(interaction, "type")
             options = _get_interaction_attr(interaction, "options") or []
             label = _get_interaction_attr(interaction, "label")

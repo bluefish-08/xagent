@@ -47,8 +47,9 @@ POSTGRES_DATABASE = "xagent_test"
 MIN_SERVER_VERSION_NUM = 170000
 SKILL_INDEX_SENTINEL = "Pool handoff regression fixture"
 QUESTION = "Which deployment target should I use?"
-# Mirrors react._default_waiting_interaction as a literal on purpose: a change
-# to the published shape must fail here rather than follow the source.
+# Mirrors interaction_types.DEFAULT_WAITING_INTERACTION as a literal on
+# purpose: a change to the published shape must fail here, not follow the
+# source.
 DEFAULT_WAITING_FIELD = {
     "type": "text_input",
     "field": "response",

@@ -68,7 +68,11 @@ from ....file_ref import (
 )
 from ....model.chat.exceptions import LLMToolProtocolError
 from ....model.chat.tool_protocol import get_tool_protocol_error
-from ....tools.adapters.vibe.interaction_types import INTERACTION_TYPES
+from ....tools.adapters.vibe.interaction_types import (
+    DEFAULT_WAITING_INTERACTION,
+    INTERACTION_TYPES,
+    TYPES_REQUIRING_OPTIONS,
+)
 from ....tools.user_interaction import (
     tool_result_waits_for_user,
     user_interaction_resume_callable,
@@ -131,9 +135,6 @@ UNGROUPED_TOOL_DECISION_CATEGORIES = frozenset({"basic", "other"})
 # module's untrusted-input logging: bounded length, escaped, never raw.
 STRIP_LOG_MAX_TOOL_NAMES = 8
 STRIP_LOG_MAX_TOOL_NAME_CHARS = 64
-# Only ever injected into an otherwise empty interaction list, so this base
-# name can never collide with the callers' _2/_3 dedup suffixes.
-DEFAULT_WAITING_INTERACTION_FIELD = "response"
 REACT_RESPONSE_LANGUAGE_DESCRIPTION = (
     "Target natural language for user-facing prose in this ReAct response, "
     "for example English, Simplified Chinese, Traditional Chinese, or Spanish. "
@@ -399,22 +400,25 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _default_waiting_interaction() -> dict[str, Any]:
-    """The free-text field a suspended run falls back to.
+def _is_answerable(interaction: Any) -> bool:
+    """Whether a user handed this control could produce an answer with it.
 
-    Honours xagent#1528's "no controls means answer in free text" contract on
-    the write side, so no reader has to infer it. Carried by both surfaces a
-    reader can use: the outbound message's metadata and the waiting request
-    the structured interaction row is built from.
+    Only the pick-from-a-list types can fail: emptied options survive
+    ``_normalize_ask_user_interactions`` as an entry with nothing to select
+    (that function drops the blank options, not the interaction), and a
+    malformed non-list ``options`` survives it untouched, which the render
+    surface cannot iterate either. Every other type renders an input that
+    stands on its own, and an unrecognized type is treated as answerable
+    rather than silently replaced -- the write-side admissibility rules are
+    what refuse those.
     """
 
-    return {
-        "type": "text_input",
-        "field": DEFAULT_WAITING_INTERACTION_FIELD,
-        "label": "Your response",
-        "placeholder": "Type your answer",
-        "multiline": True,
-    }
+    if not isinstance(interaction, dict):
+        return False
+    if interaction.get("type") in TYPES_REQUIRING_OPTIONS:
+        options = interaction.get("options")
+        return isinstance(options, list) and bool(options)
+    return True
 
 
 class ReActPattern(AgentPattern):
@@ -2575,9 +2579,18 @@ class ReActPattern(AgentPattern):
         non-suspending messages, which must stay field-free, and the callers
         need the published list back to store on the waiting request -- which
         is also what the structured interaction row is built from.
+
+        A list with nothing answerable in it is replaced, not appended to:
+        every entry in it is a control the user cannot use, and replacing
+        keeps the substituted field the only one, so its base name cannot
+        collide with a caller's ``_2``/``_3`` dedup suffixes.
         """
 
-        published = interactions or [_default_waiting_interaction()]
+        published = (
+            interactions
+            if any(_is_answerable(item) for item in interactions)
+            else [dict(DEFAULT_WAITING_INTERACTION)]
+        )
         outbound_message = await runtime.send_message(
             message=message,
             message_type=message_type,

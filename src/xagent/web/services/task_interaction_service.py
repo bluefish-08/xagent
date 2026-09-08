@@ -120,7 +120,10 @@ from ...core.agent.checkpoint import (
 )
 from ...core.agent.pattern.react.react import _normalize_interaction_text
 from ...core.tools.adapters.vibe.ask_user_tool import AskUserQuestionArgs
-from ...core.tools.adapters.vibe.interaction_types import INTERACTION_TYPES
+from ...core.tools.adapters.vibe.interaction_types import (
+    INTERACTION_TYPES,
+    TYPES_REQUIRING_OPTIONS,
+)
 from ..models.task import Task, TaskStatus, TaskStatusPredicate, TraceEvent
 from ..models.task_command import TaskExecutionCommand
 from ..models.task_interaction import (
@@ -1078,9 +1081,10 @@ _V1_INTERACTION_TYPES = frozenset(INTERACTION_TYPES)
 # (``frontend/src/components/chat/clarification-form.tsx``), while
 # ``confirm`` renders a switch, ``text_input`` a field, ``number_input`` a
 # spinner, and ``file_upload`` a picker -- none of which read ``options``.
-_V1_TYPES_REQUIRING_OPTIONS = frozenset(
-    {"select_one", "select_multiple", "action_cards"}
-)
+# Shared with the engine, which replaces -- rather than refuses, as this side
+# does -- a suspending message whose only controls are these with nothing to
+# select.
+_V1_TYPES_REQUIRING_OPTIONS = TYPES_REQUIRING_OPTIONS
 
 
 @dataclass(frozen=True)
@@ -1205,12 +1209,12 @@ def validate_v1_write_payload(parsed: AskUserQuestionArgs) -> None:
     ``build_clarification_payload`` (``task_clarification_draft.py``) is a
     second producer of this same shape and its output has to keep passing
     here, pinned by a test that feeds this function that builder's real
-    output. Two of that builder's shapes are the reason for the boundaries
-    drawn below. An empty ``interactions`` list is accepted: a
-    ``send_message``-sourced draft never carries interactions, and an
-    over-size form is deliberately dropped to ``[]`` rather than truncated
-    to half a form -- both are questions with prose and no form, which the
-    read surface renders. A blank ``message`` is rejected, and that costs
+    output. An empty ``interactions`` list is accepted: an over-size form is
+    deliberately dropped to ``[]`` rather than truncated to half a form, and
+    that is a question with prose and no form, which the read surface
+    renders. (A ``send_message``-sourced draft used to be the other such
+    shape; it now carries the engine's substituted free-text field, so its
+    list is never empty.) A blank ``message`` is rejected, and that costs
     the builder nothing: ``resolve_publishable_clarification`` already
     classifies a payload whose message is blank after filtering as
     ``NotApplicable("empty_question")`` and never offers it for writing.

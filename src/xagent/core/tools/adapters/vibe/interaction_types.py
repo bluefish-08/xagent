@@ -1,4 +1,7 @@
-"""The interaction types the ask_user_question render surface implements.
+"""The interaction types the ask_user_question render surface implements,
+plus two more constants about that surface -- one subset of these types, one
+literal field -- that the engine, the transcript builder and the web layer
+all have to agree on.
 
 Kept in a module of its own rather than beside ``InteractionArg`` in
 ``ask_user_tool``, which is where the model that carries the field lives:
@@ -31,3 +34,22 @@ INTERACTION_TYPES: tuple[str, ...] = (
     "number_input",
     "action_cards",
 )
+
+# The subset whose whole purpose is picking from a supplied list, so one of
+# them carrying no options is a control nobody can answer. Shared so the
+# write-side admissibility rule and the engine's answerability check cannot
+# drift apart.
+TYPES_REQUIRING_OPTIONS: frozenset[str] = frozenset(
+    {"select_one", "select_multiple", "action_cards"}
+)
+
+# The free-text field the engine substitutes when a suspending message would
+# otherwise carry nothing answerable. Copy before publishing -- readers keep
+# what they are handed, and this dict is shared.
+DEFAULT_WAITING_INTERACTION: dict[str, object] = {
+    "type": "text_input",
+    "field": "response",
+    "label": "Your response",
+    "placeholder": "Type your answer",
+    "multiline": True,
+}

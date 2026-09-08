@@ -410,14 +410,13 @@ def parse_clarification_payload(
     ``interactions`` comes back ``None``, not ``[]``, whenever the payload
     carries no interaction items. ``get_latest_waiting_question`` itself is
     not this consistent: it returns ``None`` for a persisted row whose
-    ``interactions`` column is ``NULL`` (the shape a ``send_message``-
-    sourced draft always produces, since that source's payload never has
-    any interactions to carry), but it returns ``[]`` for a row whose
-    column holds an actual empty list -- the shape an empty-form
-    ``ask_user_question`` call produces (a legal call: ``ask_user_question``
-    is classified by whether its request carries an ``interactions`` key at
-    all, not by whether that key's value is non-empty; see
-    ``draft_from_waiting_request``). That ``NULL``-vs-``[]`` split on the
+    ``interactions`` column is ``NULL`` but ``[]`` for a row whose column
+    holds an actual empty list. No ReAct run writes either shape any more --
+    every suspending path publishes at least one answerable field, and
+    ``draft_from_waiting_request`` classifies ``ask_user_question`` by
+    ``tool_name`` rather than by the presence of an ``interactions`` key --
+    so both are now reachable only from rows an older schema wrote. That
+    ``NULL``-vs-``[]`` split on the
     legacy side is a known, un-reconciled divergence, not something this
     function reproduces: every empty case collapses to ``None`` here,
     deliberately, so a caller checking "did this turn have interactions"

@@ -212,7 +212,11 @@ async def test_empty_message_send_message_still_yields_an_answerable_draft() -> 
     key, no ``"requests"`` list -- which is the worst version of the bug the
     default free-text field exists for: nothing to read and nothing to answer
     with. The substituted field now supplies the ``"interactions"`` key, so a
-    draft is derivable and the structured interaction row can be written.
+    draft is derivable. Only the draft: a blank message is still refused
+    downstream (``resolve_publishable_clarification`` returns
+    ``NotApplicable("empty_question")``, and ``websocket.py`` persists no chat
+    row for an empty message), so this case ends the turn with an answerable
+    field published and nothing durable holding it.
     """
 
     llm = FakeLLM(
