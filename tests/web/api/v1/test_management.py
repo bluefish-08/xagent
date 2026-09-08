@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from xagent.templates.manager import TemplateManager
 from xagent.web.models.agent import Agent
 from xagent.web.models.model import Model as DBModel
-from xagent.web.models.user import User, UserModel
+from xagent.web.models.user import User, UserDefaultModel, UserModel
 
 from ..conftest import _admin_headers, _direct_db_session, app_for_tests, client
 
@@ -397,6 +397,47 @@ def test_from_template_creates_agent(template_manager):
     assert body["agent"]["knowledge_bases"] == []
     assert body["agent"]["suggested_prompts"] == ["Ask anything"]
     assert body["api_key"]["full_key"].startswith("xag_")
+
+
+def test_from_template_inherits_owner_default_general_model(template_manager):
+    """No template's agent_config sets `models`, so without the server-side
+    fallback the agent lands with a NULL config and the builder shows "--"."""
+    from xagent.web.services.hot_path_cache import invalidate_model_cache
+
+    key = _personal_key()
+    db = _direct_db_session()
+    try:
+        admin = db.query(User).filter(User.username == "admin").first()
+        assert admin is not None
+        model = DBModel(
+            model_id="own-default-model",
+            category="llm",
+            model_provider="openai",
+            model_name="gpt-4o",
+            api_key="test-api-key",
+            base_url="https://api.openai.com/v1",
+            is_active=True,
+        )
+        db.add(model)
+        db.flush()
+        db.add(UserModel(user_id=admin.id, model_id=model.id, is_owner=True))
+        db.add(
+            UserDefaultModel(user_id=admin.id, model_id=model.id, config_type="general")
+        )
+        db.commit()
+        model_id = int(model.id)
+        admin_id = int(admin.id)
+    finally:
+        db.close()
+    invalidate_model_cache(admin_id)
+
+    resp = client.post(
+        "/v1/agents/from-template",
+        headers=_bearer(key),
+        json={"template_id": "qa", "name": "Template agent with model"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent"]["models"]["general"] == model_id
 
 
 def test_from_template_strips_agent_tool_category(template_manager):
