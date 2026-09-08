@@ -131,6 +131,9 @@ UNGROUPED_TOOL_DECISION_CATEGORIES = frozenset({"basic", "other"})
 # module's untrusted-input logging: bounded length, escaped, never raw.
 STRIP_LOG_MAX_TOOL_NAMES = 8
 STRIP_LOG_MAX_TOOL_NAME_CHARS = 64
+# Only ever injected into an otherwise empty interaction list, so this base
+# name can never collide with the callers' _2/_3 dedup suffixes.
+DEFAULT_WAITING_INTERACTION_FIELD = "response"
 REACT_RESPONSE_LANGUAGE_DESCRIPTION = (
     "Target natural language for user-facing prose in this ReAct response, "
     "for example English, Simplified Chinese, Traditional Chinese, or Spanish. "
@@ -394,6 +397,24 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
         )
 
     return normalized
+
+
+def _default_waiting_interaction() -> dict[str, Any]:
+    """The free-text field a suspended run falls back to.
+
+    Honours xagent#1528's "no controls means answer in free text" contract on
+    the write side, so no reader has to infer it. Carried by both surfaces a
+    reader can use: the outbound message's metadata and the waiting request
+    the structured interaction row is built from.
+    """
+
+    return {
+        "type": "text_input",
+        "field": DEFAULT_WAITING_INTERACTION_FIELD,
+        "label": "Your response",
+        "placeholder": "Type your answer",
+        "multiline": True,
+    }
 
 
 class ReActPattern(AgentPattern):
@@ -2159,7 +2180,12 @@ class ReActPattern(AgentPattern):
                 "type": "function",
                 "function": {
                     "name": "send_message",
-                    "description": "Send a message to the user, optionally waiting for a response.",
+                    "description": (
+                        "Send a message to the user, optionally waiting for a "
+                        "response. Do not use it to narrate a plan you are about "
+                        "to carry out, and do not use it to ask a question; ask "
+                        "with ask_user_question instead."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -2379,13 +2405,24 @@ class ReActPattern(AgentPattern):
             expect_response = bool(args.get("expect_response", False))
             message_type = str(args.get("message_type", "info"))
             visible = bool(args.get("visible", True))
-            outbound_message = await runtime.send_message(
-                message=message,
-                message_type=message_type,
-                expect_response=expect_response,
-                visible=visible,
-                metadata=source,
-            )
+            interactions: list[dict[str, Any]] = []
+            if expect_response:
+                outbound_message, interactions = await self._send_waiting_message(
+                    runtime=runtime,
+                    message=message,
+                    message_type=message_type,
+                    interactions=[],
+                    metadata=source,
+                    visible=visible,
+                )
+            else:
+                outbound_message = await runtime.send_message(
+                    message=message,
+                    message_type=message_type,
+                    expect_response=False,
+                    visible=visible,
+                    metadata=source,
+                )
             self._record_tool_call(
                 tool_call,
                 status="completed",
@@ -2403,6 +2440,7 @@ class ReActPattern(AgentPattern):
                         "status": "waiting_for_user",
                         "message": message,
                         "message_type": message_type,
+                        "interactions": interactions,
                     },
                     tool_call_id=tool_call.get("id"),
                 )
@@ -2412,6 +2450,7 @@ class ReActPattern(AgentPattern):
                     "tool_name": name,
                     "message": message,
                     "message_type": message_type,
+                    "interactions": interactions,
                     "task_text": self.task_text,
                     "message_count": len(getattr(context, "messages", [])),
                 }
@@ -2420,6 +2459,7 @@ class ReActPattern(AgentPattern):
                     "status": self.status,
                     "message": message,
                     "message_type": message_type,
+                    "interactions": interactions,
                     "context": context,
                     "clarification_draft": draft_from_waiting_request(
                         self.waiting_for_user_request,
@@ -2464,16 +2504,12 @@ class ReActPattern(AgentPattern):
                 item["field"] = field
                 used_fields.add(field)
                 deduplicated_interactions.append(item)
-            interactions = deduplicated_interactions
-            outbound_message = await runtime.send_message(
+            outbound_message, interactions = await self._send_waiting_message(
+                runtime=runtime,
                 message=message,
                 message_type="question",
-                expect_response=True,
-                visible=True,
-                metadata={
-                    **source,
-                    "interactions": interactions,
-                },
+                interactions=deduplicated_interactions,
+                metadata=source,
             )
             self._record_tool_call(
                 tool_call,
@@ -2520,6 +2556,36 @@ class ReActPattern(AgentPattern):
             }
 
         return None
+
+    async def _send_waiting_message(
+        self,
+        *,
+        runtime: PatternRuntime,
+        message: str,
+        message_type: str,
+        interactions: list[dict[str, Any]],
+        metadata: dict[str, Any],
+        visible: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Publish a message that suspends the run, and return what it carried.
+
+        Every path that publishes a suspending message goes through here, so
+        the "at least one answerable field" guarantee is made once. It is not
+        pushed down into ``runtime.send_message``: that call also serves
+        non-suspending messages, which must stay field-free, and the callers
+        need the published list back to store on the waiting request -- which
+        is also what the structured interaction row is built from.
+        """
+
+        published = interactions or [_default_waiting_interaction()]
+        outbound_message = await runtime.send_message(
+            message=message,
+            message_type=message_type,
+            expect_response=True,
+            visible=visible,
+            metadata={**metadata, "interactions": published},
+        )
+        return outbound_message, published
 
     def _reject_empty_final_answer(
         self, tool_call: dict[str, Any], context: Any
@@ -2789,13 +2855,12 @@ class ReActPattern(AgentPattern):
             )
             message_type = "question"
 
-        outbound_message = await runtime.send_message(
+        outbound_message, interactions = await self._send_waiting_message(
+            runtime=runtime,
             message=message,
             message_type=message_type,
-            expect_response=True,
-            visible=True,
+            interactions=interactions,
             metadata={
-                "interactions": interactions,
                 "tool_calls": [
                     self._tool_message_source(
                         self._with_runtime_turn_id(

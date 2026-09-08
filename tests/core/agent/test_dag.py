@@ -2409,6 +2409,7 @@ async def test_dag_pattern_single_waiting_regression_unchanged() -> None:
         "status",
         "message",
         "message_type",
+        "interactions",
         "context",
         "clarification_draft",
         "execution_id",
