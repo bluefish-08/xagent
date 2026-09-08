@@ -1,7 +1,7 @@
 """backfill the general model slot for agents created without one
 
 Revision ID: 20260908_backfill_agent_general_model
-Revises: 20260904_add_auto_model_config
+Revises: 20260901_seed_zendesk_mcp_app
 Create Date: 2026-09-08 00:00:00.000000
 
 """
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 1000
 
 revision: str = "20260908_backfill_agent_general_model"
-down_revision: Union[str, tuple[str, str], None] = "20260904_add_auto_model_config"
+down_revision: Union[str, tuple[str, str], None] = "20260901_seed_zendesk_mcp_app"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
