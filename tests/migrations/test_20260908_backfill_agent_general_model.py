@@ -145,6 +145,22 @@ def test_ignores_non_general_defaults(db: Session) -> None:
     assert _models_of(db, agent_id) is None
 
 
+def test_processes_agents_past_the_first_chunk(db: Session) -> None:
+    """Payloads are fetched a chunk at a time, so a row in a later chunk
+    must be backfilled too."""
+    user = _user(db, "owner")
+    model = _model(db, "gpt-4o")
+    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
+    agents = [_agent(db, user, f"Agent {i}", None) for i in range(5)]
+    agent_ids = [int(a.id) for a in agents]
+    model_id = int(model.id)
+
+    with patch.object(MIGRATION, "_CHUNK_SIZE", 2):
+        _run_upgrade(db)
+
+    assert [_models_of(db, i) for i in agent_ids] == [{"general": model_id}] * 5
+
+
 def test_is_idempotent(db: Session) -> None:
     user = _user(db, "owner")
     model = _model(db, "gpt-4o")

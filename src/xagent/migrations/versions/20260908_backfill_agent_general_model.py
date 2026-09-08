@@ -14,6 +14,8 @@ from alembic import op
 
 logger = logging.getLogger(__name__)
 
+_CHUNK_SIZE = 1000
+
 revision: str = "20260908_backfill_agent_general_model"
 down_revision: Union[str, tuple[str, str], None] = "20260904_add_auto_model_config"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -74,25 +76,39 @@ def upgrade() -> None:
     if not default_by_user:
         return
 
+    # Ids first, payloads a chunk at a time: `models` is small but the row
+    # count is unbounded, and Connection.execute buffers a whole result set.
+    # Reading ids to exhaustion also keeps the updates below off an open
+    # cursor over the same table.
+    agent_ids = list(
+        bind.execute(sa.select(agents.c.id).order_by(agents.c.id)).scalars()
+    )
+
     filled = 0
     skipped = 0
-    rows = bind.execute(sa.select(agents.c.id, agents.c.user_id, agents.c.models))
-    for row in rows.mappings():
-        config = row["models"]
-        if config is not None and not isinstance(config, dict):
-            continue
-        if config and config.get("general") is not None:
-            continue
-        model_id = default_by_user.get(int(row["user_id"]))
-        if model_id is None:
-            skipped += 1
-            continue
-        bind.execute(
-            agents.update()
-            .where(agents.c.id == row["id"])
-            .values(models={**(config or {}), "general": model_id})
+    for start in range(0, len(agent_ids), _CHUNK_SIZE):
+        chunk = agent_ids[start : start + _CHUNK_SIZE]
+        rows = bind.execute(
+            sa.select(agents.c.id, agents.c.user_id, agents.c.models).where(
+                agents.c.id.in_(chunk)
+            )
         )
-        filled += 1
+        for row in rows.mappings():
+            config = row["models"]
+            if config is not None and not isinstance(config, dict):
+                continue
+            if config and config.get("general") is not None:
+                continue
+            model_id = default_by_user.get(int(row["user_id"]))
+            if model_id is None:
+                skipped += 1
+                continue
+            bind.execute(
+                agents.update()
+                .where(agents.c.id == row["id"])
+                .values(models={**(config or {}), "general": model_id})
+            )
+            filled += 1
 
     if filled or skipped:
         logger.info(
