@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from unittest.mock import patch
 
 import pytest
@@ -20,15 +21,58 @@ MIGRATION = importlib.import_module(
 )
 
 
-@pytest.fixture
-def db() -> Session:
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+# Tables this test touches, in dependency order.
+_TABLE_NAMES = ("users", "models", "user_default_models", "agents")
+_METADATA_TABLES = sa.MetaData()
+for _name in _TABLE_NAMES:
+    Base.metadata.tables[_name].to_metadata(_METADATA_TABLES)
+
+
+def _drop_tables(engine) -> None:
+    with engine.begin() as conn:
+        for name in reversed(_TABLE_NAMES):
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {name} CASCADE"))
+
+
+def _postgres_url() -> str | None:
+    return os.getenv("XAGENT_TEST_POSTGRES_URL") or os.getenv(
+        "POSTGRES_TEST_DATABASE_URL"
+    )
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param("postgresql", marks=pytest.mark.postgresql),
+    ]
+)
+def db(request: pytest.FixtureRequest) -> Session:
+    """Both backends, because the payload arrives in different shapes.
+
+    SQLite stores `models` as text, so the migration receives a JSON string
+    and decodes it. PostgreSQL's json column is decoded by the driver, so the
+    migration receives an object -- a branch no SQLite run can reach.
+    """
+    if request.param == "postgresql":
+        url = _postgres_url()
+        if not url:
+            pytest.skip("XAGENT_TEST_POSTGRES_URL is not set")
+        engine = create_engine(url)
+        # Only this test's own tables, dropped by name: the Postgres URL is a
+        # shared test database, so create_all/drop_all over the full metadata
+        # would tear down whatever else is using it.
+        _drop_tables(engine)
+        _METADATA_TABLES.create_all(bind=engine)
+    else:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
     session = sessionmaker(bind=engine)()
     try:
         yield session
     finally:
         session.close()
+        if request.param == "postgresql":
+            _drop_tables(engine)
         engine.dispose()
 
 
@@ -90,7 +134,9 @@ def test_backfills_null_config_from_owner_default(db: Session) -> None:
     assert _models_of(db, agent_id) == {"general": model_id}
 
 
-def test_preserves_other_slots_and_existing_general(db: Session) -> None:
+def test_preserves_other_slots_and_respects_an_explicit_general(db: Session) -> None:
+    """An omitted `general` is filled while other slots survive; a value the
+    owner already chose, including an explicit null, is left alone."""
     user = _user(db, "owner")
     default_model = _model(db, "gpt-4o")
     chosen = _model(db, "gpt-4o-mini")
@@ -101,13 +147,49 @@ def test_preserves_other_slots_and_existing_general(db: Session) -> None:
     )
     partial = _agent(db, user, "Partial", {"small_fast": 7})
     already_set = _agent(db, user, "Already set", {"general": chosen.id})
+    explicit_null = _agent(db, user, "Explicit null", {"general": None})
     partial_id, already_id = int(partial.id), int(already_set.id)
+    null_id = int(explicit_null.id)
     default_id, chosen_id = int(default_model.id), int(chosen.id)
 
     _run_upgrade(db)
 
     assert _models_of(db, partial_id) == {"small_fast": 7, "general": default_id}
     assert _models_of(db, already_id) == {"general": chosen_id}
+    assert _models_of(db, null_id) == {"general": None}
+
+
+def test_malformed_payload_does_not_abort_the_run(db: Session) -> None:
+    """Nothing deserializes a payload up front, so a row holding invalid JSON
+    cannot take the whole backfill down with it (rogercloud review, finding 2).
+
+    SQLite-only by construction: `models` is TEXT there and accepts anything,
+    while PostgreSQL's json column rejects invalid JSON at write time, so the
+    bad row cannot exist to begin with.
+    """
+    if db.bind.dialect.name != "sqlite":
+        pytest.skip("a json column rejects invalid JSON at write time")
+    user = _user(db, "owner")
+    model = _model(db, "gpt-4o")
+    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
+    target = _agent(db, user, "Needs backfill", None)
+    broken = _agent(db, user, "Broken payload", None)
+    target_id, broken_id, model_id = int(target.id), int(broken.id), int(model.id)
+    db.commit()
+    db.execute(
+        sa.text("UPDATE agents SET models = :junk WHERE id = :id"),
+        {"junk": "{not json", "id": broken_id},
+    )
+
+    _run_upgrade(db)
+
+    assert _models_of(db, target_id) == {"general": model_id}
+    assert (
+        db.execute(
+            sa.text("SELECT models FROM agents WHERE id = :id"), {"id": broken_id}
+        ).scalar_one()
+        == "{not json"
+    )
 
 
 def test_leaves_agent_untouched_without_usable_owner_default(db: Session) -> None:
@@ -146,8 +228,9 @@ def test_ignores_non_general_defaults(db: Session) -> None:
 
 
 def test_processes_agents_past_the_first_chunk(db: Session) -> None:
-    """Payloads are fetched a chunk at a time, so a row in a later chunk
-    must be backfilled too."""
+    """Payloads are read a chunk at a time, addressed by id range rather than
+    an IN list (SQLite caps bound parameters at 999 before 3.32.0), so a row
+    in a later chunk must be backfilled too."""
     user = _user(db, "owner")
     model = _model(db, "gpt-4o")
     db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))

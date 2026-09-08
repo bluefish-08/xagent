@@ -6,6 +6,7 @@ Create Date: 2026-09-08 00:00:00.000000
 
 """
 
+import json
 import logging
 from typing import Sequence, Union
 
@@ -23,13 +24,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Fill an empty `general` slot from the owner's default model.
+    """Fill an unset `general` slot from the owner's default model.
 
-    Server-side template creation passed no model config at all, so those
-    agents persisted `models = NULL`: the builder rendered "--" for Main
-    Model and refused to save until the owner picked one by hand. Runtime
-    already fell back to the owner's default (`get_default_model`), so this
-    only writes down what execution was resolving anyway.
+    Server-side agent creation passed no model config at all, so those agents
+    persisted an empty config: the builder rendered "--" for Main Model and
+    refused to save until the owner picked one by hand. Runtime already fell
+    back to the owner's default (`get_default_model`), so this only writes
+    down what execution was resolving anyway.
+
+    Note that `Agent.models` is `Column(JSON)` with SQLAlchemy's default
+    `none_as_null=False`, so an unset config is stored as the JSON text
+    `null`, not SQL NULL. `WHERE models IS NULL` matches none of these rows,
+    which is why each payload is read back and inspected in Python.
     """
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -41,10 +47,21 @@ def upgrade() -> None:
     if not {"models", "user_id"} <= agent_columns:
         return
 
-    agents = sa.table(
+    # Read `models` as text and deserialize per row: binding it as sa.JSON
+    # would decode during result iteration, where one malformed payload
+    # aborts the whole run instead of just its own row. On PostgreSQL the
+    # driver still hands back a decoded object for a json column, so the
+    # loop below accepts either shape. Writes go through the JSON-typed
+    # table so the value is encoded the same way the ORM encodes it.
+    agents_read = sa.table(
         "agents",
         sa.column("id", sa.Integer),
         sa.column("user_id", sa.Integer),
+        sa.column("models", sa.Text),
+    )
+    agents_write = sa.table(
+        "agents",
+        sa.column("id", sa.Integer),
         sa.column("models", sa.JSON),
     )
     user_defaults = sa.table(
@@ -74,49 +91,67 @@ def upgrade() -> None:
         ).mappings()
     }
     if not default_by_user:
+        logger.info(
+            "No user has an active general default model; "
+            "no agent model config was backfilled"
+        )
         return
 
     # Ids first, payloads a chunk at a time: `models` is small but the row
     # count is unbounded, and Connection.execute buffers a whole result set.
     # Reading ids to exhaustion also keeps the updates below off an open
-    # cursor over the same table.
+    # cursor over the same table. Chunks are contiguous slices of the sorted
+    # id list, so they are addressed by range rather than by an IN list --
+    # SQLite caps bound parameters at 999 before 3.32.0.
     agent_ids = list(
-        bind.execute(sa.select(agents.c.id).order_by(agents.c.id)).scalars()
+        bind.execute(sa.select(agents_read.c.id).order_by(agents_read.c.id)).scalars()
     )
 
     filled = 0
     skipped = 0
+    malformed = 0
     for start in range(0, len(agent_ids), _CHUNK_SIZE):
         chunk = agent_ids[start : start + _CHUNK_SIZE]
         rows = bind.execute(
-            sa.select(agents.c.id, agents.c.user_id, agents.c.models).where(
-                agents.c.id.in_(chunk)
-            )
+            sa.select(
+                agents_read.c.id, agents_read.c.user_id, agents_read.c.models
+            ).where(agents_read.c.id.between(chunk[0], chunk[-1]))
         )
         for row in rows.mappings():
-            config = row["models"]
+            raw = row["models"]
+            if isinstance(raw, (str, bytes)):
+                try:
+                    config = json.loads(raw)
+                except ValueError:
+                    malformed += 1
+                    continue
+            else:
+                config = raw
             if config is not None and not isinstance(config, dict):
+                malformed += 1
                 continue
-            if config and config.get("general") is not None:
+            # An explicit null is a deliberate "no main model" and is left
+            # alone, matching AgentManagementService's model validation.
+            if config and "general" in config:
                 continue
             model_id = default_by_user.get(int(row["user_id"]))
             if model_id is None:
                 skipped += 1
                 continue
             bind.execute(
-                agents.update()
-                .where(agents.c.id == row["id"])
+                agents_write.update()
+                .where(agents_write.c.id == row["id"])
                 .values(models={**(config or {}), "general": model_id})
             )
             filled += 1
 
-    if filled or skipped:
-        logger.info(
-            "Backfilled general model for %s agent(s); %s left empty "
-            "(owner has no active general default)",
-            filled,
-            skipped,
-        )
+    logger.info(
+        "Backfilled general model for %s agent(s); %s left empty (owner has "
+        "no active general default), %s skipped as unreadable config",
+        filled,
+        skipped,
+        malformed,
+    )
 
 
 def downgrade() -> None:

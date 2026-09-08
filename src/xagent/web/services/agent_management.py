@@ -678,10 +678,7 @@ class AgentManagementService:
         if self.store.agent_name_exists(user_id, name):
             raise DuplicateAgentNameError(name)
 
-        models = self._validate_models(
-            self._with_default_general_model(models, user_id=user_id),
-            user_id=user_id,
-        )
+        models = self._validate_models(models, user_id=user_id)
 
         try:
             agent = self.store.add_agent(  # flush, no commit
@@ -853,37 +850,6 @@ class AgentManagementService:
         )
         self.runtime_key_receipt = self.key_service.runtime_key_receipt
         return response
-
-    def _with_default_general_model(
-        self, models: dict[str, Any] | None, *, user_id: int
-    ) -> dict[str, Any] | None:
-        """Fill an unset `general` slot with the owner's default model.
-
-        Template creates pass no model config at all (no built-in template's
-        agent_config sets `models`), so without this the agent lands with a
-        NULL config: the builder shows "--" for Main Model and refuses to save
-        until the owner picks one by hand. Runs before _validate_models so the
-        filled id goes through the same visibility check.
-        """
-        if models and models.get("general") is not None:
-            return models
-
-        from .model_store import ModelStore
-
-        user = self.db.query(User).filter(User.id == user_id).first()
-        if user is None:
-            return models
-        general = next(
-            (
-                default
-                for default in ModelStore(self.db).get_user_default_models(user)
-                if default.get("config_type") == "general"
-            ),
-            None,
-        )
-        if general is None or general.get("model_id") is None:
-            return models
-        return {**(models or {}), "general": int(general["model_id"])}
 
     def _validate_models(
         self, models: dict[str, Any] | None, *, user_id: int

@@ -138,6 +138,45 @@ def clean_tool_categories(categories: Any) -> list[str]:
     return normalize_tool_categories(categories) or []
 
 
+def _with_default_general_model(
+    db: Session, models: dict[str, Any] | None, *, user_id: int
+) -> dict[str, Any] | None:
+    """Fill an omitted `general` slot with the owner's default model.
+
+    Every agent-creation path funnels through ``add_agent``, and several of
+    them pass no model config at all (template creates, workforce members,
+    the vibe agent tool). Those used to persist an empty config, which the
+    builder renders as "--" and refuses to save until the owner picks a model
+    by hand. An explicit ``{"general": None}`` is left alone: callers that
+    mean "no main model" are honoured, matching AgentManagementService's
+    model validation.
+
+    The filled id comes from ModelStore, which already restricts itself to
+    models visible to this user, so it needs no separate visibility check
+    here -- unlike caller-supplied ids, which are validated upstream.
+    """
+    if models is not None and "general" in models:
+        return models
+
+    from ..models.user import User
+    from .model_store import ModelStore
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        return models
+    general = next(
+        (
+            default
+            for default in ModelStore(db).get_user_default_models(user)
+            if default.get("config_type") == "general"
+        ),
+        None,
+    )
+    if general is None or general.get("model_id") is None:
+        return models
+    return {**(models or {}), "general": int(general["model_id"])}
+
+
 class AgentStore:
     """Owns Agent reads/writes that participate in hot-path cache policy."""
 
@@ -392,6 +431,7 @@ class AgentStore:
         if visibility is not None and visibility not in _VALID_VISIBILITIES:
             raise ValueError(f"Unsupported agent visibility: {visibility}")
         widget_key = new_widget_key() if widget_enabled else None
+        models = _with_default_general_model(self.db, models, user_id=user_id)
         # Agents are created personal (team_id NULL). Team ownership is granted
         # only by an explicit promote (see ``promote_agent_to_team``); a create
         # never stamps the caller's team. ``visibility`` is stored but only
