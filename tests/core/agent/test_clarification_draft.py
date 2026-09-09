@@ -239,6 +239,34 @@ def test_send_message_carrying_interactions_still_classifies_as_send_message() -
     assert list(draft.interactions) == [DEFAULT_WAITING_INTERACTION]
 
 
+def test_a_request_with_no_tool_name_classifies_as_send_message() -> None:
+    """The only shape the old and new rules disagree on, and the one the
+    docstring's "``tool_name`` has always been written here" claim rests on.
+
+    ``message_type == "question"`` plus a non-empty ``interactions`` and no
+    ``tool_name`` classified as ``ask_user_question`` under the old rule and
+    as ``send_message`` under the new one. No ReAct path produces it -- both
+    control-tool branches and ``_pause_for_tool_results`` write ``tool_name``
+    or ``kind`` -- so this is only reachable from a hand-built or foreign
+    checkpoint, where degrading to ``send_message`` names no tool the model
+    never called. Pinned because nothing else pins the divergence.
+    """
+
+    request = {
+        "event_id": "evt-1",
+        "message": "Which city?",
+        "message_type": "question",
+        "interactions": [dict(DEFAULT_WAITING_INTERACTION)],
+        "message_count": 5,
+    }
+
+    draft = draft_from_waiting_request(request, execution_id="exec-1", step_id=None)
+
+    assert draft is not None
+    assert draft.source == "send_message"
+    assert draft.requests[0].tool_name == ""
+
+
 def test_tool_waiting_multi_tool_requests_and_interaction_id_fallback() -> None:
     """Multiple waiting tools produce multiple requests; a missing
     ``interaction_id`` falls back to ``tool_call_id``, mirroring react.py's

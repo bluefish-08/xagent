@@ -35,6 +35,25 @@ INTERACTION_TYPES: tuple[str, ...] = (
     "action_cards",
 )
 
+# Every ``type`` the frontend's ``normalizeInteractions`` keeps
+# (``frontend/src/contexts/app-context-chat.tsx``): the seven above, the
+# ``connect_apps`` live widget it renders but the tool schema does not offer,
+# and the aliases it maps onto the canonical names. It drops anything else,
+# and a list it empties renders no form at all -- so this set, not
+# ``INTERACTION_TYPES``, is what the engine's answerability check reads.
+RENDERABLE_INTERACTION_TYPES: frozenset[str] = frozenset(INTERACTION_TYPES) | {
+    "connect_apps",
+    "input",
+    "text",
+    "textarea",
+    "string",
+    "file",
+    "upload",
+    "number",
+    "integer",
+    "boolean",
+}
+
 # The subset whose whole purpose is picking from a supplied list, so one of
 # them carrying no options is a control nobody can answer. Shared so the
 # write-side admissibility rule and the engine's answerability check cannot
@@ -53,3 +72,15 @@ DEFAULT_WAITING_INTERACTION: dict[str, object] = {
     "placeholder": "Type your answer",
     "multiline": True,
 }
+
+
+def is_default_waiting_interaction(interaction: object) -> bool:
+    """Whether this published item is the substituted field, not a real one.
+
+    Equality against the literal above, so it only recognizes the shape the
+    engine itself publishes: an interaction that has been round-tripped
+    through a model dump or arrives from a client carries other keys and is
+    rendered like any other field.
+    """
+
+    return interaction == DEFAULT_WAITING_INTERACTION

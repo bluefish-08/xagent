@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...core.agent.execution_adapter import INTERRUPTED_USER_MESSAGE
+from ...core.tools.adapters.vibe.interaction_types import (
+    is_default_waiting_interaction,
+)
 from ..models.task import TaskStatus
 from .assistant_history_safety import ASSISTANT_RESPONSE_MESSAGE_TYPE
 from .client_error_messages import CLIENT_SAFE_TASK_FAILURE
@@ -90,6 +93,10 @@ def _append_interactions(base_text: str, interactions: list[dict[str, Any]]) -> 
 
     interaction_texts: list[str] = []
     for interaction in interactions:
+        # Same reason the transcript builder skips it: the substituted field
+        # says nothing the prose does not, and this renders as a bullet.
+        if is_default_waiting_interaction(interaction):
+            continue
         label = interaction.get("label") or interaction.get("field", "Input")
         options = interaction.get("options", [])
         if options:
@@ -103,4 +110,6 @@ def _append_interactions(base_text: str, interactions: list[dict[str, Any]]) -> 
         else:
             interaction_texts.append(f"• {label}")
 
+    if not interaction_texts:
+        return base_text
     return base_text + "\n\n" + "\n".join(interaction_texts)

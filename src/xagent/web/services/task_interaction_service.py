@@ -1072,20 +1072,6 @@ def build_v1_request_payload(parsed: AskUserQuestionArgs) -> dict[str, Any]:
 # is what keeps either surface from having to.
 _V1_INTERACTION_TYPES = frozenset(INTERACTION_TYPES)
 
-# The types whose whole purpose is picking from a supplied list -- one set,
-# per #1314 item 2 ("key rules by interaction type, rather than one flat
-# list"), read below as a total function of membership rather than the two
-# independent flat sets this replaces. The split is the render surface's,
-# not this module's: ``select_one``, ``select_multiple``, and
-# ``action_cards`` iterate ``interaction.options``
-# (``frontend/src/components/chat/clarification-form.tsx``), while
-# ``confirm`` renders a switch, ``text_input`` a field, ``number_input`` a
-# spinner, and ``file_upload`` a picker -- none of which read ``options``.
-# Shared with the engine, which replaces -- rather than refuses, as this side
-# does -- a suspending message whose only controls are these with nothing to
-# select.
-_V1_TYPES_REQUIRING_OPTIONS = TYPES_REQUIRING_OPTIONS
-
 
 @dataclass(frozen=True)
 class InteractionWriteRefusal:
@@ -1185,7 +1171,7 @@ def validate_v1_write_payload(parsed: AskUserQuestionArgs) -> None:
     identifier and the position it fired at, never producer-supplied text
     (``#1314`` item 3) -- describing the first violation found; returns
     ``None`` when the payload may be written. Each rule below is scoped by
-    ``interaction.type`` through ``_V1_TYPES_REQUIRING_OPTIONS`` where a
+    ``interaction.type`` through ``TYPES_REQUIRING_OPTIONS`` where a
     rule is type-specific at all (``#1314`` item 2); the rules that apply
     to every
     type (blank/duplicate field, blank/duplicate option) are not, because
@@ -1326,8 +1312,9 @@ def validate_v1_write_payload(parsed: AskUserQuestionArgs) -> None:
         # flat sets that could drift apart; a single set with a derived
         # rule cannot drift from itself. interaction.type is provably in
         # _V1_INTERACTION_TYPES by here -- the unsupported_type check
-        # above rejects anything else.
-        requires_options = interaction.type in _V1_TYPES_REQUIRING_OPTIONS
+        # above rejects anything else. Shared with the engine, which
+        # replaces rather than refuses an unanswerable control.
+        requires_options = interaction.type in TYPES_REQUIRING_OPTIONS
         if requires_options and not interaction.options:
             raise InteractionWritePayloadRejected(
                 InteractionWriteRefusal(

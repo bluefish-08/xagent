@@ -71,6 +71,7 @@ from ....model.chat.tool_protocol import get_tool_protocol_error
 from ....tools.adapters.vibe.interaction_types import (
     DEFAULT_WAITING_INTERACTION,
     INTERACTION_TYPES,
+    RENDERABLE_INTERACTION_TYPES,
     TYPES_REQUIRING_OPTIONS,
 )
 from ....tools.user_interaction import (
@@ -400,22 +401,37 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+_DEFAULT_WAITING_ANSWER_PREFIX = f"{DEFAULT_WAITING_INTERACTION['label']}: "
+
+
 def _is_answerable(interaction: Any) -> bool:
     """Whether a user handed this control could produce an answer with it.
 
-    Only the pick-from-a-list types can fail: emptied options survive
-    ``_normalize_ask_user_interactions`` as an entry with nothing to select
-    (that function drops the blank options, not the interaction), and a
-    malformed non-list ``options`` survives it untouched, which the render
-    surface cannot iterate either. Every other type renders an input that
-    stands on its own, and an unrecognized type is treated as answerable
-    rather than silently replaced -- the write-side admissibility rules are
-    what refuse those.
+    Two ways to fail. A type outside ``RENDERABLE_INTERACTION_TYPES`` --
+    including a ``type`` the model did not even send as a string -- is dropped
+    by the frontend's ``normalizeInteractions``
+    (``frontend/src/contexts/app-context-chat.tsx``), and a list it empties
+    renders no form at all, which is the dead end this check exists to
+    prevent. And a pick-from-a-list type with nothing to pick survives
+    ``_normalize_ask_user_interactions`` (which drops the blank options, not
+    the interaction) as a control with no choices. Every other type renders
+    an input that stands on its own.
+
+    Nothing upstream refuses either shape: the tool schema's ``enum`` is a
+    prompt, not a runtime constraint, and the write-side admissibility rules
+    in ``validate_v1_write_payload`` have no production caller.
     """
 
     if not isinstance(interaction, dict):
         return False
-    if interaction.get("type") in TYPES_REQUIRING_OPTIONS:
+    interaction_type = interaction.get("type")
+    # Before the frozenset lookup below: an unhashable ``type`` (the model
+    # is free to send a list) would raise there and kill the whole run.
+    if not isinstance(interaction_type, str):
+        return False
+    if interaction_type not in RENDERABLE_INTERACTION_TYPES:
+        return False
+    if interaction_type in TYPES_REQUIRING_OPTIONS:
         options = interaction.get("options")
         return isinstance(options, list) and bool(options)
     return True
@@ -1819,6 +1835,12 @@ class ReActPattern(AgentPattern):
             or waiting_request.get("kind") != "tool_waiting_for_user"
         ):
             return
+        # The form submits "<label>: <value>"; for the substituted field the
+        # label carries nothing, so a resume callback would get a prefixed value.
+        if waiting_request.get("interactions") == [
+            DEFAULT_WAITING_INTERACTION
+        ] and response.startswith(_DEFAULT_WAITING_ANSWER_PREFIX):
+            response = response[len(_DEFAULT_WAITING_ANSWER_PREFIX) :]
         raw_requests = waiting_request.get("requests")
         requests = raw_requests if isinstance(raw_requests, list) else [waiting_request]
         for request in requests:
@@ -2185,10 +2207,14 @@ class ReActPattern(AgentPattern):
                 "function": {
                     "name": "send_message",
                     "description": (
-                        "Send a message to the user, optionally waiting for a "
-                        "response. Do not use it to narrate a plan you are about "
-                        "to carry out, and do not use it to ask a question; ask "
-                        "with ask_user_question instead."
+                        "Send a prose message to the user. Set message_type to "
+                        "what the message is: use progress to report work "
+                        "already underway, not to announce a plan you have not "
+                        "started. Set expect_response=true only when the task "
+                        "cannot continue until the user replies, and only for a "
+                        "reply you can read as free text; when the answer should "
+                        "come from options or from named fields, call "
+                        "ask_user_question instead."
                     ),
                     "parameters": {
                         "type": "object",
@@ -2584,10 +2610,14 @@ class ReActPattern(AgentPattern):
         every entry in it is a control the user cannot use, and replacing
         keeps the substituted field the only one, so its base name cannot
         collide with a caller's ``_2``/``_3`` dedup suffixes.
+
+        Both branches return fresh dicts: the published list is stored on the
+        waiting request, the tool-call record and the result dict, so it must
+        not alias items the caller still holds.
         """
 
         published = (
-            interactions
+            [dict(item) if isinstance(item, dict) else item for item in interactions]
             if any(_is_answerable(item) for item in interactions)
             else [dict(DEFAULT_WAITING_INTERACTION)]
         )

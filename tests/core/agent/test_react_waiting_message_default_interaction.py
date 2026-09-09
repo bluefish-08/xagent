@@ -17,6 +17,7 @@ a model that did supply interactions gets exactly its own, untouched.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -320,17 +321,29 @@ async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
         {"type": "file_upload", "field": "doc", "label": "Upload"},
         {"type": "number_input", "field": "n", "label": "How many?"},
         {"type": "text_input", "field": "note", "label": "Note"},
-        {"type": "something_new", "field": "x", "label": "X"},
+        {"type": "text", "field": "note", "label": "Note"},
+        {"type": "boolean", "field": "ok", "label": "Proceed?"},
+        {"type": "connect_apps", "field": "apps", "label": "Connect"},
     ],
-    ids=["confirm", "file_upload", "number_input", "text_input", "unknown_type"],
+    ids=[
+        "confirm",
+        "file_upload",
+        "number_input",
+        "text_input",
+        "alias_text",
+        "alias_boolean",
+        "connect_apps",
+    ],
 )
 async def test_a_type_that_needs_no_options_is_left_alone(
     interaction: dict[str, Any],
 ) -> None:
     """The answerability test must not fire on the types that never render
     options -- replacing one of those would throw away the model's real
-    question. An unrecognized type counts as answerable too: refusing it is
-    the write side's job, not this substitution's."""
+    question. The last three are why the check reads the frontend's whitelist
+    and not the tool schema's ``enum``: ``normalizeInteractions`` maps
+    ``text``/``boolean`` onto canonical names and renders ``connect_apps``,
+    none of which the ``enum`` offers."""
 
     _, runtime = await _run(
         "ask_user_question", {"message": "Well?", "interactions": [interaction]}
@@ -393,3 +406,107 @@ async def test_default_field_passes_the_write_side_validator() -> None:
         {"message": "Which one?", "interactions": _published_interactions(runtime)}
     )
     validate_v1_write_payload(parsed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interaction_type",
+    ["something_new", "", ["select_one"], {"type": "select_one"}, None, 7],
+    ids=["unknown", "blank", "list", "dict", "none", "int"],
+)
+async def test_a_type_the_render_surface_cannot_use_is_replaced(
+    interaction_type: Any,
+) -> None:
+    """``normalizeInteractions`` drops anything outside its whitelist and a
+    list it empties renders no form, so an unrecognized type is the very dead
+    end this substitution exists to prevent. Nothing upstream refuses one: the
+    schema ``enum`` is a prompt, the tool arguments are raw ``json.loads``, and
+    ``validate_v1_write_payload`` has no production caller. A non-``str`` type
+    additionally used to raise ``TypeError`` on the frozenset lookup and take
+    the whole run down with it."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Well?",
+            "interactions": [
+                {"type": interaction_type, "field": "x", "label": "X"},
+            ],
+        },
+    )
+    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+async def test_a_model_supplied_list_is_published_as_copies() -> None:
+    """The published list is stored on the waiting request, the tool-call
+    record and the result dict. One policy for both branches: the pass-through
+    one must not alias items the caller still holds either, which is what
+    ``_pause_for_tool_results`` does -- it keeps the same items on each
+    per-tool request entry."""
+
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-waiting-copies")
+    supplied = [
+        {
+            "type": "select_one",
+            "field": "city",
+            "label": "City",
+            "options": [{"label": "Paris", "value": "paris"}],
+        }
+    ]
+    _, published = await pattern._send_waiting_message(
+        runtime=runtime,
+        message="Which city?",
+        message_type="question",
+        interactions=supplied,
+        metadata={},
+    )
+    assert published == supplied
+    assert published[0] is not supplied[0]
+
+
+class _ResumableTool:
+    def __init__(self) -> None:
+        self.metadata = SimpleNamespace(name="gate", description="gate")
+
+    def resume_user_interaction(self, *, interaction_id: str, response: str) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("published", "expected"),
+    [
+        ([dict(DEFAULT_FIELD)], "hello"),
+        (
+            [{"type": "text_input", "field": "note", "label": "Your response"}],
+            "Your response: hello",
+        ),
+    ],
+    ids=["substituted", "model_supplied_same_label"],
+)
+def test_the_substituted_label_is_stripped_before_the_resume_callback(
+    published: list[dict[str, Any]], expected: str
+) -> None:
+    """``clarification-form.tsx`` submits "<label>: <value>". The substituted
+    field's label is engine-invented, so passing the prefixed string on would
+    hand a tool's ``resume_user_interaction`` something the user never typed.
+    A model-supplied field that happens to share the label keeps its prefix --
+    that label is the model's own words and the tool may rely on it."""
+
+    pattern = ReActPattern()
+    pattern._queue_tool_interaction_responses(
+        waiting_request={
+            "kind": "tool_waiting_for_user",
+            "interactions": published,
+            "requests": [
+                {"tool_name": "gate", "tool_call_id": "call_1"},
+            ],
+        },
+        response="Your response: hello",
+        tools=[_ResumableTool()],
+    )
+
+    assert [
+        item["response"] for item in pattern.pending_tool_interaction_responses
+    ] == [expected]

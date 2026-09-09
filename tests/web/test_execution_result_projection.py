@@ -1,4 +1,7 @@
 from xagent.core.agent.execution_adapter import INTERRUPTED_USER_MESSAGE
+from xagent.core.tools.adapters.vibe.interaction_types import (
+    DEFAULT_WAITING_INTERACTION,
+)
 from xagent.web.models.task import TaskStatus
 from xagent.web.services.execution_result_projection import (
     EMPTY_CHANNEL_OUTPUT_FALLBACK,
@@ -131,3 +134,46 @@ def test_project_empty_failure_has_no_diagnostic_and_uses_safe_display() -> None
     assert projection.transcript_content == "Task execution failed."
     assert projection.diagnostic_error is None
     assert projection.interactions == []
+
+
+def test_project_execution_result_omits_the_substituted_waiting_field():
+    """Every waiting turn with no other answerable field now carries the
+    engine's substituted ``text_input``. Bulleting it would put a "Your
+    response" line under every question on Slack/Telegram/Lark, where the
+    channel reply box is already the answer box."""
+
+    projection = project_execution_result_for_channel(
+        {
+            "status": "waiting_for_user",
+            "success": False,
+            "output": "Need input.",
+            "chat_response": {
+                "message": "Which city?",
+                "interactions": [dict(DEFAULT_WAITING_INTERACTION)],
+            },
+        }
+    )
+
+    assert projection.visible_text == "Which city?"
+    assert projection.interactions == [DEFAULT_WAITING_INTERACTION]
+
+
+def test_project_execution_result_keeps_real_fields_beside_the_substituted_one():
+    projection = project_execution_result_for_channel(
+        {
+            "status": "waiting_for_user",
+            "success": False,
+            "output": "Need input.",
+            "chat_response": {
+                "message": "Which city?",
+                "interactions": [
+                    dict(DEFAULT_WAITING_INTERACTION),
+                    {"label": "Destination", "options": [{"label": "Tokyo"}]},
+                ],
+            },
+        }
+    )
+
+    assert projection.visible_text == (
+        "Which city?\n\n\u2022 Destination\n  Options: Tokyo"
+    )

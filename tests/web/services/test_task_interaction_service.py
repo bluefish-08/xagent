@@ -6279,10 +6279,7 @@ def _base_interaction_for_type(
     interaction_type: str, **overrides: Any
 ) -> dict[str, Any]:
     item = _interaction(type=interaction_type, **overrides)
-    if (
-        interaction_type in svc._V1_TYPES_REQUIRING_OPTIONS
-        and "options" not in overrides
-    ):
+    if interaction_type in svc.TYPES_REQUIRING_OPTIONS and "options" not in overrides:
         item["options"] = [{"label": "Option A", "value": "a"}]
     return item
 
