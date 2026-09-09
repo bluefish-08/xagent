@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from ..web.models.agent import Agent
 from ..web.models.skill import UserSkill
 from ..web.models.user import User
+from ..web.services.agent_store import with_default_general_model
 from .bundle import ArchivedItem, MigrationBundle
 
 # xagent's scheduled triggers currently fire on a fixed interval only; standard
@@ -138,7 +139,10 @@ class MigrationLoader:
             description=f"Imported from {bundle.source}.",
             instructions=instructions,
             execution_mode="balanced",
-            models={},
+            # Built here rather than through AgentStore.add_agent (this path
+            # owns its own commit), so the default-model fallback is applied
+            # explicitly instead of being inherited.
+            models=with_default_general_model(self.db, {}, user_id=self.user_id),
             knowledge_bases=[],
             skills=[],
             tool_categories=[],

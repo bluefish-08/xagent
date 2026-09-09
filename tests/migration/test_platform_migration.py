@@ -250,6 +250,42 @@ def _make_user(db) -> object:
     return user
 
 
+def test_loader_fills_the_general_model_from_the_owner_default(
+    db_session, openclaw_home: Path
+) -> None:
+    """This loader builds its Agent outside AgentStore and owns its own
+    commit, so it applies the default-model fallback explicitly; without it,
+    imported agents land with an unset config the builder shows as "--"
+    (rogercloud review on #2229, finding 1)."""
+    from xagent.web.models.agent import Agent
+    from xagent.web.models.model import Model as DBModel
+    from xagent.web.models.user import UserDefaultModel
+
+    user = _make_user(db_session)
+    model = DBModel(
+        model_id="imported-default",
+        category="llm",
+        model_provider="openai",
+        model_name="gpt-4o",
+        api_key="test-api-key",
+        base_url="https://api.openai.com/v1",
+        is_active=True,
+    )
+    db_session.add(model)
+    db_session.flush()
+    db_session.add(
+        UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general")
+    )
+    db_session.commit()
+
+    MigrationLoader(db_session, user=user).load(
+        OpenClawAdapter(root=openclaw_home).parse()
+    )
+
+    agent = db_session.query(Agent).filter(Agent.user_id == user.id).one()
+    assert agent.models == {"general": int(model.id)}
+
+
 def test_loader_imports_agent_skills_and_interval_schedule(
     db_session, openclaw_home: Path
 ) -> None:

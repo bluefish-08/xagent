@@ -1,11 +1,12 @@
-"""The `general` model slot is filled at the one chokepoint every
-agent-creation path funnels through (rogercloud review on #2229, finding 1).
+"""The `general` model slot is filled where the creation paths converge
+(rogercloud review on #2229, finding 1).
 
 `AgentStore.add_agent` is reached by `create_agent` (plain `POST /api/agents`,
 the vibe agent tool), by `AgentManagementService.create_agent_with_optional_key`
 (template creates, `/v1/agents`), and directly by `workforce_creator`. Filling
-the slot in any one caller leaves the others persisting an empty config, which
-the builder renders as "--".
+the slot in any one caller leaves the others persisting an unset config, which
+the builder renders as "--". `migration/loaders.py` builds its `Agent` outside
+the store and calls the helper itself; `test_platform_migration` covers it.
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ def default_model(db: Session, owner: User) -> DBModel:
     return model
 
 
-def _add(db: Session, owner: User, name: str, models: dict | None) -> dict | None:
+def _add(db: Session, owner: User, name: str, models: object) -> object:
     agent = AgentStore(db).add_agent(
         user_id=int(owner.id),
         name=name,
@@ -120,6 +121,16 @@ def test_other_slots_are_preserved_while_general_is_filled(
     }
 
 
+def test_a_non_dict_payload_passes_through_untouched(
+    db: Session, owner: User, default_model: DBModel
+) -> None:
+    """`workforce_creator` forwards `agent_config["models"]` straight from
+    unvalidated template YAML. Rejecting the shape here would turn authoring
+    typos into a 500; it is stored as-is, exactly as before this fallback
+    existed."""
+    assert _add(db, owner, "Malformed", ["not", "a", "dict"]) == ["not", "a", "dict"]
+
+
 def test_no_usable_owner_default_leaves_the_config_untouched(db: Session) -> None:
     """No default at all, and an inactive one, both leave the slot unset
     rather than writing an id the app would reject."""
@@ -138,3 +149,23 @@ def test_no_usable_owner_default_leaves_the_config_untouched(db: Session) -> Non
 
     assert _add(db, no_default, "No default", None) is None
     assert _add(db, inactive_owner, "Inactive default", None) is None
+
+
+def test_a_shared_default_is_not_consulted(db: Session, owner: User) -> None:
+    """Deliberately unlike ModelStore.get_user_default_models: the backfill
+    migration cannot replicate that shared/admin-default layer without
+    freezing its visibility rules into a historical revision, so neither
+    side uses it and an agent's slot never depends on when it was created."""
+    other = User(username="sharer", password_hash="x", is_admin=True)
+    db.add(other)
+    db.flush()
+    shared = _model(db, "shared-model")
+    db.add(
+        UserModel(user_id=other.id, model_id=shared.id, is_owner=True, is_shared=True)
+    )
+    db.add(
+        UserDefaultModel(user_id=other.id, model_id=shared.id, config_type="general")
+    )
+    db.commit()
+
+    assert _add(db, owner, "No personal default", None) is None

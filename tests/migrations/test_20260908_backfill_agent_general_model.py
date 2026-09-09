@@ -1,4 +1,10 @@
-"""Tests for the agents.models general-slot backfill migration."""
+"""Tests for the agents.models general-slot backfill migration.
+
+Run against SQLite and PostgreSQL both: the eligibility predicate compares
+`models` cast to text (`Column(JSON)` with `none_as_null=False` stores an
+unset config as the JSON text `null`, so `IS NULL` matches nothing), and that
+cast is the one part of the statement whose behaviour differs per backend.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +17,7 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from xagent.web.models.agent import Agent
+from xagent.web.models.agent import Agent, AgentOrigin
 from xagent.web.models.database import Base
 from xagent.web.models.model import Model as DBModel
 from xagent.web.models.user import User, UserDefaultModel
@@ -19,7 +25,6 @@ from xagent.web.models.user import User, UserDefaultModel
 MIGRATION = importlib.import_module(
     "xagent.migrations.versions.20260908_backfill_agent_general_model"
 )
-
 
 # Tables this test touches, in dependency order.
 _TABLE_NAMES = ("users", "models", "user_default_models", "agents")
@@ -47,12 +52,6 @@ def _postgres_url() -> str | None:
     ]
 )
 def db(request: pytest.FixtureRequest) -> Session:
-    """Both backends, because the payload arrives in different shapes.
-
-    SQLite stores `models` as text, so the migration receives a JSON string
-    and decodes it. PostgreSQL's json column is decoded by the driver, so the
-    migration receives an object -- a branch no SQLite run can reach.
-    """
     if request.param == "postgresql":
         url = _postgres_url()
         if not url:
@@ -98,17 +97,25 @@ def _user(db: Session, username: str) -> User:
     return user
 
 
-def _agent(db: Session, user: User, name: str, models: dict | None) -> Agent:
+def _agent(db: Session, user: User, name: str, models: dict | None, **kwargs) -> Agent:
     agent = Agent(
         user_id=user.id,
         name=name,
         instructions="Be useful.",
         execution_mode="balanced",
         models=models,
+        **kwargs,
     )
     db.add(agent)
     db.flush()
     return agent
+
+
+def _owner_with_default(db: Session, username: str) -> tuple[User, int]:
+    user = _user(db, username)
+    model = _model(db, f"{username}-default")
+    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
+    return user, int(model.id)
 
 
 def _run_upgrade(db: Session) -> None:
@@ -122,134 +129,120 @@ def _models_of(db: Session, agent_id: int) -> dict | None:
     return db.execute(sa.select(Agent.models).where(Agent.id == agent_id)).scalar_one()
 
 
-def test_backfills_null_config_from_owner_default(db: Session) -> None:
-    user = _user(db, "owner")
-    model = _model(db, "gpt-4o")
-    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
-    agent = _agent(db, user, "Template agent", None)
-    agent_id, model_id = int(agent.id), int(model.id)
+def test_backfills_an_unset_config_from_the_owner_default(db: Session) -> None:
+    """`None` reaches the column as the JSON text `null`, which is the shape
+    every server-side creation path left behind."""
+    user, model_id = _owner_with_default(db, "owner")
+    agent_id = int(_agent(db, user, "Template agent", None).id)
 
     _run_upgrade(db)
 
     assert _models_of(db, agent_id) == {"general": model_id}
 
 
-def test_preserves_other_slots_and_respects_an_explicit_general(db: Session) -> None:
-    """An omitted `general` is filled while other slots survive; a value the
-    owner already chose, including an explicit null, is left alone."""
-    user = _user(db, "owner")
-    default_model = _model(db, "gpt-4o")
-    chosen = _model(db, "gpt-4o-mini")
-    db.add(
-        UserDefaultModel(
-            user_id=user.id, model_id=default_model.id, config_type="general"
-        )
-    )
-    partial = _agent(db, user, "Partial", {"small_fast": 7})
-    already_set = _agent(db, user, "Already set", {"general": chosen.id})
-    explicit_null = _agent(db, user, "Explicit null", {"general": None})
-    partial_id, already_id = int(partial.id), int(already_set.id)
-    null_id = int(explicit_null.id)
-    default_id, chosen_id = int(default_model.id), int(chosen.id)
+def test_leaves_a_config_that_already_has_a_value_alone(db: Session) -> None:
+    user, _ = _owner_with_default(db, "owner")
+    chosen = _model(db, "chosen")
+    already_set = int(_agent(db, user, "Already set", {"general": chosen.id}).id)
+    explicit_null = int(_agent(db, user, "Explicit null", {"general": None}).id)
+    partial = int(_agent(db, user, "Partial", {"small_fast": 7}).id)
+    chosen_id = int(chosen.id)
 
     _run_upgrade(db)
 
-    assert _models_of(db, partial_id) == {"small_fast": 7, "general": default_id}
-    assert _models_of(db, already_id) == {"general": chosen_id}
-    assert _models_of(db, null_id) == {"general": None}
+    assert _models_of(db, already_set) == {"general": chosen_id}
+    assert _models_of(db, explicit_null) == {"general": None}
+    # Out of scope by design: preserving sibling slots would need a
+    # read-modify-write, and production holds no row of this shape.
+    assert _models_of(db, partial) == {"small_fast": 7}
 
 
-def test_malformed_payload_does_not_abort_the_run(db: Session) -> None:
-    """Nothing deserializes a payload up front, so a row holding invalid JSON
-    cannot take the whole backfill down with it (rogercloud review, finding 2).
+def test_skips_shared_and_team_agents(db: Session) -> None:
+    """An unset config is resolved per runner against that user's own
+    default, so filling it on a shared agent would switch everyone else onto
+    the owner's model."""
+    user, model_id = _owner_with_default(db, "owner")
+    private = int(_agent(db, user, "Private", None).id)
+    shared = int(_agent(db, user, "Shared", None, share_enabled=True).id)
+    team = int(_agent(db, user, "Team", None, team_id=4242).id)
 
-    SQLite-only by construction: `models` is TEXT there and accepts anything,
-    while PostgreSQL's json column rejects invalid JSON at write time, so the
-    bad row cannot exist to begin with.
-    """
-    if db.bind.dialect.name != "sqlite":
-        pytest.skip("a json column rejects invalid JSON at write time")
-    user = _user(db, "owner")
-    model = _model(db, "gpt-4o")
-    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
-    target = _agent(db, user, "Needs backfill", None)
-    broken = _agent(db, user, "Broken payload", None)
-    target_id, broken_id, model_id = int(target.id), int(broken.id), int(model.id)
-    db.commit()
-    db.execute(
-        sa.text("UPDATE agents SET models = :junk WHERE id = :id"),
-        {"junk": "{not json", "id": broken_id},
+    _run_upgrade(db)
+
+    assert _models_of(db, private) == {"general": model_id}
+    assert _models_of(db, shared) is None
+    assert _models_of(db, team) is None
+
+
+def test_skips_the_hidden_workforce_manager_agent(db: Session) -> None:
+    """Filtered out of every user-facing read path, so no UI ever showed
+    "--" for one."""
+    user, model_id = _owner_with_default(db, "owner")
+    visible = int(_agent(db, user, "Visible", None).id)
+    hidden = int(
+        _agent(
+            db,
+            user,
+            "Generated manager",
+            None,
+            origin=AgentOrigin.WORKFORCE_GENERATED_MANAGER.value,
+        ).id
     )
 
     _run_upgrade(db)
 
-    assert _models_of(db, target_id) == {"general": model_id}
-    assert (
-        db.execute(
-            sa.text("SELECT models FROM agents WHERE id = :id"), {"id": broken_id}
-        ).scalar_one()
-        == "{not json"
-    )
+    assert _models_of(db, visible) == {"general": model_id}
+    assert _models_of(db, hidden) is None
 
 
-def test_leaves_agent_untouched_without_usable_owner_default(db: Session) -> None:
-    """No default at all, and an inactive one, both leave the slot empty
-    rather than writing an id the app would reject as unusable."""
+def test_leaves_agents_whose_owner_has_no_usable_default(db: Session) -> None:
+    """No default at all, and an inactive one, both leave the slot unset
+    rather than writing an id the app would reject."""
     no_default = _user(db, "no-default")
-    inactive_default = _user(db, "inactive-default")
-    inactive = _model(db, "retired-model", is_active=False)
+    inactive_owner = _user(db, "inactive-default")
+    retired = _model(db, "retired", is_active=False)
     db.add(
         UserDefaultModel(
-            user_id=inactive_default.id, model_id=inactive.id, config_type="general"
+            user_id=inactive_owner.id, model_id=retired.id, config_type="general"
         )
     )
-    a = _agent(db, no_default, "No default", None)
-    b = _agent(db, inactive_default, "Inactive default", None)
-    a_id, b_id = int(a.id), int(b.id)
+    a = int(_agent(db, no_default, "No default", None).id)
+    b = int(_agent(db, inactive_owner, "Inactive default", None).id)
 
     _run_upgrade(db)
 
-    assert _models_of(db, a_id) is None
-    assert _models_of(db, b_id) is None
+    assert _models_of(db, a) is None
+    assert _models_of(db, b) is None
 
 
 def test_ignores_non_general_defaults(db: Session) -> None:
     user = _user(db, "owner")
-    model = _model(db, "gpt-4o-mini")
+    model = _model(db, "fast-only")
     db.add(
         UserDefaultModel(user_id=user.id, model_id=model.id, config_type="small_fast")
     )
-    agent = _agent(db, user, "Fast only", None)
-    agent_id = int(agent.id)
+    agent_id = int(_agent(db, user, "Fast only", None).id)
 
     _run_upgrade(db)
 
     assert _models_of(db, agent_id) is None
 
 
-def test_processes_agents_past_the_first_chunk(db: Session) -> None:
-    """Payloads are read a chunk at a time, addressed by id range rather than
-    an IN list (SQLite caps bound parameters at 999 before 3.32.0), so a row
-    in a later chunk must be backfilled too."""
-    user = _user(db, "owner")
-    model = _model(db, "gpt-4o")
-    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
-    agents = [_agent(db, user, f"Agent {i}", None) for i in range(5)]
-    agent_ids = [int(a.id) for a in agents]
-    model_id = int(model.id)
+def test_fills_each_owner_from_their_own_default(db: Session) -> None:
+    """One UPDATE per owner: nobody inherits another user's model."""
+    first, first_model = _owner_with_default(db, "first")
+    second, second_model = _owner_with_default(db, "second")
+    a = int(_agent(db, first, "First agent", None).id)
+    b = int(_agent(db, second, "Second agent", None).id)
 
-    with patch.object(MIGRATION, "_CHUNK_SIZE", 2):
-        _run_upgrade(db)
+    _run_upgrade(db)
 
-    assert [_models_of(db, i) for i in agent_ids] == [{"general": model_id}] * 5
+    assert _models_of(db, a) == {"general": first_model}
+    assert _models_of(db, b) == {"general": second_model}
 
 
 def test_is_idempotent(db: Session) -> None:
-    user = _user(db, "owner")
-    model = _model(db, "gpt-4o")
-    db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
-    agent = _agent(db, user, "Template agent", None)
-    agent_id, model_id = int(agent.id), int(model.id)
+    user, model_id = _owner_with_default(db, "owner")
+    agent_id = int(_agent(db, user, "Template agent", None).id)
 
     _run_upgrade(db)
     _run_upgrade(db)
