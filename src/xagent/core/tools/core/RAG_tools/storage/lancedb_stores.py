@@ -649,6 +649,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         # Guards _table_cache across the worker threads asyncio.to_thread
         # dispatches handle storage calls to.
         self._table_cache_lock = threading.Lock()
+        self._table_cache_epoch = 0
 
     def _get_connection(self) -> DBConnection:
         return get_connection_from_env()
@@ -657,32 +658,48 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         """Get a table handle, optionally reusing the per-process cache."""
         from ..LanceDB.schema_manager import _safe_close_table
 
-        if use_cache:
+        if not use_cache:
+            return self._get_connection().open_table(table_name)
+
+        # At most two passes. An invalidation landing while the unlocked open
+        # below is in flight means the table may have just been dropped, so
+        # that handle is thrown away and re-opened against the new epoch.
+        for last_pass in (False, True):
             with self._table_cache_lock:
                 cached = self._table_cache.get(table_name)
                 if cached is not None:
                     self._table_cache.move_to_end(table_name)
                     return cached
-        # open_table is blocking I/O, so it stays outside the lock; a concurrent
-        # opener may win the insert below, in which case this handle is closed.
-        table = self._get_connection().open_table(table_name)
-        if not use_cache:
-            return table
-        discarded = None
-        # Unlocked, an insert landing inside invalidate_table_cache's own
-        # critical section is dropped by its clear() while absent from its
-        # stale snapshot, so that handle is never cached and never closed.
-        with self._table_cache_lock:
-            existing = self._table_cache.get(table_name)
-            if existing is not None:
-                self._table_cache.move_to_end(table_name)
-                discarded, table = table, existing
-            else:
-                self._table_cache[table_name] = table
-                if len(self._table_cache) > self._TABLE_CACHE_MAXSIZE:
-                    _evicted_name, discarded = self._table_cache.popitem(last=False)
-        _safe_close_table(discarded)
-        return table
+                epoch = self._table_cache_epoch
+
+            # Blocking I/O, deliberately outside the lock: holding it across
+            # this would serialize every concurrent open.
+            table = self._get_connection().open_table(table_name)
+
+            discarded = None
+            with self._table_cache_lock:
+                if self._table_cache_epoch != epoch and not last_pass:
+                    discarded, table = table, None
+                else:
+                    # Unlocked, an insert landing inside
+                    # invalidate_table_cache's own critical section is dropped
+                    # by its clear() while absent from its stale snapshot, so
+                    # that handle would be neither cached nor closed.
+                    existing = self._table_cache.get(table_name)
+                    if existing is not None:
+                        self._table_cache.move_to_end(table_name)
+                        discarded, table = table, existing
+                    else:
+                        self._table_cache[table_name] = table
+                        if len(self._table_cache) > self._TABLE_CACHE_MAXSIZE:
+                            _evicted_name, discarded = self._table_cache.popitem(
+                                last=False
+                            )
+            _safe_close_table(discarded)
+            if table is not None:
+                return table
+
+        raise RuntimeError("unreachable: the second pass always returns")
 
     def invalidate_table_cache(self, table_name: str | None = None) -> None:
         """Clear table cache after drop/delete to avoid stale handles.
@@ -693,6 +710,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         from ..LanceDB.schema_manager import _safe_close_table
 
         with self._table_cache_lock:
+            self._table_cache_epoch += 1
             if table_name is None:
                 stale = list(self._table_cache.values())
                 self._table_cache.clear()
@@ -714,7 +732,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 return self._async_conn
 
             # Get URI from sync connection for reuse
-            sync_conn = self._get_connection()
+            sync_conn = await asyncio.to_thread(self._get_connection)
             uri = getattr(sync_conn, "uri", None)
             if uri is None:
                 # Fallback: use LANCEDB_DIR env var
@@ -2531,7 +2549,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
 
         # Note: ensure_documents_table uses sync connection - may need async variant
         # For now, reuse sync connection for table creation
-        sync_conn = self._get_connection()
+        sync_conn = await asyncio.to_thread(self._get_connection)
         ensure_documents_table(sync_conn)
 
         from ..LanceDB.schema_manager import _safe_close_table
@@ -2560,7 +2578,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         async_conn = await self._get_async_connection()
 
         # Reuse sync connection for table creation
-        sync_conn = self._get_connection()
+        sync_conn = await asyncio.to_thread(self._get_connection)
         ensure_chunks_table(sync_conn)
 
         from ..LanceDB.schema_manager import _safe_close_table
@@ -2594,7 +2612,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             return
 
         async_conn = await self._get_async_connection()
-        sync_conn = self._get_connection()
+        sync_conn = await asyncio.to_thread(self._get_connection)
 
         table_name = f"embeddings_{to_model_tag(model_tag)}"
 

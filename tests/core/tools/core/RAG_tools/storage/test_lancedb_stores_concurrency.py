@@ -24,7 +24,9 @@ erased by its ``clear()`` without ever appearing in its stale snapshot.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
+import time
 from typing import Any, List
 from unittest.mock import Mock, patch
 
@@ -39,17 +41,36 @@ from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _tight_switch_interval():
+    """Force frequent GIL handoffs so the narrow race windows get hit.
+
+    The insert-section window is a few bytecodes wide; at the default 5ms
+    interval a missing lock there slips through most runs.
+    """
+    original = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(original)
+
+
 class _FakeTable:
     def __init__(self, name: str, *, close_delay: float = 0.0) -> None:
         self.name = name
-        self.closed = False
+        self.close_count = 0
         self._close_delay = close_delay
+
+    @property
+    def closed(self) -> bool:
+        return self.close_count > 0
 
     def close(self) -> None:
         # A slow close widens the window an unguarded invalidate leaves open
         # between snapshotting the cache and clearing it.
-        threading.Event().wait(self._close_delay)
-        self.closed = True
+        time.sleep(self._close_delay)
+        self.close_count += 1
 
 
 class _RacyConnection:
@@ -63,7 +84,7 @@ class _RacyConnection:
 
     def open_table(self, name: str) -> _FakeTable:
         # The delay is what makes the interleaving reproducible rather than rare.
-        threading.Event().wait(self._delay)
+        time.sleep(self._delay)
         table = _FakeTable(name, close_delay=self._close_delay)
         with self._lock:
             self.opened.append(table)
@@ -89,6 +110,10 @@ def _assert_every_handle_cached_or_closed(
         f"{len(leaked)} of {len(connection.opened)} opened handles are neither "
         f"cached nor closed"
     )
+    twice = [table for table in connection.opened if table.close_count > 1]
+    assert not twice, f"{len(twice)} handles were closed more than once"
+    live = [table for table in connection.opened if id(table) in cached]
+    assert not [t for t in live if t.closed], "a cached handle was closed"
 
 
 def test_concurrent_open_of_one_table_leaks_no_handle() -> None:
@@ -120,10 +145,10 @@ def test_concurrent_get_and_invalidate_leaks_no_handle() -> None:
     """Interleaved cache fills and invalidations must stay consistent.
 
     Dropping ``invalidate_table_cache``'s lock fails this every run. Dropping
-    the insert-section lock fails it about one run in five: that window is only
-    a few bytecodes wide, and widening it further would mean a test hook inside
-    ``_get_table``. The table and invalidator counts below are tuned for those
-    odds -- raising the duration does not help, the window is what limits it.
+    the insert-section lock fails it most runs, but not all: that window is a
+    few bytecodes wide, and what makes it reachable at all is the autouse
+    ``sys.setswitchinterval`` fixture. Duration alone does nothing at the
+    default interval; paired with the tight one it does, hence 1.5s here.
     """
     connection = _RacyConnection(delay=0.001, close_delay=0.002)
     store = _store_on(connection)
@@ -150,12 +175,43 @@ def test_concurrent_get_and_invalidate_leaks_no_handle() -> None:
     threads += [threading.Thread(target=invalidator) for _ in range(4)]
     for thread in threads:
         thread.start()
-    threading.Event().wait(0.5)
+    time.sleep(1.5)
     stop.set()
     for thread in threads:
         thread.join(timeout=30)
 
     assert not errors, f"concurrent cache access raised: {errors}"
+    _assert_every_handle_cached_or_closed(connection, store)
+
+
+def test_invalidation_during_open_does_not_cache_a_stale_handle() -> None:
+    """A drop landing mid-open must not leave the dropped table cached.
+
+    Deterministic rather than timing-based: the connection invalidates the
+    cache from inside ``open_table``, which is exactly the interleaving a
+    concurrent drop produces -- the cache was empty when the invalidation ran,
+    so nothing there marks the in-flight handle as stale.
+    """
+    connection = _RacyConnection(delay=0.0)
+    store = _store_on(connection)
+    plain_open = connection.open_table
+    fired: List[bool] = []
+
+    def open_then_invalidate(name: str) -> _FakeTable:
+        table = plain_open(name)
+        if not fired:
+            fired.append(True)
+            store.invalidate_table_cache(name)
+        return table
+
+    connection.open_table = open_then_invalidate  # type: ignore[method-assign]
+
+    handle = store._get_table("documents")
+
+    assert len(connection.opened) == 2, "the raced handle must be re-opened"
+    assert connection.opened[0].closed, "the raced handle must not be leaked"
+    assert handle is connection.opened[1]
+    assert store._table_cache["documents"] is connection.opened[1]
     _assert_every_handle_cached_or_closed(connection, store)
 
 
