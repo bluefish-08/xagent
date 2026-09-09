@@ -25,6 +25,11 @@ from typing import Any
 import pytest
 
 from xagent.core.agent import ExecutionContext, PatternRuntime, ReActPattern
+from xagent.core.agent.language import OUTPUT_LANGUAGE_METADATA_KEY
+from xagent.core.agent.transcript import build_assistant_transcript_content
+from xagent.web.services.execution_result_projection import (
+    project_execution_result_for_channel,
+)
 
 
 class FakeLLM:
@@ -47,11 +52,15 @@ def _control_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _run(name: str, arguments: dict[str, Any]) -> tuple[Any, PatternRuntime]:
+async def _run(
+    name: str, arguments: dict[str, Any], output_language: str = ""
+) -> tuple[Any, PatternRuntime]:
     llm = FakeLLM(responses=[_control_call(name, arguments)])
     pattern = ReActPattern(max_iterations=2)
     runtime = PatternRuntime(execution_id="exec-waiting-default")
     context = ExecutionContext()
+    if output_language:
+        context.metadata[OUTPUT_LANGUAGE_METADATA_KEY] = output_language
     context.add_user_message("Do the thing")
 
     result = await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
@@ -475,6 +484,7 @@ async def test_a_model_supplied_list_is_published_as_copies() -> None:
         }
     ]
     _, published = await pattern._send_waiting_message(
+        context=ExecutionContext(),
         runtime=runtime,
         message="Which city?",
         message_type="question",
@@ -578,3 +588,82 @@ async def test_a_normalized_alias_passes_the_write_side_validator() -> None:
             {"message": "Note?", "interactions": published}
         )
     )
+
+
+SIMPLIFIED_FIELD = {**DEFAULT_FIELD, "label": "您的回复", "placeholder": "请输入您的回答"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_language", "expected"),
+    [
+        ("Simplified Chinese", SIMPLIFIED_FIELD),
+        ("zh-cn", SIMPLIFIED_FIELD),
+        (
+            "Traditional Chinese",
+            {**DEFAULT_FIELD, "label": "您的回覆", "placeholder": "請輸入您的回答"},
+        ),
+        ("Japanese", DEFAULT_FIELD),
+        ("", DEFAULT_FIELD),
+    ],
+    ids=["simplified", "alias", "traditional", "untranslated", "unpinned"],
+)
+async def test_the_substituted_field_follows_the_pinned_output_language(
+    output_language: str, expected: dict[str, Any]
+) -> None:
+    """The field is the only thing a user can answer a substituted turn with, so
+    its label is user-facing prose and follows the same pinned language the rest
+    of the turn does. A language the copy table has no entry for stays English
+    rather than blocking the substitution."""
+
+    _, runtime = await _run(
+        "send_message",
+        {"message": "Shall I proceed?", "expect_response": True},
+        output_language=output_language,
+    )
+    assert _published_interactions(runtime) == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_localized_substituted_field_is_still_skipped_by_both_readers() -> None:
+    """The coupling localization introduces. The transcript builder and the
+    channel projection both recognize the substituted field so they can skip it;
+    both would start rendering it again the moment its label stopped matching
+    what they compare against."""
+
+    _, runtime = await _run(
+        "send_message",
+        {"message": "继续吗？", "expect_response": True},
+        output_language="Simplified Chinese",
+    )
+    published = _published_interactions(runtime)
+    assert published == [SIMPLIFIED_FIELD]
+
+    assert build_assistant_transcript_content("继续吗？", published) == "继续吗？"
+    projection = project_execution_result_for_channel(
+        {
+            "status": "waiting_for_user",
+            "success": False,
+            "output": "Need input.",
+            "chat_response": {"message": "继续吗？", "interactions": published},
+        }
+    )
+    assert projection.visible_text == "继续吗？"
+
+
+def test_a_localized_substituted_label_is_stripped_before_the_resume_callback() -> None:
+    """The third reader that used to compare against the English literal."""
+
+    pattern = ReActPattern(max_iterations=2)
+    pattern._queue_tool_interaction_responses(
+        waiting_request={
+            "kind": "tool_waiting_for_user",
+            "interactions": [dict(SIMPLIFIED_FIELD)],
+            "requests": [{"tool_name": "gate", "tool_call_id": "call_1"}],
+        },
+        response="您的回复: 好",
+        tools=[_ResumableTool()],
+    )
+    assert [
+        item["response"] for item in pattern.pending_tool_interaction_responses
+    ] == ["好"]

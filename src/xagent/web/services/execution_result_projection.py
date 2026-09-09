@@ -61,7 +61,9 @@ def project_execution_result_for_channel(
         base_text = CLIENT_SAFE_TASK_FAILURE
         transcript_content = base_text
         interactions = []
-    elif not base_text.strip() and not interactions:
+    elif not _append_interactions(base_text, interactions).strip():
+        # Keyed on what would actually be rendered: the engine's substituted
+        # field is skipped below, so a non-empty list can still render nothing.
         base_text = EMPTY_CHANNEL_OUTPUT_FALLBACK
         transcript_content = base_text
 

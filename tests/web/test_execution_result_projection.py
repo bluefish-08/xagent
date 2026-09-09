@@ -177,3 +177,23 @@ def test_project_execution_result_keeps_real_fields_beside_the_substituted_one()
     assert projection.visible_text == (
         "Which city?\n\n\u2022 Destination\n  Options: Tokyo"
     )
+
+
+def test_project_execution_result_falls_back_when_only_the_substituted_field_remains():
+    """The substituted field makes ``interactions`` non-empty on every waiting
+    turn, including one whose message is blank. Keying the empty-output fallback
+    on the list alone would then send a channel an empty body."""
+
+    projection = project_execution_result_for_channel(
+        {
+            "status": "waiting_for_user",
+            "success": False,
+            "output": "",
+            "chat_response": {
+                "message": "",
+                "interactions": [dict(DEFAULT_WAITING_INTERACTION)],
+            },
+        }
+    )
+
+    assert projection.visible_text == EMPTY_CHANNEL_OUTPUT_FALLBACK

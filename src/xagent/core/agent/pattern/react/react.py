@@ -69,10 +69,11 @@ from ....file_ref import (
 from ....model.chat.exceptions import LLMToolProtocolError
 from ....model.chat.tool_protocol import get_tool_protocol_error
 from ....tools.adapters.vibe.interaction_types import (
-    DEFAULT_WAITING_INTERACTION,
     INTERACTION_TYPE_ALIASES,
     INTERACTION_TYPES,
     TYPES_REQUIRING_OPTIONS,
+    default_waiting_interaction,
+    is_default_waiting_interaction,
 )
 from ....tools.user_interaction import (
     tool_result_waits_for_user,
@@ -89,7 +90,7 @@ from ...context.enrichment import (
 from ...context.memory_tool import build_memory_tools
 from ...context.skill_tool import build_load_skill_tool
 from ...grounding import grounding_rule
-from ...language import final_answer_language_rule
+from ...language import effective_output_language, final_answer_language_rule
 from ...result import (
     CONTROL_TOOL_NAMES,
     tool_result_succeeded,
@@ -404,9 +405,6 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-_DEFAULT_WAITING_ANSWER_PREFIX = f"{DEFAULT_WAITING_INTERACTION['label']}: "
-
-
 def _is_answerable(interaction: Any) -> bool:
     """Whether a user handed this control could produce an answer with it.
 
@@ -420,7 +418,10 @@ def _is_answerable(interaction: Any) -> bool:
     has already mapped them onto these seven by the time this runs. And a
     pick-from-a-list type with nothing to pick survives that normalization
     (which drops the blank options, not the interaction) as a control with no
-    choices. Every other type renders an input that stands on its own.
+    choices. Every other type renders an input that stands on its own, with
+    one gap this check does not close: ``file_upload`` renders nothing and
+    contributes no submitted line while ``filesDisabled`` is set, which it is
+    by default (``clarification-form.tsx``).
 
     Nothing upstream refuses either shape: the tool schema's ``enum`` is a
     prompt, not a runtime constraint, and the write-side admissibility rules
@@ -1842,10 +1843,15 @@ class ReActPattern(AgentPattern):
             return
         # The form submits "<label>: <value>"; for the substituted field the
         # label carries nothing, so a resume callback would get a prefixed value.
-        if waiting_request.get("interactions") == [
-            DEFAULT_WAITING_INTERACTION
-        ] and response.startswith(_DEFAULT_WAITING_ANSWER_PREFIX):
-            response = response[len(_DEFAULT_WAITING_ANSWER_PREFIX) :]
+        published = waiting_request.get("interactions")
+        if (
+            isinstance(published, list)
+            and len(published) == 1
+            and is_default_waiting_interaction(published[0])
+        ):
+            prefix = f"{published[0]['label']}: "
+            if response.startswith(prefix):
+                response = response[len(prefix) :]
         raw_requests = waiting_request.get("requests")
         requests = raw_requests if isinstance(raw_requests, list) else [waiting_request]
         for request in requests:
@@ -2443,6 +2449,7 @@ class ReActPattern(AgentPattern):
             interactions: list[dict[str, Any]] = []
             if expect_response:
                 outbound_message, interactions = await self._send_waiting_message(
+                    context=context,
                     runtime=runtime,
                     message=message,
                     message_type=message_type,
@@ -2540,6 +2547,7 @@ class ReActPattern(AgentPattern):
                 used_fields.add(field)
                 deduplicated_interactions.append(item)
             outbound_message, interactions = await self._send_waiting_message(
+                context=context,
                 runtime=runtime,
                 message=message,
                 message_type="question",
@@ -2595,6 +2603,7 @@ class ReActPattern(AgentPattern):
     async def _send_waiting_message(
         self,
         *,
+        context: Any,
         runtime: PatternRuntime,
         message: str,
         message_type: str,
@@ -2616,6 +2625,10 @@ class ReActPattern(AgentPattern):
         keeps the substituted field the only one, so its base name cannot
         collide with a caller's ``_2``/``_3`` dedup suffixes.
 
+        The substituted field is localized to the run's pinned output language
+        when there is one, and is English otherwise; ``context`` is taken for
+        that alone.
+
         Both branches return a fresh list of fresh dicts: the published list
         is stored on the waiting request and the result dict, so it must not
         alias items the caller still holds. Shallow -- ``options`` and its
@@ -2625,7 +2638,7 @@ class ReActPattern(AgentPattern):
         published = (
             [dict(item) if isinstance(item, dict) else item for item in interactions]
             if any(_is_answerable(item) for item in interactions)
-            else [dict(DEFAULT_WAITING_INTERACTION)]
+            else [default_waiting_interaction(effective_output_language(context))]
         )
         outbound_message = await runtime.send_message(
             message=message,
@@ -2905,6 +2918,7 @@ class ReActPattern(AgentPattern):
             message_type = "question"
 
         outbound_message, interactions = await self._send_waiting_message(
+            context=context,
             runtime=runtime,
             message=message,
             message_type=message_type,

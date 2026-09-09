@@ -1,7 +1,8 @@
 """The interaction types the ask_user_question render surface implements,
-plus three more names about that surface -- the off-contract aliases it
-accepts, one subset of these types, and one literal field -- that the engine,
-the transcript builder and the web layer all have to agree on.
+plus three more things about that surface -- the off-contract aliases it
+accepts, one subset of these types, and the free-text field the engine
+substitutes (with its translations and the check that recognizes it) -- that
+the engine, the transcript builder and the web layer all have to agree on.
 
 Kept in a module of its own rather than beside ``InteractionArg`` in
 ``ask_user_tool``, which is where the model that carries the field lives:
@@ -61,8 +62,9 @@ TYPES_REQUIRING_OPTIONS: frozenset[str] = frozenset(
 )
 
 # The free-text field the engine substitutes when a suspending message would
-# otherwise carry nothing answerable. Copy before publishing -- readers keep
-# what they are handed, and this dict is shared.
+# otherwise carry nothing answerable, in English -- the copy used whenever no
+# output language is pinned. Copy before publishing; readers keep what they
+# are handed.
 DEFAULT_WAITING_INTERACTION: dict[str, object] = {
     "type": "text_input",
     "field": "response",
@@ -71,14 +73,54 @@ DEFAULT_WAITING_INTERACTION: dict[str, object] = {
     "multiline": True,
 }
 
+# Translations of that label and placeholder, keyed by the canonical language
+# labels ``effective_output_language`` returns (``language.py``). Only Chinese:
+# English and Chinese are the two locales the product ships UI copy in
+# (``frontend/src/i18n/locales``), and Simplified and Traditional are kept apart
+# because ``language.py`` treats them as different output languages. Any
+# language absent here keeps the English copy above.
+_DEFAULT_WAITING_TRANSLATIONS: dict[str, tuple[str, str]] = {
+    "Chinese": ("您的回复", "请输入您的回答"),
+    "Simplified Chinese": ("您的回复", "请输入您的回答"),
+    "Mandarin Chinese": ("您的回复", "请输入您的回答"),
+    "Traditional Chinese": ("您的回覆", "請輸入您的回答"),
+    "Cantonese": ("您的回覆", "請輸入您的回答"),
+}
+
+
+def default_waiting_interaction(output_language: str = "") -> dict[str, object]:
+    """Return a fresh substituted field, localized to a pinned output language."""
+
+    translated = _DEFAULT_WAITING_TRANSLATIONS.get(output_language)
+    if translated is None:
+        return dict(DEFAULT_WAITING_INTERACTION)
+    label, placeholder = translated
+    return {**DEFAULT_WAITING_INTERACTION, "label": label, "placeholder": placeholder}
+
+
+_DEFAULT_WAITING_VARIANTS: tuple[dict[str, object], ...] = (
+    DEFAULT_WAITING_INTERACTION,
+    *(
+        default_waiting_interaction(language)
+        for language in _DEFAULT_WAITING_TRANSLATIONS
+    ),
+)
+
 
 def is_default_waiting_interaction(interaction: object) -> bool:
     """Whether this published item is the substituted field, not a real one.
 
-    Equality against the literal above, so it only recognizes the shape the
-    engine itself publishes: an interaction that has been round-tripped
-    through a model dump or arrives from a client carries other keys and is
-    rendered like any other field.
+    Equality against every localized variant the substitution can publish,
+    generated from the same table it publishes from, so the two cannot drift
+    and a run resumed under a different pinned language still recognizes the
+    field it published earlier.
+
+    Equality is a heuristic, not proof of origin: a model-supplied free-text
+    field that happens to carry these exact five keys and this exact copy is
+    indistinguishable from the substituted one and is skipped too. The cost is
+    bounded to the two readers that call this -- one transcript line and one
+    channel bullet -- and neither the published form nor the resumed answer
+    changes.
     """
 
-    return interaction == DEFAULT_WAITING_INTERACTION
+    return any(interaction == variant for variant in _DEFAULT_WAITING_VARIANTS)

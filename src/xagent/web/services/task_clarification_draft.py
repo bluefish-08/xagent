@@ -411,11 +411,12 @@ def parse_clarification_payload(
     carries no interaction items. ``get_latest_waiting_question`` itself is
     not this consistent: it returns ``None`` for a persisted row whose
     ``interactions`` column is ``NULL`` but ``[]`` for a row whose column
-    holds an actual empty list. No ReAct run writes either shape any more --
-    every suspending path publishes at least one answerable field, and
-    ``draft_from_waiting_request`` classifies ``ask_user_question`` by
-    ``tool_name`` rather than by the presence of an ``interactions`` key --
-    so both are now reachable only from rows an older schema wrote. That
+    holds an actual empty list. No newly suspended ReAct run produces either
+    shape any more -- every suspending path publishes at least one answerable
+    field, and ``draft_from_waiting_request`` classifies ``ask_user_question``
+    by ``tool_name`` rather than by the presence of an ``interactions`` key.
+    A run resuming a checkpoint written before that still can: the stored
+    request has no ``interactions`` key and the resume path re-emits it. That
     ``NULL``-vs-``[]`` split on the
     legacy side is a known, un-reconciled divergence, not something this
     function reproduces: every empty case collapses to ``None`` here,
