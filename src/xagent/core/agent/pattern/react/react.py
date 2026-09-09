@@ -70,8 +70,8 @@ from ....model.chat.exceptions import LLMToolProtocolError
 from ....model.chat.tool_protocol import get_tool_protocol_error
 from ....tools.adapters.vibe.interaction_types import (
     DEFAULT_WAITING_INTERACTION,
+    INTERACTION_TYPE_ALIASES,
     INTERACTION_TYPES,
-    RENDERABLE_INTERACTION_TYPES,
     TYPES_REQUIRING_OPTIONS,
 )
 from ....tools.user_interaction import (
@@ -291,6 +291,9 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
             continue
 
         item = dict(interaction)
+        item_type = item.get("type")
+        if isinstance(item_type, str) and item_type in INTERACTION_TYPE_ALIASES:
+            item["type"] = INTERACTION_TYPE_ALIASES[item_type]
         field = item.get("field") or item.get("id") or item.get("name")
         normalized_field = (
             _normalize_interaction_text(field) if isinstance(field, str) else ""
@@ -407,15 +410,17 @@ _DEFAULT_WAITING_ANSWER_PREFIX = f"{DEFAULT_WAITING_INTERACTION['label']}: "
 def _is_answerable(interaction: Any) -> bool:
     """Whether a user handed this control could produce an answer with it.
 
-    Two ways to fail. A type outside ``RENDERABLE_INTERACTION_TYPES`` --
-    including a ``type`` the model did not even send as a string -- is dropped
-    by the frontend's ``normalizeInteractions``
-    (``frontend/src/contexts/app-context-chat.tsx``), and a list it empties
-    renders no form at all, which is the dead end this check exists to
-    prevent. And a pick-from-a-list type with nothing to pick survives
-    ``_normalize_ask_user_interactions`` (which drops the blank options, not
-    the interaction) as a control with no choices. Every other type renders
-    an input that stands on its own.
+    Two ways to fail. A type outside ``INTERACTION_TYPES`` -- including a
+    ``type`` the model did not even send as a string, and ``connect_apps``,
+    whose OAuth-button widget ``ClarificationForm`` renders without a Submit
+    button at all (``isConnectAppsOnly``, clarification-form.tsx) -- is
+    dropped by the frontend's ``normalizeInteractions`` or lands in a form
+    with nothing to submit, which is the dead end this check exists to
+    prevent. Aliases are not a third case: ``_normalize_ask_user_interactions``
+    has already mapped them onto these seven by the time this runs. And a
+    pick-from-a-list type with nothing to pick survives that normalization
+    (which drops the blank options, not the interaction) as a control with no
+    choices. Every other type renders an input that stands on its own.
 
     Nothing upstream refuses either shape: the tool schema's ``enum`` is a
     prompt, not a runtime constraint, and the write-side admissibility rules
@@ -429,7 +434,7 @@ def _is_answerable(interaction: Any) -> bool:
     # is free to send a list) would raise there and kill the whole run.
     if not isinstance(interaction_type, str):
         return False
-    if interaction_type not in RENDERABLE_INTERACTION_TYPES:
+    if interaction_type not in INTERACTION_TYPES:
         return False
     if interaction_type in TYPES_REQUIRING_OPTIONS:
         options = interaction.get("options")
@@ -2611,9 +2616,10 @@ class ReActPattern(AgentPattern):
         keeps the substituted field the only one, so its base name cannot
         collide with a caller's ``_2``/``_3`` dedup suffixes.
 
-        Both branches return fresh dicts: the published list is stored on the
-        waiting request, the tool-call record and the result dict, so it must
-        not alias items the caller still holds.
+        Both branches return a fresh list of fresh dicts: the published list
+        is stored on the waiting request and the result dict, so it must not
+        alias items the caller still holds. Shallow -- ``options`` and its
+        entries stay shared, and no reader rewrites those.
         """
 
         published = (

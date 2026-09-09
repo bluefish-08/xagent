@@ -1,7 +1,7 @@
 """The interaction types the ask_user_question render surface implements,
-plus two more constants about that surface -- one subset of these types, one
-literal field -- that the engine, the transcript builder and the web layer
-all have to agree on.
+plus three more names about that surface -- the off-contract aliases it
+accepts, one subset of these types, and one literal field -- that the engine,
+the transcript builder and the web layer all have to agree on.
 
 Kept in a module of its own rather than beside ``InteractionArg`` in
 ``ask_user_tool``, which is where the model that carries the field lives:
@@ -35,23 +35,21 @@ INTERACTION_TYPES: tuple[str, ...] = (
     "action_cards",
 )
 
-# Every ``type`` the frontend's ``normalizeInteractions`` keeps
-# (``frontend/src/contexts/app-context-chat.tsx``): the seven above, the
-# ``connect_apps`` live widget it renders but the tool schema does not offer,
-# and the aliases it maps onto the canonical names. It drops anything else,
-# and a list it empties renders no form at all -- so this set, not
-# ``INTERACTION_TYPES``, is what the engine's answerability check reads.
-RENDERABLE_INTERACTION_TYPES: frozenset[str] = frozenset(INTERACTION_TYPES) | {
-    "connect_apps",
-    "input",
-    "text",
-    "textarea",
-    "string",
-    "file",
-    "upload",
-    "number",
-    "integer",
-    "boolean",
+# The off-contract type names the frontend's ``normalizeInteractions``
+# (``frontend/src/contexts/app-context-chat.tsx``) maps onto the seven above.
+# Applied engine-side too, so one alias cannot mean a rendered field to the
+# frontend and an unsupported type to the write-side validator, the transcript
+# builder, or the answerability check -- each of which knows only the seven.
+INTERACTION_TYPE_ALIASES: dict[str, str] = {
+    "input": "text_input",
+    "text": "text_input",
+    "textarea": "text_input",
+    "string": "text_input",
+    "file": "file_upload",
+    "upload": "file_upload",
+    "number": "number_input",
+    "integer": "number_input",
+    "boolean": "confirm",
 }
 
 # The subset whose whole purpose is picking from a supplied list, so one of

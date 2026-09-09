@@ -9,9 +9,11 @@ message the frontend rendered as ordinary assistant prose, with nothing to
 answer it with.
 
 ``ReActPattern._send_waiting_message`` is the one place every suspending
-path publishes through, and it substitutes a ``text_input`` field when the
-list is empty. These cells pin that on all three paths and pin the reverse:
-a model that did supply interactions gets exactly its own, untouched.
+path publishes through, and it substitutes a ``text_input`` field whenever
+nothing in the list is answerable -- an empty list, but equally a list whose
+every entry the render surface would drop or render with nothing to pick.
+These cells pin that on all three paths and pin the reverse: a model that
+did supply an answerable field gets exactly its own, untouched.
 """
 
 from __future__ import annotations
@@ -315,15 +317,14 @@ async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "interaction",
+    ("interaction", "expected_type"),
     [
-        {"type": "confirm", "field": "ok", "label": "Proceed?"},
-        {"type": "file_upload", "field": "doc", "label": "Upload"},
-        {"type": "number_input", "field": "n", "label": "How many?"},
-        {"type": "text_input", "field": "note", "label": "Note"},
-        {"type": "text", "field": "note", "label": "Note"},
-        {"type": "boolean", "field": "ok", "label": "Proceed?"},
-        {"type": "connect_apps", "field": "apps", "label": "Connect"},
+        ({"type": "confirm", "field": "ok", "label": "Proceed?"}, "confirm"),
+        ({"type": "file_upload", "field": "doc", "label": "Upload"}, "file_upload"),
+        ({"type": "number_input", "field": "n", "label": "How many?"}, "number_input"),
+        ({"type": "text_input", "field": "note", "label": "Note"}, "text_input"),
+        ({"type": "text", "field": "note", "label": "Note"}, "text_input"),
+        ({"type": "boolean", "field": "ok", "label": "Proceed?"}, "confirm"),
     ],
     ids=[
         "confirm",
@@ -332,24 +333,28 @@ async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
         "text_input",
         "alias_text",
         "alias_boolean",
-        "connect_apps",
     ],
 )
 async def test_a_type_that_needs_no_options_is_left_alone(
     interaction: dict[str, Any],
+    expected_type: str,
 ) -> None:
     """The answerability test must not fire on the types that never render
     options -- replacing one of those would throw away the model's real
-    question. The last three are why the check reads the frontend's whitelist
-    and not the tool schema's ``enum``: ``normalizeInteractions`` maps
-    ``text``/``boolean`` onto canonical names and renders ``connect_apps``,
-    none of which the ``enum`` offers."""
+    question. The last two are aliases the schema ``enum`` never offers:
+    ``_normalize_ask_user_interactions`` maps them onto a canonical name, so
+    the answerability check, the transcript builder and the write-side
+    validator -- none of which know the aliases -- all see the same seven."""
 
     _, runtime = await _run(
         "ask_user_question", {"message": "Well?", "interactions": [interaction]}
     )
     published = _published_interactions(runtime)
-    assert [item["type"] for item in published] == [interaction["type"]]
+    # Field name too: a replaced alias would land on the default field, whose
+    # type is itself ``text_input`` and would satisfy the type check alone.
+    assert [(item["type"], item["field"]) for item in published] == [
+        (expected_type, interaction["field"])
+    ]
 
 
 @pytest.mark.asyncio
@@ -411,8 +416,16 @@ async def test_default_field_passes_the_write_side_validator() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "interaction_type",
-    ["something_new", "", ["select_one"], {"type": "select_one"}, None, 7],
-    ids=["unknown", "blank", "list", "dict", "none", "int"],
+    [
+        "something_new",
+        "",
+        "connect_apps",
+        ["select_one"],
+        {"type": "select_one"},
+        None,
+        7,
+    ],
+    ids=["unknown", "blank", "connect_apps", "list", "dict", "none", "int"],
 )
 async def test_a_type_the_render_surface_cannot_use_is_replaced(
     interaction_type: Any,
@@ -423,7 +436,13 @@ async def test_a_type_the_render_surface_cannot_use_is_replaced(
     schema ``enum`` is a prompt, the tool arguments are raw ``json.loads``, and
     ``validate_v1_write_payload`` has no production caller. A non-``str`` type
     additionally used to raise ``TypeError`` on the frozenset lookup and take
-    the whole run down with it."""
+    the whole run down with it.
+
+    ``connect_apps`` is the one the frontend does keep and still cannot answer:
+    a form whose fields are all live widgets renders no Submit button at all
+    (``isConnectAppsOnly``, ``clarification-form.tsx``). Replacing it costs
+    nothing -- a widget beside any real field keeps the whole list, because
+    one answerable entry is enough."""
 
     _, runtime = await _run(
         "ask_user_question",
@@ -510,3 +529,52 @@ def test_the_substituted_label_is_stripped_before_the_resume_callback(
     assert [
         item["response"] for item in pattern.pending_tool_interaction_responses
     ] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_live_widget_survives_beside_an_answerable_field() -> None:
+    """Replacing an unanswerable list must not become "drop every widget".
+    ``connect_apps`` is unanswerable alone but is a real control the model may
+    want shown next to a question, and the substitution is all-or-nothing."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Connect an app, then tell me which one.",
+            "interactions": [
+                {"type": "connect_apps", "field": "apps", "label": "Connect"},
+                {"type": "text_input", "field": "which", "label": "Which one?"},
+            ],
+        },
+    )
+    assert [item["type"] for item in _published_interactions(runtime)] == [
+        "connect_apps",
+        "text_input",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_normalized_alias_passes_the_write_side_validator() -> None:
+    """The alias mapping is what keeps the four readers of a published type
+    agreeing. Without it the engine would bless ``{"type": "text"}`` as
+    answerable while this validator rejected it as an unsupported type and
+    the transcript builder rendered no line for it at all."""
+
+    from xagent.core.tools.adapters.vibe.ask_user_tool import AskUserQuestionArgs
+    from xagent.web.services.task_interaction_service import validate_v1_write_payload
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Note?",
+            "interactions": [{"type": "text", "field": "note", "label": "Note"}],
+        },
+    )
+    published = _published_interactions(runtime)
+    assert published[0]["type"] == "text_input"
+    assert published[0]["field"] == "note"
+    validate_v1_write_payload(
+        AskUserQuestionArgs.model_validate(
+            {"message": "Note?", "interactions": published}
+        )
+    )
