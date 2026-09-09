@@ -36,10 +36,12 @@ def upgrade() -> None:
 
     Scope, and why it is this narrow:
 
-    * Only `models` = JSON `null`. A config object that merely omits
-      `general` would need a read-modify-write to preserve its other slots;
-      production holds no such row (every row is either JSON `null` or an
-      object with `general` set), so that machinery would be dead code.
+    * Only an empty config: JSON `null` (what every server-side creation
+      path left) or `{}` (what `migration/loaders.py` wrote for imported
+      agents before this change). Both render as "--". A *non-empty* object
+      that merely omits `general` is left alone -- preserving its other
+      slots would need a read-modify-write, and no creation path produces
+      that shape.
     * Only private agents (`team_id IS NULL AND NOT share_enabled`). An
       unset config is resolved per runner at execution time against *that
       user's* default (`llm_utils.resolve_llms_from_names` ->
@@ -57,7 +59,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     table_names = set(inspector.get_table_names())
-    if not {"agents", "user_default_models", "models"} <= table_names:
+    if not {"agents", "user_default_models", "models", "user_models"} <= table_names:
         return
 
     agent_columns = {col["name"] for col in inspector.get_columns("agents")}
@@ -85,10 +87,34 @@ def upgrade() -> None:
         sa.column("id", sa.Integer),
         sa.column("is_active", sa.Boolean),
     )
+    user_models = sa.table(
+        "user_models",
+        sa.column("model_id", sa.Integer),
+        sa.column("user_id", sa.Integer),
+        sa.column("is_shared", sa.Boolean),
+    )
 
     # Only the owner's own default, matching AgentStore's create-time
-    # fallback exactly. Neither side consults ModelStore's shared-default
-    # layer, so an agent's slot never depends on when it was created.
+    # fallback. Neither side consults ModelStore's shared-default layer, so
+    # an agent's slot never depends on when it was created.
+    #
+    # The reachability test is deliberately weaker than the application's:
+    # `_is_model_visible_to_user` resolves visibility through the current
+    # team graph, and freezing a copy of those rules into a historical
+    # revision would leave this statement asserting something that stops
+    # being true. Requiring a `user_models` row that the owner either holds
+    # or that someone shares is stable, and it still keeps an orphaned
+    # default -- one whose model rows are all gone -- from being written
+    # into an agent where the builder would render it blank.
+    reachable = sa.exists().where(
+        sa.and_(
+            user_models.c.model_id == user_defaults.c.model_id,
+            sa.or_(
+                user_models.c.user_id == user_defaults.c.user_id,
+                user_models.c.is_shared.is_(True),
+            ),
+        )
+    )
     default_by_user = {
         int(row["user_id"]): int(row["model_id"])
         for row in bind.execute(
@@ -97,6 +123,7 @@ def upgrade() -> None:
             .where(
                 user_defaults.c.config_type == "general",
                 db_models.c.is_active.is_(True),
+                reachable,
             )
         ).mappings()
     }
@@ -107,10 +134,12 @@ def upgrade() -> None:
         )
         return
 
-    # JSON null compares as its text form on both backends: SQLite stores the
-    # column as TEXT, and PostgreSQL's json has no equality operator to use
-    # instead. Casting is what keeps this one statement dialect-agnostic.
-    unset = sa.cast(agents.c.models, sa.Text) == "null"
+    # An empty config compares as its text form on both backends: SQLite
+    # stores the column as TEXT, and PostgreSQL's json has no equality
+    # operator to use instead. Casting is what keeps this one statement
+    # dialect-agnostic. Both spellings are what json.dumps emits, so no
+    # whitespace variant can hide from this.
+    unset = sa.cast(agents.c.models, sa.Text).in_(("null", "{}"))
     eligible = sa.and_(
         agents.c.team_id.is_(None),
         agents.c.share_enabled.is_(False),
@@ -125,7 +154,7 @@ def upgrade() -> None:
             .where(agents.c.user_id == user_id, eligible)
             .values(models={"general": model_id})
         )
-        filled += result.rowcount if result.rowcount is not None else 0
+        filled += max(result.rowcount or 0, 0)
 
     remaining = bind.execute(
         sa.select(sa.func.count()).select_from(agents).where(eligible)

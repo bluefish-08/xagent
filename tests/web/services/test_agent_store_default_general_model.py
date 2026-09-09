@@ -1,12 +1,14 @@
 """The `general` model slot is filled where the creation paths converge
 (rogercloud review on #2229, finding 1).
 
-`AgentStore.add_agent` is reached by `create_agent` (plain `POST /api/agents`,
-the vibe agent tool), by `AgentManagementService.create_agent_with_optional_key`
-(template creates, `/v1/agents`), and directly by `workforce_creator`. Filling
-the slot in any one caller leaves the others persisting an unset config, which
-the builder renders as "--". `migration/loaders.py` builds its `Agent` outside
-the store and calls the helper itself; `test_platform_migration` covers it.
+`AgentStore.add_agent` is reached by `create_agent` (plain `POST /api/agents`),
+by `AgentManagementService.create_agent_with_optional_key` (template creates,
+`/v1/agents`), and directly by `workforce_creator` -- the callers that pass no
+model config, leaving one the builder renders as "--". Filling the slot in any
+single caller would leave the rest behind. (The vibe agent tool also lands
+here, but assembles its own `models` first, so it only reaches the fallback
+when nothing resolves. `migration/loaders.py` builds its `Agent` outside the
+store and calls the helper directly; `test_platform_migration` covers it.)
 """
 
 from __future__ import annotations
@@ -129,6 +131,26 @@ def test_a_non_dict_payload_passes_through_untouched(
     typos into a 500; it is stored as-is, exactly as before this fallback
     existed."""
     assert _add(db, owner, "Malformed", ["not", "a", "dict"]) == ["not", "a", "dict"]
+
+
+def test_a_default_pointing_at_an_invisible_model_is_not_used(
+    db: Session, owner: User
+) -> None:
+    """Nothing prunes a `user_default_models` row when its model stops being
+    visible (a team move, a demotion). Injecting that id would slip past
+    `_validate_models` on the create path and leave the builder's Main Model
+    blank while its save guard sees a value and lets the agent through."""
+    other = User(username="stranger", password_hash="x", is_admin=False)
+    db.add(other)
+    db.flush()
+    private = _model(db, "someone-elses-private")
+    db.add(UserModel(user_id=other.id, model_id=private.id, is_owner=True))
+    db.add(
+        UserDefaultModel(user_id=owner.id, model_id=private.id, config_type="general")
+    )
+    db.commit()
+
+    assert _add(db, owner, "Invisible default", None) is None
 
 
 def test_no_usable_owner_default_leaves_the_config_untouched(db: Session) -> None:

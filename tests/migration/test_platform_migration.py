@@ -259,7 +259,7 @@ def test_loader_fills_the_general_model_from_the_owner_default(
     (rogercloud review on #2229, finding 1)."""
     from xagent.web.models.agent import Agent
     from xagent.web.models.model import Model as DBModel
-    from xagent.web.models.user import UserDefaultModel
+    from xagent.web.models.user import UserDefaultModel, UserModel
 
     user = _make_user(db_session)
     model = DBModel(
@@ -273,6 +273,7 @@ def test_loader_fills_the_general_model_from_the_owner_default(
     )
     db_session.add(model)
     db_session.flush()
+    db_session.add(UserModel(user_id=user.id, model_id=model.id, is_owner=True))
     db_session.add(
         UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general")
     )

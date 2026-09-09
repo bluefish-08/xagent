@@ -160,7 +160,15 @@ def with_default_general_model(
     that would consult the shared/admin-default layer, which the backfill
     migration deliberately does not, so an agent's slot would depend on when
     it was created -- and it would put a synchronous Redis round-trip inside
-    this write transaction (see the issue #889 note in ``list_agent_items``).
+    this write transaction (the pattern issue #889 is about; see the note in
+    ``workforce_runs.create_preview_workforce_run``).
+
+    The id is still visibility-checked. Nothing prunes a
+    ``user_default_models`` row when the model stops being visible -- a team
+    move or a demotion leaves it pointing at something the owner can no
+    longer see -- and injecting such an id would slip past
+    ``_validate_models`` on the create path, leaving the builder's Main Model
+    blank while its save guard sees a value and lets the agent through.
     """
     if models is not None and not isinstance(models, dict):
         return models
@@ -178,6 +186,11 @@ def with_default_general_model(
         .scalar()
     )
     if default_model_id is None:
+        return models
+
+    from .model_service import _is_model_visible_to_user
+
+    if not _is_model_visible_to_user(db, int(default_model_id), user_id):
         return models
     return {**(models or {}), "general": int(default_model_id)}
 

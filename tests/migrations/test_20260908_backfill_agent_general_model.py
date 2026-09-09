@@ -20,14 +20,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from xagent.web.models.agent import Agent, AgentOrigin
 from xagent.web.models.database import Base
 from xagent.web.models.model import Model as DBModel
-from xagent.web.models.user import User, UserDefaultModel
+from xagent.web.models.user import User, UserDefaultModel, UserModel
 
 MIGRATION = importlib.import_module(
     "xagent.migrations.versions.20260908_backfill_agent_general_model"
 )
 
 # Tables this test touches, in dependency order.
-_TABLE_NAMES = ("users", "models", "user_default_models", "agents")
+_TABLE_NAMES = ("users", "models", "user_models", "user_default_models", "agents")
 _METADATA_TABLES = sa.MetaData()
 for _name in _TABLE_NAMES:
     Base.metadata.tables[_name].to_metadata(_METADATA_TABLES)
@@ -114,6 +114,7 @@ def _agent(db: Session, user: User, name: str, models: dict | None, **kwargs) ->
 def _owner_with_default(db: Session, username: str) -> tuple[User, int]:
     user = _user(db, username)
     model = _model(db, f"{username}-default")
+    db.add(UserModel(user_id=user.id, model_id=model.id, is_owner=True))
     db.add(UserDefaultModel(user_id=user.id, model_id=model.id, config_type="general"))
     return user, int(model.id)
 
@@ -192,6 +193,44 @@ def test_skips_the_hidden_workforce_manager_agent(db: Session) -> None:
 
     assert _models_of(db, visible) == {"general": model_id}
     assert _models_of(db, hidden) is None
+
+
+def test_backfills_an_empty_object_config(db: Session) -> None:
+    """`migration/loaders.py` wrote `models={}` for imported agents, which
+    the builder renders as "--" exactly like JSON null does."""
+    user, model_id = _owner_with_default(db, "owner")
+    agent_id = int(_agent(db, user, "Imported agent", {}).id)
+
+    _run_upgrade(db)
+
+    assert _models_of(db, agent_id) == {"general": model_id}
+
+
+def test_leaves_agents_whose_default_points_at_an_unreachable_model(
+    db: Session,
+) -> None:
+    """Nothing prunes a `user_default_models` row when its model stops being
+    reachable, and writing such an id in would leave the builder's Main Model
+    blank while its save guard sees a value."""
+    user = _user(db, "owner")
+    orphaned = _model(db, "orphaned")
+    db.add(
+        UserDefaultModel(user_id=user.id, model_id=orphaned.id, config_type="general")
+    )
+    private = _model(db, "someone-elses-private")
+    other = _user(db, "other")
+    db.add(UserModel(user_id=other.id, model_id=private.id, is_owner=True))
+    second = _user(db, "second")
+    db.add(
+        UserDefaultModel(user_id=second.id, model_id=private.id, config_type="general")
+    )
+    a = int(_agent(db, user, "Orphaned default", None).id)
+    b = int(_agent(db, second, "Unshared default", None).id)
+
+    _run_upgrade(db)
+
+    assert _models_of(db, a) is None
+    assert _models_of(db, b) is None
 
 
 def test_leaves_agents_whose_owner_has_no_usable_default(db: Session) -> None:

@@ -547,9 +547,11 @@ jobs:
           XAGENT_TEST_POSTGRES_URL: postgresql://xagent:xagent@localhost:5432/xagent_test
 
       - name: Test agent general-model backfill migration (Postgres-only)
-        # Its fixture drops and recreates the four tables it touches, by name,
-        # so this step neither depends on nor preserves state from its
-        # neighbours -- it can be reordered freely.
+        # Keep last. Its fixture DROPs agents/users/models/user_models with
+        # CASCADE and rebuilds them from ORM metadata, which also takes out
+        # ~40 foreign keys on tables it does not own and leaves
+        # alembic_version pointing at head over a schema no migration built.
+        # Anything Postgres-based that runs after it sees that schema.
         if: needs.detect-migration-changes.outputs.should-test == 'true'
         run: |
           pytest tests/migrations/test_20260908_backfill_agent_general_model.py -m postgresql -q
