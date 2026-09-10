@@ -50,6 +50,9 @@ def project_execution_result_for_channel(
         diagnostic_error = (
             str(result.get("error") or "").strip() or base_text.strip() or None
         )
+    # Keyed on what would actually be rendered: the engine's substituted field
+    # is skipped below, so a non-empty list can still render nothing.
+    visible_text = _append_interactions(base_text, interactions)
     if status == "interrupted":
         # An interruption is control state, not an assistant answer. Show a
         # friendly status in every chat channel without adding it to the
@@ -57,17 +60,16 @@ def project_execution_result_for_channel(
         base_text = INTERRUPTED_USER_MESSAGE
         transcript_content = ""
         interactions = []
+        visible_text = base_text
     elif task_status == TaskStatus.FAILED:
         base_text = CLIENT_SAFE_TASK_FAILURE
         transcript_content = base_text
         interactions = []
-    elif not _append_interactions(base_text, interactions).strip():
-        # Keyed on what would actually be rendered: the engine's substituted
-        # field is skipped below, so a non-empty list can still render nothing.
+        visible_text = base_text
+    elif not visible_text.strip():
         base_text = EMPTY_CHANNEL_OUTPUT_FALLBACK
         transcript_content = base_text
-
-    visible_text = _append_interactions(base_text, interactions)
+        visible_text = base_text
 
     return ChannelExecutionProjection(
         task_status=task_status,

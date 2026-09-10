@@ -9,11 +9,13 @@ message the frontend rendered as ordinary assistant prose, with nothing to
 answer it with.
 
 ``ReActPattern._send_waiting_message`` is the one place every suspending
-path publishes through, and it substitutes a ``text_input`` field whenever
-nothing in the list is answerable -- an empty list, but equally a list whose
-every entry the render surface would drop or render with nothing to pick.
-These cells pin that on all three paths and pin the reverse: a model that
-did supply an answerable field gets exactly its own, untouched.
+path publishes through, and it appends a ``text_input`` field whenever
+nothing already in the list is answerable -- an empty list, but equally a
+list whose every entry the render surface would drop or render with nothing
+to pick. Appended, not substituted for the list: an options-less picker's
+``label`` is the question text, and the run has no other copy of it. These
+cells pin that on all three paths and pin the reverse: a model that did
+supply an answerable field gets exactly its own, untouched.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ import pytest
 from xagent.core.agent import ExecutionContext, PatternRuntime, ReActPattern
 from xagent.core.agent.language import OUTPUT_LANGUAGE_METADATA_KEY
 from xagent.core.agent.transcript import build_assistant_transcript_content
+from xagent.core.tools.adapters.vibe.interaction_types import (
+    is_default_waiting_interaction,
+)
 from xagent.web.services.execution_result_projection import (
     project_execution_result_for_channel,
 )
@@ -169,6 +174,62 @@ async def test_send_message_pause_carries_the_field_into_the_structured_row() ->
 
 
 @pytest.mark.asyncio
+async def test_send_message_records_the_field_without_echoing_it_to_the_model() -> None:
+    """Two audiences, two answers. The trace ledger has to show what the pause
+    actually published or a trace cannot be used to check this invariant at
+    all. The model's own tool result must not: ``send_message`` has no
+    ``interactions`` parameter, and handing one back reads as a structured form
+    it produced -- against the tool description, which points structured
+    questions at ``ask_user_question``."""
+
+    llm = FakeLLM(
+        responses=[
+            _control_call(
+                "send_message", {"message": "Shall I?", "expect_response": True}
+            )
+        ]
+    )
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-waiting-ledger")
+    context = ExecutionContext()
+    context.add_user_message("Do the thing")
+    await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert pattern.tool_ledger["call_1"].result["interactions"] == [DEFAULT_FIELD]
+    tool_messages = [
+        message.content
+        for message in context.messages
+        if getattr(message, "role", "") == "tool"
+    ]
+    assert tool_messages
+    assert "Your response" not in "".join(tool_messages)
+
+
+@pytest.mark.asyncio
+async def test_a_non_waiting_send_message_records_no_interactions() -> None:
+    """The ledger key is added on the suspending branch only: an ordinary
+    message publishes no field and must not claim to have published one."""
+
+    llm = FakeLLM(
+        responses=[
+            _control_call("send_message", {"message": "Working on it."}),
+            {"content": "done", "tool_calls": []},
+        ]
+    )
+    pattern = ReActPattern(max_iterations=2)
+    context = ExecutionContext()
+    context.add_user_message("Do the thing")
+    await pattern.run(
+        context=context,
+        tools=[],
+        llm=llm,
+        runtime=PatternRuntime(execution_id="exec-plain-send"),
+    )
+
+    assert "interactions" not in pattern.tool_ledger["call_1"].result
+
+
+@pytest.mark.asyncio
 async def test_a_hidden_waiting_message_keeps_its_visible_flag() -> None:
     """``visible`` is passed through, not overridden: the fallback adds a
     field, it does not decide whether the message is shown."""
@@ -271,7 +332,7 @@ async def test_model_supplied_interactions_are_not_augmented() -> None:
 @pytest.mark.parametrize(
     "picker_type", ["select_one", "select_multiple", "action_cards"]
 )
-async def test_a_picker_whose_options_were_all_blank_is_replaced(
+async def test_a_picker_whose_options_were_all_blank_keeps_its_label(
     picker_type: str,
 ) -> None:
     """The list is non-empty and still unanswerable.
@@ -280,7 +341,9 @@ async def test_a_picker_whose_options_were_all_blank_is_replaced(
     interaction itself, so a picker whose every option was blank arrives here
     as an entry with ``options == []`` -- a control with nothing to select,
     which is the same dead end an empty list is. An emptiness test lets it
-    through; the answerability test replaces it.
+    through; the answerability test appends a field to it. The picker itself
+    stays: its ``label`` is the question, and dropping it leaves a bare input
+    box asking nothing.
     """
 
     _, runtime = await _run(
@@ -291,17 +354,59 @@ async def test_a_picker_whose_options_were_all_blank_is_replaced(
                 {
                     "type": picker_type,
                     "field": "choice",
-                    "label": "Choice",
+                    "label": "Which region?",
                     "options": [{"label": "  ", "value": ""}],
                 }
             ],
         },
     )
-    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+    assert _published_interactions(runtime) == [
+        {
+            "type": picker_type,
+            "field": "choice",
+            "label": "Which region?",
+            "options": [],
+        },
+        DEFAULT_FIELD,
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
+async def test_the_kept_question_text_reaches_both_readers() -> None:
+    """What the label preservation is for. The two readers that skip the
+    substituted field must still render the entry it was appended to, or the
+    user sees an input box and no question."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "",
+            "interactions": [
+                {
+                    "type": "select_one",
+                    "field": "region",
+                    "label": "Which region?",
+                    "options": [],
+                }
+            ],
+        },
+    )
+    published = _published_interactions(runtime)
+
+    assert "Which region?" in build_assistant_transcript_content("", published)
+    projection = project_execution_result_for_channel(
+        {
+            "status": "waiting_for_user",
+            "success": False,
+            "output": "",
+            "chat_response": {"message": "", "interactions": published},
+        }
+    )
+    assert "Which region?" in projection.visible_text
+
+
+@pytest.mark.asyncio
+async def test_a_picker_whose_options_are_not_a_list_gets_a_field() -> None:
     """``_normalize_ask_user_interactions`` warns about a non-list ``options``
     and then leaves it exactly as the model wrote it. A truthy non-list is
     still nothing the render surface can iterate, so answerability has to test
@@ -321,7 +426,15 @@ async def test_a_picker_whose_options_are_not_a_list_is_replaced() -> None:
             ],
         },
     )
-    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+    assert _published_interactions(runtime) == [
+        {
+            "type": "select_one",
+            "field": "choice",
+            "label": "Choice",
+            "options": "auto",
+        },
+        DEFAULT_FIELD,
+    ]
 
 
 @pytest.mark.asyncio
@@ -436,7 +549,7 @@ async def test_default_field_passes_the_write_side_validator() -> None:
     ],
     ids=["unknown", "blank", "connect_apps", "list", "dict", "none", "int"],
 )
-async def test_a_type_the_render_surface_cannot_use_is_replaced(
+async def test_a_type_the_render_surface_cannot_use_gets_a_field(
     interaction_type: Any,
 ) -> None:
     """``normalizeInteractions`` drops anything outside its whitelist and a
@@ -449,9 +562,9 @@ async def test_a_type_the_render_surface_cannot_use_is_replaced(
 
     ``connect_apps`` is the one the frontend does keep and still cannot answer:
     a form whose fields are all live widgets renders no Submit button at all
-    (``isConnectAppsOnly``, ``clarification-form.tsx``). Replacing it costs
-    nothing -- a widget beside any real field keeps the whole list, because
-    one answerable entry is enough."""
+    (``isConnectAppsOnly``, ``clarification-form.tsx``). The entry is kept and
+    the field is appended, so the widget still renders and the form gains
+    something to submit."""
 
     _, runtime = await _run(
         "ask_user_question",
@@ -462,7 +575,9 @@ async def test_a_type_the_render_surface_cannot_use_is_replaced(
             ],
         },
     )
-    assert _published_interactions(runtime) == [DEFAULT_FIELD]
+    published = _published_interactions(runtime)
+    assert published[0]["label"] == "X"
+    assert published[1:] == [DEFAULT_FIELD]
 
 
 @pytest.mark.asyncio
@@ -542,8 +657,38 @@ def test_the_substituted_label_is_stripped_before_the_resume_callback(
 
 
 @pytest.mark.asyncio
+async def test_the_substituted_field_is_deduplicated_against_the_kept_ones() -> None:
+    """The appended field goes through the same ``_unique_field`` dedup the
+    model-supplied fields do, so an unanswerable entry that already occupies
+    ``response`` does not end up sharing a name with it -- two fields under one
+    name lose one of the two submitted answers."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Which one?",
+            "interactions": [
+                {
+                    "type": "select_one",
+                    "field": "response",
+                    "label": "Which region?",
+                    "options": [],
+                }
+            ],
+        },
+    )
+    published = _published_interactions(runtime)
+    assert [item["field"] for item in published] == ["response", "response_2"]
+    # Still recognized as the substituted field under its renamed field, or
+    # the transcript builder and the channel projection would start rendering
+    # it and the resume path would stop stripping its label.
+    assert published[1] == {**DEFAULT_FIELD, "field": "response_2"}
+    assert is_default_waiting_interaction(published[1])
+
+
+@pytest.mark.asyncio
 async def test_a_live_widget_survives_beside_an_answerable_field() -> None:
-    """Replacing an unanswerable list must not become "drop every widget".
+    """Appending to an unanswerable list must not become "drop every widget".
     ``connect_apps`` is unanswerable alone but is a real control the model may
     want shown next to a question, and the substitution is all-or-nothing."""
 

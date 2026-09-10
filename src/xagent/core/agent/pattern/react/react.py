@@ -405,6 +405,18 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _unique_field(base_field: str, used_fields: set[str]) -> str:
+    """Suffix ``_2``/``_3``... until unused, record it, and return it."""
+
+    field = base_field
+    suffix = 2
+    while field in used_fields:
+        field = f"{base_field}_{suffix}"
+        suffix += 1
+    used_fields.add(field)
+    return field
+
+
 def _is_answerable(interaction: Any) -> bool:
     """Whether a user handed this control could produce an answer with it.
 
@@ -2218,13 +2230,11 @@ class ReActPattern(AgentPattern):
                 "function": {
                     "name": "send_message",
                     "description": (
-                        "Send a prose message to the user. Set message_type to "
-                        "what the message is: use progress to report work "
-                        "already underway, not to announce a plan you have not "
-                        "started. Set expect_response=true only when the task "
-                        "cannot continue until the user replies, and only for a "
-                        "reply you can read as free text; when the answer should "
-                        "come from options or from named fields, call "
+                        "Send a prose message to the user. Set "
+                        "expect_response=true only when the task cannot "
+                        "continue until the user replies, and only for a reply "
+                        "you can read as free text; when the answer should come "
+                        "from options or from named fields, call "
                         "ask_user_question instead."
                     ),
                     "parameters": {
@@ -2465,24 +2475,25 @@ class ReActPattern(AgentPattern):
                     visible=visible,
                     metadata=source,
                 )
-            self._record_tool_call(
-                tool_call,
-                status="completed",
-                result={
-                    "message": message,
-                    "expect_response": expect_response,
-                    "visible": visible,
-                },
-            )
+            ledger_result: dict[str, Any] = {
+                "message": message,
+                "expect_response": expect_response,
+                "visible": visible,
+            }
+            if expect_response:
+                ledger_result["interactions"] = interactions
+            self._record_tool_call(tool_call, status="completed", result=ledger_result)
             if expect_response:
                 self.status = "waiting_for_user"
+                # No ``interactions`` here: the model called a tool that has
+                # no such parameter, and echoing a form back would read as one
+                # it produced.
                 context.add_tool_result(
                     tool_name=name,
                     result={
                         "status": "waiting_for_user",
                         "message": message,
                         "message_type": message_type,
-                        "interactions": interactions,
                     },
                     tool_call_id=tool_call.get("id"),
                 )
@@ -2537,14 +2548,9 @@ class ReActPattern(AgentPattern):
             deduplicated_interactions: list[dict[str, Any]] = []
             for interaction in interactions:
                 item = dict(interaction)
-                base_field = str(item.get("field") or "response")
-                field = base_field
-                suffix = 2
-                while field in used_fields:
-                    field = f"{base_field}_{suffix}"
-                    suffix += 1
-                item["field"] = field
-                used_fields.add(field)
+                item["field"] = _unique_field(
+                    str(item.get("field") or "response"), used_fields
+                )
                 deduplicated_interactions.append(item)
             outbound_message, interactions = await self._send_waiting_message(
                 context=context,
@@ -2620,26 +2626,33 @@ class ReActPattern(AgentPattern):
         need the published list back to store on the waiting request -- which
         is also what the structured interaction row is built from.
 
-        A list with nothing answerable in it is replaced, not appended to:
-        every entry in it is a control the user cannot use, and replacing
-        keeps the substituted field the only one, so its base name cannot
-        collide with a caller's ``_2``/``_3`` dedup suffixes.
+        A list with nothing answerable in it is appended to, not replaced:
+        the entries the user cannot act on still carry the question text --
+        an options-less ``select_one``'s ``label`` is the question -- and
+        replacing them leaves a bare input box asking nothing. The appended
+        field takes its name through the same ``_unique_field`` dedup the
+        model-supplied fields do, so it cannot collide with one of them.
 
         The substituted field is localized to the run's pinned output language
         when there is one, and is English otherwise; ``context`` is taken for
         that alone.
 
-        Both branches return a fresh list of fresh dicts: the published list
-        is stored on the waiting request and the result dict, so it must not
-        alias items the caller still holds. Shallow -- ``options`` and its
-        entries stay shared, and no reader rewrites those.
+        The published list is a fresh list of fresh dicts: it is stored on the
+        waiting request and the result dict, so it must not alias items the
+        caller still holds. Shallow -- ``options`` and its entries stay
+        shared, and no reader rewrites those.
         """
 
-        published = (
-            [dict(item) if isinstance(item, dict) else item for item in interactions]
-            if any(_is_answerable(item) for item in interactions)
-            else [default_waiting_interaction(effective_output_language(context))]
-        )
+        published = [dict(item) for item in interactions]
+        if not any(_is_answerable(item) for item in published):
+            substituted = default_waiting_interaction(
+                effective_output_language(context)
+            )
+            substituted["field"] = _unique_field(
+                str(substituted["field"]),
+                {str(item.get("field") or "") for item in published},
+            )
+            published.append(substituted)
         outbound_message = await runtime.send_message(
             message=message,
             message_type=message_type,
@@ -2878,14 +2891,9 @@ class ReActPattern(AgentPattern):
             deduplicated_request_interactions: list[dict[str, Any]] = []
             for interaction in request_interactions:
                 item = dict(interaction)
-                base_field = str(item.get("field") or "response")
-                field = base_field
-                suffix = 2
-                while field in used_fields:
-                    field = f"{base_field}_{suffix}"
-                    suffix += 1
-                item["field"] = field
-                used_fields.add(field)
+                item["field"] = _unique_field(
+                    str(item.get("field") or "response"), used_fields
+                )
                 interactions.append(item)
                 deduplicated_request_interactions.append(item)
 
