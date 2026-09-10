@@ -3647,10 +3647,6 @@ class LanceDBIngestionStatusStore(IngestionStatusStore):
         """Get sync LanceDB connection."""
         return get_connection_from_env()
 
-    async def _get_async_connection(self) -> Any:
-        """Get the process-wide async LanceDB connection."""
-        return await get_async_connection_from_env()
-
     def _ensure_ingestion_runs_table(self, conn: DBConnection) -> None:
         """Ensure ingestion_runs table exists."""
         from ..LanceDB.schema_manager import ensure_ingestion_runs_table
