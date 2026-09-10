@@ -64,6 +64,9 @@ from ...core.execution_scope import (
     resolve_execution_scope_off_turn,
 )
 from ...core.file_ref import FILE_REF_MODEL_INSTRUCTIONS, build_file_ref
+from ...core.tools.adapters.vibe.interaction_types import (
+    is_default_waiting_interaction,
+)
 from ..models.chat_message import TaskChatMessage
 from ..models.database import (
     get_db,
@@ -8107,7 +8110,18 @@ def _load_historical_stream_snapshot_sync(
                         "visible": True,
                     }
                     if isinstance(interactions, list):
-                        data["metadata"] = {"interactions": interactions}
+                        # Replay only. The substituted free-text field exists to
+                        # make the current waiting turn answerable, and that turn
+                        # is reasserted separately below; replaying it here would
+                        # grow a clarification form on every past send_message
+                        # pause that never had one.
+                        data["metadata"] = {
+                            "interactions": [
+                                item
+                                for item in interactions
+                                if not is_default_waiting_interaction(item)
+                            ]
+                        }
                     event_type = "agent_message"
                 else:
                     continue
