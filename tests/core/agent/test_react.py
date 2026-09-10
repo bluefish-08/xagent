@@ -4653,8 +4653,8 @@ async def test_react_pattern_ask_user_question_pauses_with_structured_payload() 
     assert outbound_message["expect_response"] is True
     assert outbound_message["visible"] is True
     assert outbound_message["step_id"] == outbound_message["metadata"]["step_id"]
-    # Carries real options: a picker with nothing to select is replaced by the
-    # engine's free-text field, which would make this a test of that instead.
+    # Carries real options: a picker with nothing to select gets the engine's
+    # free-text field appended, which would make this a test of that instead.
     assert outbound_message["metadata"]["interactions"] == [
         {
             "type": "select_one",
@@ -5194,7 +5194,7 @@ async def test_pause_for_tool_results_deduplicates_normalized_fields() -> None:
         "message": "Pick one",
         "message_type": "question",
         # Options are what keep these answerable, so the published list is the
-        # deduplicated one rather than the engine's free-text substitute.
+        # deduplicated one with no free-text field appended.
         "interactions": [
             {
                 "type": "select_one",

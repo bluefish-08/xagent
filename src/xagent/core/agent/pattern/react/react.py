@@ -250,8 +250,9 @@ def _normalize_ask_user_interactions(interactions: Any) -> list[dict[str, Any]]:
     treated the same as missing: the option is dropped. A field name that is
     blank after normalization falls back to ``response_{index}``; a
     well-formed field name is normalized and written back so the frontend's
-    own ``trim()`` is a no-op on it. Survivors are otherwise kept verbatim --
-    only blankness is judged here, not content.
+    own ``trim()`` is a no-op on it. An off-contract ``type`` is rewritten to
+    the canonical name the frontend maps it to (``INTERACTION_TYPE_ALIASES``).
+    Survivors are otherwise kept verbatim.
 
     The alias chain ``field or id or name`` intentionally keeps its raw
     truthiness check; it is not normalization-aware. The frontend's own
@@ -1855,15 +1856,16 @@ class ReActPattern(AgentPattern):
             return
         # The form submits "<label>: <value>"; for the substituted field the
         # label carries nothing, so a resume callback would get a prefixed value.
+        # Not keyed on the field being alone: it is appended to entries the form
+        # renders but cannot submit, which contribute no line of their own.
         published = waiting_request.get("interactions")
-        if (
-            isinstance(published, list)
-            and len(published) == 1
-            and is_default_waiting_interaction(published[0])
-        ):
-            prefix = f"{published[0]['label']}: "
+        for item in published if isinstance(published, list) else []:
+            if not is_default_waiting_interaction(item):
+                continue
+            prefix = f"{item['label']}: "
             if response.startswith(prefix):
                 response = response[len(prefix) :]
+            break
         raw_requests = waiting_request.get("requests")
         requests = raw_requests if isinstance(raw_requests, list) else [waiting_request]
         for request in requests:

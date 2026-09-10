@@ -5,8 +5,11 @@ left "no controls means answer in free text" to the reader. No reader
 implements it, so a model that emits ``ask_user_question`` with an empty or
 missing ``interactions`` -- or that suspends through ``send_message``, which
 has no ``interactions`` parameter at all -- produced a ``waiting_for_user``
-message the frontend rendered as ordinary assistant prose, with nothing to
-answer it with.
+turn the frontend rendered as ordinary assistant prose with no form. The
+composer stays open during a wait (``waiting_for_user`` is a stopped status,
+``ChatInput.tsx``), so a free-text reply was still possible there; what was
+missing is the form, and with it every surface built on the structured
+interaction row, which is built from this same list.
 
 ``ReActPattern._send_waiting_message`` is the one place every suspending
 path publishes through, and it appends a ``text_input`` field whenever
@@ -373,9 +376,9 @@ async def test_a_picker_whose_options_were_all_blank_keeps_its_label(
 
 @pytest.mark.asyncio
 async def test_the_kept_question_text_reaches_both_readers() -> None:
-    """What the label preservation is for. The two readers that skip the
-    substituted field must still render the entry it was appended to, or the
-    user sees an input box and no question."""
+    """What the label preservation is for. The readers that skip the appended
+    field must still render the entry it was appended to, or the user sees an
+    input box and no question."""
 
     _, runtime = await _run(
         "ask_user_question",
@@ -623,11 +626,29 @@ class _ResumableTool:
     [
         ([dict(DEFAULT_FIELD)], "hello"),
         (
+            [
+                {
+                    "type": "select_one",
+                    "field": "choice",
+                    "label": "Which region?",
+                    "options": [],
+                },
+                dict(DEFAULT_FIELD),
+            ],
+            "hello",
+        ),
+        ([{**DEFAULT_FIELD, "field": "response_2"}], "hello"),
+        (
             [{"type": "text_input", "field": "note", "label": "Your response"}],
             "Your response: hello",
         ),
     ],
-    ids=["substituted", "model_supplied_same_label"],
+    ids=[
+        "substituted",
+        "beside_the_entry_it_was_appended_to",
+        "renamed_by_dedup",
+        "model_supplied_same_label",
+    ],
 )
 def test_the_substituted_label_is_stripped_before_the_resume_callback(
     published: list[dict[str, Any]], expected: str
@@ -636,7 +657,12 @@ def test_the_substituted_label_is_stripped_before_the_resume_callback(
     field's label is engine-invented, so passing the prefixed string on would
     hand a tool's ``resume_user_interaction`` something the user never typed.
     A model-supplied field that happens to share the label keeps its prefix --
-    that label is the model's own words and the tool may rely on it."""
+    that label is the model's own words and the tool may rely on it.
+
+    The second case is the one appending created: the entry the field was
+    appended to renders but submits no line of its own (no value can be
+    selected from an empty options list), so the user's whole submission is
+    still the substituted field's one prefixed line."""
 
     pattern = ReActPattern()
     pattern._queue_tool_interaction_responses(

@@ -240,7 +240,7 @@ def test_send_message_carrying_interactions_still_classifies_as_send_message() -
 
 
 def test_a_request_with_no_tool_name_classifies_as_send_message() -> None:
-    """The only shape the old and new rules disagree on, and the one the
+    """The second shape the old and new rules disagree on, and the one the
     docstring's "``tool_name`` has always been written here" claim rests on.
 
     ``message_type == "question"`` plus a non-empty ``interactions`` and no

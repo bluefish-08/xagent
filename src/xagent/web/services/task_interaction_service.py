@@ -1313,7 +1313,8 @@ def validate_v1_write_payload(parsed: AskUserQuestionArgs) -> None:
         # rule cannot drift from itself. interaction.type is provably in
         # _V1_INTERACTION_TYPES by here -- the unsupported_type check
         # above rejects anything else. Shared with the engine, which
-        # replaces rather than refuses an unanswerable control.
+        # appends a usable field beside an unanswerable control rather than
+        # refusing it.
         requires_options = interaction.type in TYPES_REQUIRING_OPTIONS
         if requires_options and not interaction.options:
             raise InteractionWritePayloadRejected(

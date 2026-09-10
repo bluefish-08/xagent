@@ -132,10 +132,12 @@ def is_default_waiting_interaction(interaction: object) -> bool:
 
     Equality is a heuristic, not proof of origin: a model-supplied free-text
     field that happens to carry this exact copy is indistinguishable from the
-    substituted one and is skipped too. The cost is bounded to the three
-    readers that call this -- one transcript line, one channel bullet and one
-    replayed history row -- and neither the published form nor the resumed
-    answer changes.
+    substituted one. Three of the four callers only skip rendering it -- one
+    transcript line, one channel bullet, one replayed history row -- and the
+    published form is unaffected. The fourth (``_queue_tool_interaction_
+    responses``, ``react.py``) strips the ``"<label>: "`` prefix off the
+    answer handed to a tool's resume callback, so a false match there costs
+    that tool the label it chose.
     """
 
     if not isinstance(interaction, dict):

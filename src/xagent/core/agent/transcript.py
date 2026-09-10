@@ -20,8 +20,8 @@ def build_assistant_transcript_content(
     if interactions:
         interaction_lines: List[str] = []
         for interaction in interactions:
-            # The engine substitutes this field wherever a suspending message
-            # would carry no control at all; it says nothing the prose does
+            # The engine appends this field wherever a suspending message
+            # would carry nothing answerable; it says nothing the prose does
             # not, and every waiting turn would otherwise replay it.
             if is_default_waiting_interaction(interaction):
                 continue

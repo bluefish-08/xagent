@@ -237,9 +237,9 @@ def draft_from_waiting_request(
     - otherwise ``request["tool_name"] == "ask_user_question"`` ->
       ``"ask_user_question"``. Keyed on the tool name rather than on the
       presence of an ``"interactions"`` key, because every waiting path now
-      carries that key: the engine substitutes a default free-text field
-      when the model supplied none, so key presence no longer tells the two
-      control tools apart. ``tool_name`` has always been written here, so
+      carries that key: the engine appends a default free-text field
+      whenever nothing the model supplied is answerable, so key presence no
+      longer tells the two control tools apart. ``tool_name`` has always been written here, so
       checkpoints from before that substitution classify the same way.
     - otherwise -> ``"send_message"``.
 
@@ -251,8 +251,8 @@ def draft_from_waiting_request(
     - ``request`` is a dict but carries neither a non-empty message nor an
       ``"interactions"`` key nor a non-empty ``"requests"`` list. No
       ReAct waiting path produces that shape any more -- every one of them
-      now writes an ``"interactions"`` key, defaulted to a free-text field
-      when the model supplied none. What remains is resuming a checkpoint
+      now writes an ``"interactions"`` key, carrying an appended free-text
+      field whenever nothing the model supplied is answerable. What remains is resuming a checkpoint
       written by an older schema, which degrades to "no draft" instead of
       raising and blocking resume.
     """
