@@ -268,6 +268,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   // Set once loadAgent decides to load an owner-scoped MCP list for an admin
   // cross-user view, so the mount-time self-scoped fetch won't clobber it.
   const ownerScopedMcpRef = useRef(false)
+  // The CURRENT user's general default (not necessarily the agent owner's),
+  // kept so the edit-mode seed below can run whichever mount fetch lands last.
+  const userDefaultGeneralRef = useRef<number | null>(null)
+  const seededGeneralRef = useRef<number | null>(null)
   const router = useRouter()
   const searchParams = useSearchParams()
   const templateId = searchParams.get("template")
@@ -788,6 +792,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (userDefaultsRes.ok) {
           const userDefaults = await userDefaultsRes.json()
 
+          for (const m of userDefaults) {
+            if (m.config_type === 'general') userDefaultGeneralRef.current = m.model.id
+          }
+
           // Set model config based on user defaults (only for new agent)
           if (!isEditMode) {
             const config: AgentModelConfig = {
@@ -837,6 +845,20 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       console.error("Failed to refresh KBs:", error)
     }
   }
+
+  // Server-side creation paths persisted no model config, which rendered "--"
+  // and tripped the required-model guard on save. Both mount fetches must have
+  // landed before we can tell an unset slot from one still loading.
+  useEffect(() => {
+    // Not in a read-only cross-user view: the default below is the viewer's,
+    // so seeding there would render someone else's model as this agent's.
+    if (!isEditMode || readOnly || !isInitialDataLoaded || !originalData) return
+    if (seededGeneralRef.current !== null) return
+    const seeded = userDefaultGeneralRef.current
+    if (!seeded) return
+    seededGeneralRef.current = seeded
+    setModelConfig(prev => (prev.general ? prev : { ...prev, general: seeded }))
+  }, [isEditMode, isInitialDataLoaded, originalData])
 
   // Load agent data in edit mode
   useEffect(() => {
@@ -1311,7 +1333,13 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
     // Compare models
     const origModels = originalData.models || {}
-    if ((modelConfig.general || null) !== (origModels.general || null)) return true
+    // A seeded slot is not a user edit: counting it would disable Publish on
+    // open for exactly the agents this seed exists to unblock. The stored-slot
+    // test is what keeps a real edit that lands on the seeded model dirty.
+    const seededOnly =
+      (origModels.general || null) === null &&
+      modelConfig.general === seededGeneralRef.current
+    if (!seededOnly && (modelConfig.general || null) !== (origModels.general || null)) return true
     if ((modelConfig.small_fast || null) !== (origModels.small_fast || null)) return true
     if ((modelConfig.visual || null) !== (origModels.visual || null)) return true
     if ((modelConfig.compact || null) !== (origModels.compact || null)) return true

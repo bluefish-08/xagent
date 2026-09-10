@@ -2175,13 +2175,18 @@ class AgentTool(AbstractBaseTool):
                 # Resolve models
                 storage = UserAwareModelStorage(db)
 
-                if agent_models:
-                    from .agent_model_resolution import resolve_agent_model_llms
+                from .agent_model_resolution import resolve_agent_model_llms
 
-                    default_llm, fast_llm, vision_llm, compact_llm = (
-                        resolve_agent_model_llms(
-                            db, storage, agent_models, self._user_id
-                        )
+                default_llm, fast_llm, vision_llm, compact_llm = (
+                    resolve_agent_model_llms(db, storage, agent_models, self._user_id)
+                )
+                # Server-side creation paths persisted no model config, and an
+                # unset slot must not fail the delegation outright. This is the
+                # same chain the plain chat path already resolves through, env
+                # tail included -- see resolve_llms_from_names.
+                if not default_llm:
+                    default_llm, _, _, _ = storage.get_configured_defaults(
+                        self._user_id, config_types=("general",)
                     )
             # ---- Phase 1 session closed here. ----
 
