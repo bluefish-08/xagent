@@ -479,9 +479,9 @@ async def test_each_append_publishes_its_own_copy() -> None:
 
 @pytest.mark.asyncio
 async def test_the_caller_s_own_list_is_not_appended_to() -> None:
-    """The published list is stored on the waiting request, the tool-call
-    record and the result dict. Appending in place would also mutate the list
-    ``_pause_for_tool_results`` built for its per-tool request entries."""
+    """The published list outlives the call on the waiting request, the
+    tool-call record and the result dict, so it must not be a list the caller
+    still holds a reference to."""
 
     pattern = ReActPattern(max_iterations=2)
     supplied: list[dict[str, Any]] = []
