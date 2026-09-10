@@ -590,7 +590,11 @@ async def test_a_normalized_alias_passes_the_write_side_validator() -> None:
     )
 
 
-SIMPLIFIED_FIELD = {**DEFAULT_FIELD, "label": "您的回复", "placeholder": "请输入您的回答"}
+SIMPLIFIED_FIELD = {
+    **DEFAULT_FIELD,
+    "label": "您的回复",
+    "placeholder": "请输入您的回答",
+}
 
 
 @pytest.mark.asyncio
