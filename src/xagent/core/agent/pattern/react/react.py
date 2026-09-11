@@ -2587,7 +2587,10 @@ class ReActPattern(AgentPattern):
                     "status": "waiting_for_user",
                     "message": message,
                     "message_type": "question",
-                    "interactions": interactions,
+                    # Pre-append copy: what the model supplied is its own output
+                    # and echoes back; an engine-appended field would read as
+                    # one it authored too.
+                    "interactions": deduplicated_interactions,
                 },
                 tool_call_id=tool_call.get("id"),
             )
@@ -2644,7 +2647,11 @@ class ReActPattern(AgentPattern):
             appended = dict(DEFAULT_WAITING_INTERACTION)
             appended["field"] = _unique_field(
                 str(appended["field"]),
-                {str(item.get("field") or "") for item in published},
+                {
+                    str(item.get("field") or "")
+                    for item in published
+                    if isinstance(item, dict)
+                },
             )
             published.append(appended)
         outbound_message = await runtime.send_message(

@@ -85,20 +85,22 @@ DEFAULT_FIELD = {
 
 
 @pytest.mark.asyncio
-async def test_ask_user_question_with_an_empty_interactions_list() -> None:
-    result, runtime = await _run(
-        "ask_user_question", {"message": "Which one?", "interactions": []}
-    )
-    assert _published_interactions(runtime) == [DEFAULT_FIELD]
-    assert result["interactions"] == [DEFAULT_FIELD]
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"message": "Which one?", "interactions": []},
+        {"message": "Which one?"},
+    ],
+    ids=["empty-list", "key-omitted"],
+)
+async def test_ask_user_question_with_no_interactions(
+    arguments: dict[str, Any],
+) -> None:
+    """``key-omitted`` is the shape Kimi K2.5 was observed producing:
+    ``interactions`` is in the schema's ``required`` list and the model omits
+    it anyway."""
 
-
-@pytest.mark.asyncio
-async def test_ask_user_question_with_the_interactions_key_omitted() -> None:
-    """The shape Kimi K2.5 was observed producing: ``interactions`` is in the
-    schema's ``required`` list and the model omits it anyway."""
-
-    result, runtime = await _run("ask_user_question", {"message": "Which one?"})
+    result, runtime = await _run("ask_user_question", arguments)
     assert _published_interactions(runtime) == [DEFAULT_FIELD]
     assert result["interactions"] == [DEFAULT_FIELD]
 
@@ -197,6 +199,55 @@ async def test_send_message_records_the_field_without_echoing_it_to_the_model() 
 
 
 @pytest.mark.asyncio
+async def test_ask_user_question_echoes_only_what_the_model_itself_supplied() -> None:
+    """``ask_user_question`` does have an ``interactions`` parameter, so its
+    tool result echoes the model's own list back -- but only that list. The
+    appended field is the engine's, and handing it back would read on a
+    retry/replan as a control the model had written itself."""
+
+    llm = FakeLLM(
+        responses=[
+            _control_call(
+                "ask_user_question",
+                {
+                    "message": "Which one?",
+                    "interactions": [
+                        {
+                            "type": "select_one",
+                            "field": "choice",
+                            "label": "Which region?",
+                            "options": [],
+                        }
+                    ],
+                },
+            )
+        ]
+    )
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-ask-echo")
+    context = ExecutionContext()
+    context.add_user_message("Do the thing")
+    await pattern.run(context=context, tools=[], llm=llm, runtime=runtime)
+
+    assert _published_interactions(runtime) == [
+        {
+            "type": "select_one",
+            "field": "choice",
+            "label": "Which region?",
+            "options": [],
+        },
+        DEFAULT_FIELD,
+    ]
+    echoed = "".join(
+        message.content
+        for message in context.messages
+        if getattr(message, "role", "") == "tool"
+    )
+    assert "Which region?" in echoed
+    assert "Your response" not in echoed
+
+
+@pytest.mark.asyncio
 async def test_a_non_waiting_send_message_records_no_interactions() -> None:
     """The ledger key is added on the suspending branch only: an ordinary
     message publishes no field and must not claim to have published one."""
@@ -262,6 +313,72 @@ async def test_tool_requested_pause_with_no_interactions() -> None:
     assert _published_interactions(runtime) == [DEFAULT_FIELD]
     assert pattern.waiting_for_user_request is not None
     assert pattern.waiting_for_user_request["interactions"] == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+async def test_tool_requested_pause_carries_the_field_into_the_draft() -> None:
+    """The third path reaches the structured surface through the same
+    ``clarification_draft``, which was only pinned on ``send_message``. The
+    draft takes its ``interactions`` from the waiting request's top-level
+    list -- the published one -- not from the per-tool ``requests`` copies."""
+
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-tool-wait-draft")
+    context = ExecutionContext()
+    context.add_user_message("Ask")
+
+    outcome = await pattern._pause_for_tool_results(
+        waiting_pairs=[
+            ({"id": "call_a", "name": "tool_a"}, {"message": "Need a value"})
+        ],
+        context=context,
+        runtime=runtime,
+    )
+
+    draft = outcome["clarification_draft"]
+    assert draft is not None
+    assert draft.source == "tool_waiting"
+    assert list(draft.interactions) == [DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+async def test_the_per_request_copies_exclude_the_appended_field() -> None:
+    """``requests[*]["interactions"]`` is the per-tool attribution of the
+    published list: it records what that tool itself asked for. The appended
+    field is the engine's and belongs to no tool, so it stays out of every
+    copy even though it is in the published one.
+
+    ``tool_a`` brings a real (if unanswerable) entry so that ``tool_b``'s
+    empty copy is a distinguishing assertion rather than a truism.
+    """
+
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-tool-wait-copies")
+    context = ExecutionContext()
+    context.add_user_message("Ask")
+
+    picker = {
+        "type": "select_one",
+        "field": "choice",
+        "label": "Which region?",
+        "options": [],
+    }
+    await pattern._pause_for_tool_results(
+        waiting_pairs=[
+            (
+                {"id": "call_a", "name": "tool_a"},
+                {"message": "Need a region", "interactions": [picker]},
+            ),
+            ({"id": "call_b", "name": "tool_b"}, {"message": "Need a value"}),
+        ],
+        context=context,
+        runtime=runtime,
+    )
+
+    assert _published_interactions(runtime) == [picker, DEFAULT_FIELD]
+    assert pattern.waiting_for_user_request is not None
+    requests = pattern.waiting_for_user_request["requests"]
+    assert [request["interactions"] for request in requests] == [[picker], []]
 
 
 @pytest.mark.asyncio
@@ -594,6 +711,60 @@ async def test_the_appended_field_is_deduplicated_against_the_kept_ones() -> Non
     published = _published_interactions(runtime)
     assert [item["field"] for item in published] == ["response", "response_2"]
     assert published[1] == {**DEFAULT_FIELD, "field": "response_2"}
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_entry_survives_the_used_name_scan() -> None:
+    """``_is_answerable`` refuses a non-dict entry, and the name scan right
+    after it has to tolerate the same shape or that refusal turns into an
+    ``AttributeError`` at the only call site. Driven directly: every caller
+    normalizes first, so no public path can deliver one today."""
+
+    pattern = ReActPattern(max_iterations=2)
+    runtime = PatternRuntime(execution_id="exec-non-dict-entry")
+
+    _, published = await pattern._send_waiting_message(
+        runtime=runtime,
+        message="Which one?",
+        message_type="question",
+        interactions=["response"],  # type: ignore[list-item]
+        metadata={},
+    )
+    assert published == ["response", DEFAULT_FIELD]
+
+
+@pytest.mark.asyncio
+async def test_the_appended_field_walks_past_two_taken_names() -> None:
+    """``_unique_field`` keeps counting. One collision only proves the suffix
+    is appended; two prove the counter advances instead of retrying ``_2``."""
+
+    _, runtime = await _run(
+        "ask_user_question",
+        {
+            "message": "Which one?",
+            "interactions": [
+                {
+                    "type": "select_one",
+                    "field": "response",
+                    "label": "Which region?",
+                    "options": [],
+                },
+                {
+                    "type": "select_one",
+                    "field": "response",
+                    "label": "Which city?",
+                    "options": [],
+                },
+            ],
+        },
+    )
+    published = _published_interactions(runtime)
+    assert [item["field"] for item in published] == [
+        "response",
+        "response_2",
+        "response_3",
+    ]
+    assert published[2] == {**DEFAULT_FIELD, "field": "response_3"}
 
 
 @pytest.mark.asyncio
