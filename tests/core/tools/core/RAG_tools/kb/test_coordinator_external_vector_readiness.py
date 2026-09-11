@@ -65,7 +65,9 @@ def _methods_touching_shim(source: str) -> set[str]:
             if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for node in ast.walk(method):
-                if isinstance(node, ast.Attribute) and node.attr in SHIM_ATTRIBUTES:
+                if isinstance(node, ast.Attribute) and (
+                    node.attr in SHIM_ATTRIBUTES or node.attr in STORE_ACCESSORS
+                ):
                     offenders.add(method.name)
                 elif isinstance(node, ast.Constant) and node.value in SHIM_ATTRIBUTES:
                     offenders.add(method.name)
@@ -109,6 +111,11 @@ class KBCoordinator:
 
         return get_metadata_store()
 
+    def via_imported_module(self):
+        from ..storage import factory
+
+        return factory.get_metadata_store()
+
     def routed(self, request):
         handle = self.open_collection(request)
         return handle.list_documents()
@@ -122,6 +129,7 @@ class KBCoordinator:
         "via_getattr",
         "via_factory",
         "via_module_accessor",
+        "via_imported_module",
     }
 
 

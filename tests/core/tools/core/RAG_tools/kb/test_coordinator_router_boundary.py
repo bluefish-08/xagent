@@ -34,7 +34,10 @@ def _resolve_relative(module: str, level: int, package: str) -> str:
     if not level:
         return module
     parts = package.split(".")
-    base = parts[: len(parts) - (level - 1)]
+    # More dots than the package is deep is not importable, but the guard reads
+    # source: without the clamp the negative index would slice from the end and
+    # resolve to a plausible-looking module that no rule matches.
+    base = parts[: max(0, len(parts) - (level - 1))]
     return ".".join([*base, module]) if module else ".".join(base)
 
 
@@ -140,3 +143,11 @@ def test_handle_guard_flags_web_imports() -> None:
     assert flagged.count("xagent.web.api.kb") == 2
     # Backend imports are legitimate below the boundary.
     assert "xagent.core.tools.core.RAG_tools.storage.lancedb_stores" not in flagged
+
+
+def test_relative_resolution_clamps_impossible_depth() -> None:
+    package = "xagent.core.tools.core.RAG_tools.kb"
+
+    assert _resolve_relative("web.api.kb", 6, package) == "xagent.web.api.kb"
+    # Deeper than the package: must not wrap around into a shorter prefix.
+    assert _resolve_relative("web.api.kb", 99, package) == "web.api.kb"
