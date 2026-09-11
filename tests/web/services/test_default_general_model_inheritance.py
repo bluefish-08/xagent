@@ -29,6 +29,18 @@ from xagent.web.services.agent_store import AgentStore
 from xagent.web.services.model_service import with_default_general_model
 
 
+@pytest.fixture(autouse=True)
+def _no_visibility_hook() -> Iterator[None]:
+    """``set_visible_user_ids_hook`` is module-global and deployments install
+    their own at import time, so pin the admin-default behaviour these cases
+    assert on."""
+    from xagent.web.services.model_service import set_visible_user_ids_hook
+
+    set_visible_user_ids_hook(None)
+    yield
+    set_visible_user_ids_hook(None)
+
+
 @pytest.fixture()
 def db() -> Iterator[Session]:
     engine = create_engine("sqlite:///:memory:")
@@ -207,6 +219,42 @@ def test_add_agent_fills_the_slot(db: Session, owner: tuple[int, int]) -> None:
     db.commit()
     db.refresh(agent)
     assert agent.models == {"general": model_pk}
+
+
+def test_a_stranger_pointing_at_a_shared_model_does_not_qualify(
+    db: Session,
+) -> None:
+    """The shared layer keys on who OWNS the default row, not on who shared
+    the model -- otherwise any unrelated user adopting an admin-shared model
+    as their own default would hand it to everyone."""
+    user_id = _user(db, "bystander")
+    admin_id = _user(db, "silent_admin", is_admin=True)
+    stranger_id = _user(db, "stranger_with_taste")
+    model_pk = _model(db, "adopted-llm")
+    _own(db, admin_id, model_pk, is_shared=True)
+    # The admin shares the model but never made it their own default.
+    _default(db, stranger_id, model_pk)
+    assert with_default_general_model(db, None, user_id=user_id) is None
+
+
+def test_an_invisible_own_default_falls_through_to_the_shared_layer(
+    db: Session,
+) -> None:
+    """An own default pointing at a model the user can no longer see must not
+    short-circuit the shared layer (``agent_tool`` skips such a slot and keeps
+    filling from the shared defaults)."""
+    user_id = _user(db, "demoted")
+    stranger_id = _user(db, "former_teammate")
+    admin_id = _user(db, "sharing_admin_2", is_admin=True)
+    gone_pk = _model(db, "no-longer-visible")
+    shared_pk = _model(db, "still-visible")
+    _own(db, stranger_id, gone_pk)
+    _own(db, admin_id, shared_pk, is_shared=True)
+    _default(db, user_id, gone_pk)
+    _default(db, admin_id, shared_pk)
+    assert with_default_general_model(db, None, user_id=user_id) == {
+        "general": shared_pk
+    }
 
 
 def _imported_agent(db: Session, user: User) -> Agent:

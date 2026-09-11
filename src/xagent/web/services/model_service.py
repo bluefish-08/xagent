@@ -10,6 +10,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional, cast
 
+from sqlalchemy import and_ as sa_and
 from sqlalchemy.orm import Session
 
 from xagent.core.model.image.base import BaseImageModel, default_image_abilities
@@ -233,12 +234,20 @@ def resolve_default_model_id(
 ) -> Optional[int]:
     """Resolve the ``DBModel.id`` a user's default for *config_type* points at.
 
-    Own default first, then a visible user's shared one -- the same two layers
-    the LLM-returning resolvers apply, so a user whose only usable default is
-    an admin-shared model is not treated as having none.
+    Own default first, then a default belonging to a visible user whose model
+    is shared -- the two layers ``agent_tool``, ``llm_utils`` and the
+    LLM-returning resolvers here all apply, so a user whose only usable
+    default is an admin-shared model is not treated as having none. Stricter
+    than those on one point: the shared layer also requires ``is_active``.
 
     Visibility is re-checked on the own-default path because nothing prunes a
-    ``user_default_models`` row when its model stops being visible.
+    ``user_default_models`` row when its model stops being visible, and an
+    invisible own default falls through to the shared layer rather than
+    resolving to nothing.
+
+    Reads the rows directly rather than through ``ModelStore``, whose getter
+    opens with a ``cache_get`` -- a Redis round-trip inside the caller's write
+    transaction (the pattern issue #889 is about).
     """
     from ..models.user import UserDefaultModel, UserModel
 
@@ -250,12 +259,9 @@ def resolve_default_model_id(
             UserDefaultModel.config_type == config_type,
             DBModel.is_active.is_(True),
         )
-        # Deterministic pick: uq_user_default_model lives only in the ORM
-        # metadata, never in an alembic revision, so an old database can hold
-        # more than one row for this pair. Not covered by a test -- the
-        # fixtures build the schema from that same metadata, constraint
-        # included, so a duplicate row cannot be inserted to exercise it.
-        .order_by(UserDefaultModel.updated_at.desc(), UserDefaultModel.id.desc())
+        # uq_user_default_model lives only in the ORM metadata, never in an
+        # alembic revision, so an old database can hold two rows for this pair.
+        .order_by(UserDefaultModel.id.desc())
         .first()
     )
     if own is not None and _is_model_visible_to_user(db, int(own[0]), user_id):
@@ -264,14 +270,20 @@ def resolve_default_model_id(
     shared = (
         db.query(UserDefaultModel.model_id)
         .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-        .join(UserModel, UserDefaultModel.model_id == UserModel.model_id)
+        .join(
+            UserModel,
+            sa_and(
+                UserModel.model_id == UserDefaultModel.model_id,
+                UserModel.user_id == UserDefaultModel.user_id,
+            ),
+        )
         .filter(
             UserDefaultModel.config_type == config_type,
             DBModel.is_active.is_(True),
             UserModel.is_shared.is_(True),
-            UserModel.user_id.in_(_get_visible_user_ids(db, user_id)),
+            UserDefaultModel.user_id.in_(_get_visible_user_ids(db, user_id)),
         )
-        .order_by(UserDefaultModel.updated_at.desc(), UserDefaultModel.id.desc())
+        .order_by(UserDefaultModel.id.desc())
         .first()
     )
     return int(shared[0]) if shared is not None else None
