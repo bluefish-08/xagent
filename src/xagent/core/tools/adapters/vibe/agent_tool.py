@@ -2182,11 +2182,12 @@ class AgentTool(AbstractBaseTool):
                 )
                 # Keyed on the general slot, not on the whole mapping: an
                 # agent carrying only e.g. {"compact": id} has an unset general
-                # slot too. A stated id that no longer resolves keeps failing
-                # closed rather than silently running on a different model.
+                # slot too. Anything stated there keeps failing closed when it
+                # will not resolve -- including a model *name* forwarded from
+                # template YAML, which resolves by id only.
                 stated_general = (
                     agent_models.get("general")
-                    if isinstance(agent_models, dict)
+                    if isinstance(agent_models, Mapping)
                     else None
                 )
                 if not stated_general and not default_llm:
@@ -2201,7 +2202,7 @@ class AgentTool(AbstractBaseTool):
                     if default_llm is not None:
                         logger.info(
                             "Agent %s has no general model set; delegating on "
-                            "the configured default %s",
+                            "the resolved default %s",
                             self._agent_id,
                             getattr(
                                 default_llm, "model_name", type(default_llm).__name__

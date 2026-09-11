@@ -944,6 +944,9 @@ async def test_empty_model_config_falls_back_to_the_configured_default(
         pytest.param({"compact": 3}, id="compact_only"),
         pytest.param({"general": None, "compact": 3}, id="explicit_null_general"),
         pytest.param({}, id="empty_dict"),
+        # No autoincrement PK is 0, so these state nothing either.
+        pytest.param({"general": 0}, id="zero_id"),
+        pytest.param({"general": False}, id="false_id"),
     ],
 )
 @pytest.mark.asyncio
@@ -1017,6 +1020,65 @@ async def test_a_partial_config_without_a_general_slot_falls_back(monkeypatch, m
 
     assert tool_result_succeeded(result) is True
     assert fallback_calls == [7]
+
+
+@pytest.mark.asyncio
+async def test_a_model_name_in_the_general_slot_fails_closed(monkeypatch):
+    """``workforce_creator`` forwards template YAML unvalidated, so the slot
+    can hold a model *name* (see test_workforce_creator_worker_resolution).
+
+    Names resolve by id only, so this states a choice that cannot be honoured
+    -- it keeps failing closed rather than quietly running on something else.
+    """
+
+    called: list[int] = []
+
+    def _get_configured_defaults(self, user_id=None, **_kwargs):
+        called.append(user_id)
+        return None, None, None, None
+
+    from xagent.web.services.llm_utils import UserAwareModelStorage
+
+    monkeypatch.setattr(
+        UserAwareModelStorage, "get_configured_defaults", _get_configured_defaults
+    )
+
+    async def _trace_delegation(self, status, **_kwargs):
+        return None
+
+    monkeypatch.setattr(AgentTool, "_trace_delegation", _trace_delegation)
+
+    import xagent.core.tools.adapters.vibe.agent_model_resolution as resolution
+
+    monkeypatch.setattr(
+        resolution, "resolve_agent_model_llms", lambda *_args: (None, None, None, None)
+    )
+
+    tool = AgentTool(
+        agent_id=1,
+        agent_name="Delegated",
+        agent_description="d",
+        session_factory=lambda: _DelegatedSession(
+            SimpleNamespace(
+                id=1,
+                name="Delegated",
+                instructions=None,
+                knowledge_bases=None,
+                skills=None,
+                tool_categories=[],
+                models={"general": "gpt-4o"},
+                execution_mode=None,
+            )
+        ),
+        user_id=7,
+        tool_name="delegated",
+        tool_description="d",
+    )
+
+    result = await tool.run_json_async({"task": "run"})
+
+    assert result["response"] == "Error: No valid model configured for agent Delegated"
+    assert called == []
 
 
 @pytest.mark.asyncio

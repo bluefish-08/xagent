@@ -794,6 +794,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
           // One pass: the general-default ref is needed in edit mode too (the
           // seed effect above reads it), the rest only seeds a new agent.
+          // The shape guards are defensive -- fetchData's catch already
+          // swallows a malformed response, so no test can tell them apart.
           const config: AgentModelConfig = {
             general: null,
             small_fast: null,
@@ -1348,11 +1350,13 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   // Enables Update, so the seeded value has a way into the database: Publish
   // posts no body and never persists models.
   const isDirty = isDirtyBeyondGeneralModel || generalModelDiffers
-  // ...but a slot this page seeded is not an edit the user made, so it must
-  // not block Publish for the very agents the seed exists to unblock. The
-  // stored-slot test retires the exemption: once an Update has persisted a
-  // model, re-picking the seeded one is an ordinary unsaved edit again.
-  const seedStillUnsaved = ((originalData?.models || {}).general || null) === null
+  // ...but a slot holding the seeded value is not an edit worth blocking
+  // Publish over, for the very agents the seed exists to unblock. Picking the
+  // seeded model by hand is indistinguishable from the seed itself, which is
+  // harmless: either way the delegation resolves the same default. The
+  // stored-slot test retires the exemption once an Update has persisted a
+  // model, so re-picking the seeded one is then an ordinary unsaved edit.
+  const seedStillUnsaved = !(originalData?.models || {}).general
   const publishBlockedByEdits =
     isDirtyBeyondGeneralModel ||
     (generalModelDiffers &&
