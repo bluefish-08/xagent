@@ -238,7 +238,9 @@ def resolve_default_model_id(
     is shared -- the two layers ``agent_tool``, ``llm_utils`` and the
     LLM-returning resolvers here all apply, so a user whose only usable
     default is an admin-shared model is not treated as having none. Stricter
-    than those on one point: the shared layer also requires ``is_active``.
+    than those on two points: the shared layer also requires ``is_active``,
+    and it joins ``user_models`` on the owner as well as the model, so a row
+    cannot borrow an invisible third party's sharing.
 
     Visibility is re-checked on the own-default path because nothing prunes a
     ``user_default_models`` row when its model stops being visible, and an
@@ -252,10 +254,11 @@ def resolve_default_model_id(
     from ..models.user import UserDefaultModel, UserModel
 
     try:
-        # Every candidate, not just the newest: uq_user_default_model lives
-        # only in the ORM metadata, never in an alembic revision, so an old
-        # database can hold several rows for this pair and the newest one may
-        # be the one that stopped being visible.
+        # Every candidate, not just the newest. Defence in depth: both
+        # writers upsert on (user_id, config_type) so one row is all this
+        # should ever see, but uq_user_default_model lives only in the ORM
+        # metadata -- were a second row to exist, the newest could be the one
+        # that stopped being visible.
         own_ids = [
             int(row[0])
             for row in db.query(UserDefaultModel.model_id)
@@ -292,10 +295,12 @@ def resolve_default_model_id(
             .first()
         )
         return int(shared[0]) if shared is not None else None
+    except AutoModelUnavailableError:
+        raise
     except Exception as exc:
-        # Runs inside AgentStore.add_agent before flush, and the create path
-        # only catches IntegrityError: degrade to an unset slot rather than
-        # turning a transient read error into a failed create.
+        # Runs inside AgentStore.add_agent before flush, where an escape would
+        # reach the handler's catch-all and 500 the create: degrade to an
+        # unset slot instead, which is the pre-existing behaviour anyway.
         logger.warning(
             "Failed to resolve the %s default model for user %s: %s",
             config_type,

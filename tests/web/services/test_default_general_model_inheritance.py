@@ -47,9 +47,9 @@ def legacy_db() -> Iterator[Session]:
     """A schema without ``uq_user_default_model``.
 
     The constraint is declared in the ORM metadata but appears in none of the
-    alembic revisions, so a database created before it can hold several rows
-    for one ``(user_id, config_type)`` pair. Dropping it from the metadata for
-    one engine is the only way to build that shape.
+    alembic revisions. Both writers upsert on the pair, so this shape should
+    never occur -- dropping the constraint for one engine is the only way to
+    reach the branch that handles it anyway.
     """
     table = UserDefaultModel.__table__
     dropped = [c for c in list(table.constraints) if isinstance(c, UniqueConstraint)]
@@ -149,10 +149,10 @@ def owner(db: Session) -> tuple[int, int]:
 def test_fills_only_an_omitted_slot(
     db: Session, owner: tuple[int, int], payload: Any, expected: Any
 ) -> None:
-    _, model_pk = owner
+    user_id, model_pk = owner
     if isinstance(expected, dict):
         expected = {k: (model_pk if v == "PK" else v) for k, v in expected.items()}
-    assert with_default_general_model(db, payload, user_id=owner[0]) == expected
+    assert with_default_general_model(db, payload, user_id=user_id) == expected
 
 
 def test_a_default_for_another_slot_is_not_used(db: Session) -> None:
@@ -276,6 +276,57 @@ def test_a_stranger_pointing_at_a_shared_model_does_not_qualify(
     # The admin shares the model but never made it their own default.
     _default(db, stranger_id, model_pk)
     assert with_default_general_model(db, None, user_id=user_id) is None
+
+
+def test_a_default_row_does_not_borrow_a_stranger_s_sharing(db: Session) -> None:
+    """The shared layer joins on both model_id and user_id, so the row's owner
+    has to be the one sharing it.
+
+    Without the user_id half, a visible admin naming a model as their default
+    while an *invisible* third party is the one sharing it would inject a
+    model ``_is_model_visible_to_user`` rejects -- the one thing this resolver
+    must never do, and the shared layer has no second visibility check.
+    """
+    user_id = _user(db, "asker")
+    admin_id = _user(db, "naming_admin", is_admin=True)
+    outsider_id = _user(db, "invisible_sharer")
+    model_pk = _model(db, "borrowed-llm")
+    # Shared by someone outside the visible set; the admin never holds it.
+    _own(db, outsider_id, model_pk, is_shared=True)
+    _default(db, admin_id, model_pk)
+
+    from xagent.web.services.model_service import _is_model_visible_to_user
+
+    assert _is_model_visible_to_user(db, model_pk, user_id) is False
+    assert with_default_general_model(db, None, user_id=user_id) is None
+
+
+def test_a_read_error_degrades_to_an_unset_slot(db: Session, monkeypatch) -> None:
+    """A transient read failure must not turn into a failed create.
+
+    ``add_agent`` calls this before flush and the create handler's only
+    specific catch is IntegrityError, so raising here would surface as a 500
+    instead of the pre-existing empty-slot behaviour.
+    """
+    user_id = _user(db, "unlucky")
+    model_pk = _model(db, "fine-llm")
+    _own(db, user_id, model_pk)
+    _default(db, user_id, model_pk)
+
+    import xagent.web.services.model_service as module
+
+    def _boom(*_args: Any, **_kwargs: Any) -> bool:
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(module, "_is_model_visible_to_user", _boom)
+    assert with_default_general_model(db, None, user_id=user_id) is None
+
+    agent = AgentStore(db).add_agent(
+        user_id=user_id, name="degraded", description=None, instructions=None
+    )
+    db.commit()
+    db.refresh(agent)
+    assert agent.models is None
 
 
 def test_an_invisible_own_default_falls_through_to_the_shared_layer(
