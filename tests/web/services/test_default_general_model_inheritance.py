@@ -14,9 +14,10 @@ own default, then a visible user's shared default.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import UniqueConstraint, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from xagent.migration.bundle import MigrationBundle, PersonaItem
@@ -39,6 +40,32 @@ def _no_visibility_hook() -> Iterator[None]:
     set_visible_user_ids_hook(None)
     yield
     set_visible_user_ids_hook(None)
+
+
+@pytest.fixture()
+def legacy_db() -> Iterator[Session]:
+    """A schema without ``uq_user_default_model``.
+
+    The constraint is declared in the ORM metadata but appears in none of the
+    alembic revisions, so a database created before it can hold several rows
+    for one ``(user_id, config_type)`` pair. Dropping it from the metadata for
+    one engine is the only way to build that shape.
+    """
+    table = UserDefaultModel.__table__
+    dropped = [c for c in list(table.constraints) if isinstance(c, UniqueConstraint)]
+    for constraint in dropped:
+        table.constraints.discard(constraint)
+    try:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+        session = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+        try:
+            yield session
+        finally:
+            session.close()
+    finally:
+        for constraint in dropped:
+            table.append_constraint(constraint)
 
 
 @pytest.fixture()
@@ -104,42 +131,56 @@ def owner(db: Session) -> tuple[int, int]:
     return user_id, model_pk
 
 
-def test_omitted_config_is_filled(db: Session, owner: tuple[int, int]) -> None:
-    user_id, model_pk = owner
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(None, {"general": "PK"}, id="omitted_is_filled"),
+        pytest.param({}, {"general": "PK"}, id="empty_dict_is_filled"),
+        pytest.param(
+            {"compact": 7}, {"compact": 7, "general": "PK"}, id="other_slots_kept"
+        ),
+        # An explicit None means "no main model"; a stated id is a choice.
+        pytest.param({"general": None}, {"general": None}, id="explicit_none_kept"),
+        pytest.param({"general": 42}, {"general": 42}, id="stated_choice_kept"),
+        # Template YAML reaches this layer unvalidated; a typo must not 500.
+        pytest.param("gpt-4", "gpt-4", id="non_dict_passes_through"),
+    ],
+)
+def test_fills_only_an_omitted_slot(
+    db: Session, owner: tuple[int, int], payload: Any, expected: Any
+) -> None:
+    _, model_pk = owner
+    if isinstance(expected, dict):
+        expected = {k: (model_pk if v == "PK" else v) for k, v in expected.items()}
+    assert with_default_general_model(db, payload, user_id=owner[0]) == expected
+
+
+def test_a_default_for_another_slot_is_not_used(db: Session) -> None:
+    user_id = _user(db, "visual_only")
+    model_pk = _model(db, "vision-llm")
+    _own(db, user_id, model_pk)
+    db.add(UserDefaultModel(user_id=user_id, model_id=model_pk, config_type="visual"))
+    db.commit()
+    assert with_default_general_model(db, None, user_id=user_id) is None
+
+
+def test_an_older_own_default_is_used_when_the_newest_is_invisible(
+    legacy_db: Session,
+) -> None:
+    """The newest row becoming invisible must not skip the remaining ones."""
+    db = legacy_db
+    user_id = _user(db, "two_rows")
+    stranger_id = _user(db, "ex_teammate")
+    visible_pk = _model(db, "kept-llm")
+    gone_pk = _model(db, "lost-llm")
+    _own(db, user_id, visible_pk)
+    _own(db, stranger_id, gone_pk)
+    _default(db, user_id, visible_pk)
+    # The later row wins the ordering but points at a model this user lost.
+    _default(db, user_id, gone_pk)
     assert with_default_general_model(db, None, user_id=user_id) == {
-        "general": model_pk
+        "general": visible_pk
     }
-
-
-def test_empty_dict_is_filled(db: Session, owner: tuple[int, int]) -> None:
-    user_id, model_pk = owner
-    assert with_default_general_model(db, {}, user_id=user_id) == {"general": model_pk}
-
-
-def test_other_slots_are_preserved(db: Session, owner: tuple[int, int]) -> None:
-    user_id, model_pk = owner
-    filled = with_default_general_model(db, {"compact": 7}, user_id=user_id)
-    assert filled == {"compact": 7, "general": model_pk}
-
-
-def test_explicit_none_means_no_main_model(db: Session, owner: tuple[int, int]) -> None:
-    user_id, _ = owner
-    assert with_default_general_model(db, {"general": None}, user_id=user_id) == {
-        "general": None
-    }
-
-
-def test_stated_choice_is_untouched(db: Session, owner: tuple[int, int]) -> None:
-    user_id, _ = owner
-    assert with_default_general_model(db, {"general": 42}, user_id=user_id) == {
-        "general": 42
-    }
-
-
-def test_non_dict_payload_passes_through(db: Session, owner: tuple[int, int]) -> None:
-    """Template YAML reaches this layer unvalidated; a typo must not 500."""
-    user_id, _ = owner
-    assert with_default_general_model(db, "gpt-4", user_id=user_id) == "gpt-4"
 
 
 def test_no_default_anywhere_leaves_config_unset(db: Session) -> None:

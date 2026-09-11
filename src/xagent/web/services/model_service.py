@@ -234,7 +234,7 @@ def resolve_default_model_id(
 ) -> Optional[int]:
     """Resolve the ``DBModel.id`` a user's default for *config_type* points at.
 
-    Own default first, then a default belonging to a visible user whose model
+    Own defaults first, then a default belonging to a visible user whose model
     is shared -- the two layers ``agent_tool``, ``llm_utils`` and the
     LLM-returning resolvers here all apply, so a user whose only usable
     default is an admin-shared model is not treated as having none. Stricter
@@ -251,42 +251,58 @@ def resolve_default_model_id(
     """
     from ..models.user import UserDefaultModel, UserModel
 
-    own = (
-        db.query(UserDefaultModel.model_id)
-        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-        .filter(
-            UserDefaultModel.user_id == user_id,
-            UserDefaultModel.config_type == config_type,
-            DBModel.is_active.is_(True),
-        )
-        # uq_user_default_model lives only in the ORM metadata, never in an
-        # alembic revision, so an old database can hold two rows for this pair.
-        .order_by(UserDefaultModel.id.desc())
-        .first()
-    )
-    if own is not None and _is_model_visible_to_user(db, int(own[0]), user_id):
-        return int(own[0])
+    try:
+        # Every candidate, not just the newest: uq_user_default_model lives
+        # only in the ORM metadata, never in an alembic revision, so an old
+        # database can hold several rows for this pair and the newest one may
+        # be the one that stopped being visible.
+        own_ids = [
+            int(row[0])
+            for row in db.query(UserDefaultModel.model_id)
+            .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+            .filter(
+                UserDefaultModel.user_id == user_id,
+                UserDefaultModel.config_type == config_type,
+                DBModel.is_active.is_(True),
+            )
+            .order_by(UserDefaultModel.id.desc())
+            .all()
+        ]
+        for candidate in own_ids:
+            if _is_model_visible_to_user(db, candidate, user_id):
+                return candidate
 
-    shared = (
-        db.query(UserDefaultModel.model_id)
-        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-        .join(
-            UserModel,
-            sa_and(
-                UserModel.model_id == UserDefaultModel.model_id,
-                UserModel.user_id == UserDefaultModel.user_id,
-            ),
+        shared = (
+            db.query(UserDefaultModel.model_id)
+            .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+            .join(
+                UserModel,
+                sa_and(
+                    UserModel.model_id == UserDefaultModel.model_id,
+                    UserModel.user_id == UserDefaultModel.user_id,
+                ),
+            )
+            .filter(
+                UserDefaultModel.config_type == config_type,
+                DBModel.is_active.is_(True),
+                UserModel.is_shared.is_(True),
+                UserDefaultModel.user_id.in_(_get_visible_user_ids(db, user_id)),
+            )
+            .order_by(UserDefaultModel.id.desc())
+            .first()
         )
-        .filter(
-            UserDefaultModel.config_type == config_type,
-            DBModel.is_active.is_(True),
-            UserModel.is_shared.is_(True),
-            UserDefaultModel.user_id.in_(_get_visible_user_ids(db, user_id)),
+        return int(shared[0]) if shared is not None else None
+    except Exception as exc:
+        # Runs inside AgentStore.add_agent before flush, and the create path
+        # only catches IntegrityError: degrade to an unset slot rather than
+        # turning a transient read error into a failed create.
+        logger.warning(
+            "Failed to resolve the %s default model for user %s: %s",
+            config_type,
+            user_id,
+            exc,
         )
-        .order_by(UserDefaultModel.id.desc())
-        .first()
-    )
-    return int(shared[0]) if shared is not None else None
+        return None
 
 
 def with_default_general_model(db: Session, models: Any, *, user_id: int) -> Any:
