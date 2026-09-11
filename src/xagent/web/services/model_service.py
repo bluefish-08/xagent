@@ -238,9 +238,9 @@ def resolve_default_model_id(
     is shared -- the two layers ``agent_tool``, ``llm_utils`` and the
     LLM-returning resolvers here all apply, so a user whose only usable
     default is an admin-shared model is not treated as having none. Stricter
-    than those on two points: the shared layer also requires ``is_active``,
-    and it joins ``user_models`` on the owner as well as the model, so a row
-    cannot borrow an invisible third party's sharing.
+    than those on one point: the shared layer joins ``user_models`` on the
+    owner as well as the model, so a default row cannot borrow an invisible
+    third party's sharing.
 
     Visibility is re-checked on the own-default path because nothing prunes a
     ``user_default_models`` row when its model stops being visible, and an
