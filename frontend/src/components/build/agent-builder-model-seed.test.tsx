@@ -50,8 +50,12 @@ vi.mock("@/contexts/app-context-chat", () => ({
   }),
 }))
 
+const authUser = vi.hoisted(() => ({
+  current: { id: "1", is_admin: false } as { id: string; is_admin: boolean },
+}))
+
 vi.mock("@/contexts/auth-context", () => ({
-  useAuth: () => ({ token: "token", user: { id: "1", is_admin: false } }),
+  useAuth: () => ({ token: "token", user: authUser.current }),
 }))
 
 vi.mock("@/contexts/i18n-context", () => ({
@@ -177,6 +181,7 @@ function installApi(opts: {
   canEdit?: boolean
   gateAgent?: Gate
   gateDefaults?: Gate
+  gateOwnerMcp?: Gate
 }) {
   const defer = (gate: Gate | undefined, value: Response) => {
     if (!gate) return Promise.resolve(value)
@@ -204,8 +209,15 @@ function installApi(opts: {
       if (url.endsWith("/api/tools/available"))
         return Promise.resolve(new Response(JSON.stringify({ tools: [] }), { status: 200 }))
       if (url.endsWith("/api/models/?category=llm"))
+        // The default general model is always in this list for real: both go
+        // through the same visibility filter.
         return Promise.resolve(
-          new Response(JSON.stringify(opts.llms ?? []), { status: 200 })
+          new Response(
+            JSON.stringify(
+              opts.llms ?? [{ id: DEFAULT_MODEL_ID, model_name: "seeded-llm" }]
+            ),
+            { status: 200 }
+          )
         )
       if (url.endsWith("/api/models/user-default"))
         return defer(
@@ -224,6 +236,11 @@ function installApi(opts: {
             JSON.stringify(agentResponse(opts.models, opts.canEdit ?? true)),
             { status: 200 }
           )
+        )
+      if (url.includes("/api/mcp/servers?user_id="))
+        return defer(
+          opts.gateOwnerMcp,
+          new Response(JSON.stringify([]), { status: 200 })
         )
       if (url.includes("/api/mcp/servers"))
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
@@ -251,6 +268,7 @@ const savedModels = async () => {
 
 beforeEach(() => {
   apiRequestMock.mockReset()
+  authUser.current = { id: "1", is_admin: false }
   ;(globalThis as any).WebSocket = vi.fn()
 })
 
@@ -353,6 +371,20 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
   })
 
+  it("does not seed an id the model list does not contain", async () => {
+    // A default pointing at a model absent from /api/models would render an
+    // empty Select while counting as an edit.
+    installApi({
+      models: null,
+      llms: [{ id: 123, model_name: "other-llm" }],
+    })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    await waitFor(() => expect(generalSelect().value).toBe(""))
+    expect(updateButton()).toBeDisabled()
+  })
+
   it("does not fall back to the first available LLM in edit mode", async () => {
     // Silently pinning "whatever is first in the model list" onto an agent
     // that already exists is a choice the owner never made; the required-model
@@ -416,10 +448,11 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
   })
 
-  it("seeds when the user-default fetch resolves last", async () => {
-    // The seed effect must wait for BOTH mount fetches: keyed on the agent
-    // load alone it would run while the default is still in flight and never
-    // re-run once it landed.
+  it("seeds when isInitialDataLoaded is the last dependency to land", async () => {
+    // Gating the user-default response also gates isInitialDataLoaded (both
+    // come from the same Promise.all), so this is not a race between the two
+    // fetches -- it is the case where the agent load commits first and the
+    // effect must still fire once the mount fetch finally reports in.
     const gateDefaults: Gate = { release: () => {} }
     installApi({ models: null, gateDefaults })
     render(<AgentBuilder agentId={AGENT_ID} />)
@@ -483,5 +516,35 @@ describe("AgentBuilder seed provenance after a save", () => {
       target: { value: String(DEFAULT_MODEL_ID) },
     })
     await waitFor(() => expect(publishButton()).not.toBeDisabled())
+  })
+})
+
+describe("AgentBuilder seed across loadAgent's awaits", () => {
+  it("keeps the seed when an admin cross-user load awaits mid-way", async () => {
+    // The admin branch of loadAgent awaits an owner-scoped MCP fetch. React 18
+    // does not batch across it, so a setModelConfig placed after the await
+    // clobbers a seed that already ran -- and the stamped ref would stop it
+    // from ever running again. Only a truthy-empty `models` reaches that
+    // assignment (null skips the `if`), which is what loaders.py used to write.
+    const gateOwnerMcp: Gate = { release: () => {} }
+    authUser.current = { id: "9", is_admin: true }
+    installApi({
+      models: {},
+      gateOwnerMcp,
+      llms: [{ id: DEFAULT_MODEL_ID, model_name: "seeded-llm" }],
+    })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    // Parked inside the await, with originalData already committed: the seed
+    // effect gets its chance here.
+    await waitFor(() =>
+      expect(generalSelect().value).toBe(String(DEFAULT_MODEL_ID))
+    )
+    gateOwnerMcp.release()
+
+    // ...and whatever runs after the await must not undo it.
+    await waitFor(() => expect(screen.getByText("seeded-llm")).toBeInTheDocument())
+    expect(generalSelect().value).toBe(String(DEFAULT_MODEL_ID))
   })
 })

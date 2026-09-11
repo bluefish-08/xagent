@@ -22,6 +22,11 @@ from xagent.web.models.model import Model
 from xagent.web.models.user import User
 from xagent.web.services.llm_utils import UserAwareModelStorage
 
+# Every no-valid-model assertion in this module depends on the fallback
+# resolving to nothing; see the fixture for why that cannot be left to the
+# machine's environment.
+pytestmark = pytest.mark.usefixtures("no_resolvable_default_llm")
+
 
 class _Stop(Exception):
     """Halt the run before the sub-agent executes."""
@@ -1022,77 +1027,57 @@ async def test_a_partial_config_without_a_general_slot_falls_back(monkeypatch, m
     assert fallback_calls == [7]
 
 
-@pytest.mark.asyncio
-async def test_a_model_name_in_the_general_slot_fails_closed(monkeypatch):
-    """``workforce_creator`` forwards template YAML unvalidated, so the slot
-    can hold a model *name* (see test_workforce_creator_worker_resolution).
+def _real_session_factory(models: object) -> tuple[sessionmaker, str]:
+    """A sqlite-backed factory holding one agent with *models*.
 
-    Names resolve by id only, so this states a choice that cannot be honoured
-    -- it keeps failing closed rather than quietly running on something else.
+    Stubbing ``resolve_agent_model_llms`` would skip the very pipeline these
+    cases are about -- id coercion and the model lookup -- so the resolver
+    runs for real against a database that simply has no matching row.
     """
-
-    called: list[int] = []
-
-    def _get_configured_defaults(self, user_id=None, **_kwargs):
-        called.append(user_id)
-        return None, None, None, None
-
-    from xagent.web.services.llm_utils import UserAwareModelStorage
-
-    monkeypatch.setattr(
-        UserAwareModelStorage, "get_configured_defaults", _get_configured_defaults
-    )
-
-    async def _trace_delegation(self, status, **_kwargs):
-        return None
-
-    monkeypatch.setattr(AgentTool, "_trace_delegation", _trace_delegation)
-
-    import xagent.core.tools.adapters.vibe.agent_model_resolution as resolution
-
-    monkeypatch.setattr(
-        resolution, "resolve_agent_model_llms", lambda *_args: (None, None, None, None)
-    )
-
-    tool = AgentTool(
-        agent_id=1,
-        agent_name="Delegated",
-        agent_description="d",
-        session_factory=lambda: _DelegatedSession(
-            SimpleNamespace(
-                id=1,
-                name="Delegated",
-                instructions=None,
-                knowledge_bases=None,
-                skills=None,
-                tool_categories=[],
-                models={"general": "gpt-4o"},
-                execution_mode=None,
-            )
-        ),
-        user_id=7,
-        tool_name="delegated",
-        tool_description="d",
-    )
-
-    result = await tool.run_json_async({"task": "run"})
-
-    assert result["response"] == "Error: No valid model configured for agent Delegated"
-    assert called == []
+    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    temp_db.close()
+    engine = create_engine(f"sqlite:///{temp_db.name}")
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = SessionLocal()
+    try:
+        user = User(username="delegator", password_hash="x", is_admin=False)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        agent = Agent(
+            user_id=user.id,
+            name="Delegated",
+            models=models,
+            status=AgentStatus.DRAFT,
+        )
+        db.add(agent)
+        db.commit()
+        return SessionLocal, temp_db.name
+    finally:
+        db.close()
 
 
+@pytest.mark.parametrize(
+    "models",
+    [
+        # Resolves by id only, so a name states a choice that cannot be met.
+        pytest.param({"general": "gpt-4o"}, id="model_name"),
+        pytest.param({"general": 999999}, id="missing_id"),
+        # Not even a mapping: stated-but-corrupt, not unset.
+        pytest.param("gpt-4o", id="non_mapping"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_stored_model_that_no_longer_resolves_still_fails_closed(monkeypatch):
-    """A stated choice that is gone or no longer visible must keep failing
-    closed -- the fallback covers an unset config, not a resolution failure."""
+async def test_a_general_slot_that_cannot_resolve_fails_closed(monkeypatch, models):
+    """The fallback covers an unset general slot, never a stated one that will
+    not resolve -- substituting a model there would hide the owner's intent."""
 
     called: list[int] = []
 
     def _get_configured_defaults(self, user_id=None, **_kwargs):
         called.append(user_id)
         return None, None, None, None
-
-    from xagent.web.services.llm_utils import UserAwareModelStorage
 
     monkeypatch.setattr(
         UserAwareModelStorage, "get_configured_defaults", _get_configured_defaults
@@ -1103,38 +1088,31 @@ async def test_a_stored_model_that_no_longer_resolves_still_fails_closed(monkeyp
 
     monkeypatch.setattr(AgentTool, "_trace_delegation", _trace_delegation)
 
-    import xagent.core.tools.adapters.vibe.agent_model_resolution as resolution
+    SessionLocal, db_path = _real_session_factory(models)
+    try:
+        db = SessionLocal()
+        agent_id = int(db.query(Agent).one().id)
+        user_id = int(db.query(User).one().id)
+        db.close()
 
-    # What a stale or newly invisible id resolves to.
-    monkeypatch.setattr(
-        resolution, "resolve_agent_model_llms", lambda *_args: (None, None, None, None)
-    )
+        tool = AgentTool(
+            agent_id=agent_id,
+            agent_name="Delegated",
+            agent_description="d",
+            session_factory=SessionLocal,
+            user_id=user_id,
+            tool_name="delegated",
+            tool_description="d",
+        )
 
-    tool = AgentTool(
-        agent_id=1,
-        agent_name="Delegated",
-        agent_description="d",
-        session_factory=lambda: _DelegatedSession(
-            SimpleNamespace(
-                id=1,
-                name="Delegated",
-                instructions=None,
-                knowledge_bases=None,
-                skills=None,
-                tool_categories=[],
-                models={"general": 999999},
-                execution_mode=None,
-            )
-        ),
-        user_id=7,
-        tool_name="delegated",
-        tool_description="d",
-    )
+        result = await tool.run_json_async({"task": "run"})
 
-    result = await tool.run_json_async({"task": "run"})
-
-    assert result["response"] == "Error: No valid model configured for agent Delegated"
-    assert called == []
+        assert (
+            result["response"] == "Error: No valid model configured for agent Delegated"
+        )
+        assert called == []
+    finally:
+        os.remove(db_path)
 
 
 class _StubSingleCallLLM:

@@ -2182,15 +2182,15 @@ class AgentTool(AbstractBaseTool):
                 )
                 # Keyed on the general slot, not on the whole mapping: an
                 # agent carrying only e.g. {"compact": id} has an unset general
-                # slot too. Anything stated there keeps failing closed when it
-                # will not resolve -- including a model *name* forwarded from
-                # template YAML, which resolves by id only.
-                stated_general = (
-                    agent_models.get("general")
-                    if isinstance(agent_models, Mapping)
-                    else None
+                # slot too. Anything else keeps failing closed when it will not
+                # resolve -- a model *name* forwarded from template YAML (which
+                # resolves by id only), or a payload that is not even a mapping,
+                # which is a stated-but-corrupt config rather than an unset one.
+                general_unset = agent_models is None or (
+                    isinstance(agent_models, Mapping)
+                    and not agent_models.get("general")
                 )
-                if not stated_general and not default_llm:
+                if general_unset and not default_llm:
                     from .....web.services.llm_utils import AutoModelUnavailableError
 
                     try:
@@ -2198,6 +2198,12 @@ class AgentTool(AbstractBaseTool):
                             self._user_id, config_types=("general",)
                         )
                     except AutoModelUnavailableError:
+                        logger.warning(
+                            "Agent %s has no general model and no default is "
+                            "configured for user %s; failing the delegation",
+                            self._agent_id,
+                            self._user_id,
+                        )
                         default_llm = None
                     if default_llm is not None:
                         logger.info(

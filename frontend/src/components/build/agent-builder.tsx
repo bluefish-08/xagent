@@ -858,10 +858,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     if (!isEditMode || readOnly || !isInitialDataLoaded || !originalData) return
     if (seededGeneralRef.current !== null || modelConfig.general) return
     const seeded = userDefaultGeneralRef.current
-    if (!seeded) return
+    // Only an id the dropdown can actually show: seeding one that is missing
+    // from the fetched list renders an empty Select while counting as dirty.
+    if (!seeded || !models.some(m => m.id === seeded)) return
     seededGeneralRef.current = seeded
     setModelConfig(prev => ({ ...prev, general: seeded }))
-  }, [isEditMode, readOnly, isInitialDataLoaded, originalData, modelConfig.general])
+  }, [isEditMode, readOnly, isInitialDataLoaded, originalData, modelConfig.general, models])
 
   // Load agent data in edit mode
   useEffect(() => {
@@ -882,6 +884,18 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           if (!active) return
           setOriginalData(agent)
           setReadOnly(agent.can_edit === false)
+          // Same synchronous block as originalData: React 18 does not batch
+          // across the await below, so leaving this after it lets the seed
+          // effect run against a committed originalData and then be clobbered
+          // -- with the ref already stamped, it would never seed again.
+          if (agent.models) {
+            setModelConfig({
+              general: agent.models.general || null,
+              small_fast: agent.models.small_fast || null,
+              visual: agent.models.visual || null,
+              compact: agent.models.compact || null,
+            })
+          }
           setName(agent.name || "")
           setDescription(agent.description || "")
           setInstructions(agent.instructions || "")
@@ -926,16 +940,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
           setLogoUrl(agent.logo_url || null)
           setLogoRemoved(false)
-
-          // Load models
-          if (agent.models) {
-            setModelConfig({
-              general: agent.models.general || null,
-              small_fast: agent.models.small_fast || null,
-              visual: agent.models.visual || null,
-              compact: agent.models.compact || null,
-            })
-          }
         } else if (response.status === 404) {
           setNotFound(true)
         }
