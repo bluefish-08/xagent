@@ -17,8 +17,8 @@ from xagent.core.agent.pattern.react.react import _normalize_ask_user_interactio
 from xagent.core.tools.adapters.vibe.interaction_types import (
     DEFAULT_WAITING_INTERACTION,
 )
-from xagent.web.api.trace_handlers import DatabaseTraceHandler
 from xagent.web.services.task_clarification_draft import clarification_idempotency_key
+from xagent.web.services.trace_handlers import DatabaseTraceHandler
 
 
 class FakeLLM:
