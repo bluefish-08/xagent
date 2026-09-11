@@ -803,12 +803,10 @@ async def test_agent_tool_missing_agent_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_without_resolved_model_fails_closed(
-    monkeypatch, no_resolvable_default_llm: None
-):
+async def test_agent_tool_without_resolved_model_fails_closed(monkeypatch):
     """The no-valid-model preflight exit must be a classified failure.
 
-    ``agent_models`` is falsy and the fixture leaves the configured-defaults
+    ``agent_models`` is falsy and the autouse fixture leaves the configured
     fallback empty, driving the same preflight exit a resolution failure
     would.
     """
@@ -859,15 +857,37 @@ async def test_agent_tool_without_resolved_model_fails_closed(
 
 
 @pytest.mark.asyncio
-async def test_empty_model_config_falls_back_to_the_configured_default(monkeypatch):
+async def test_empty_model_config_falls_back_to_the_configured_default(
+    monkeypatch, tmp_path
+):
     """Server-side creation paths persisted no model config; an unset slot
-    must not fail the delegation when the user has a default to resolve."""
+    must not fail the delegation when the user has a default to resolve.
+
+    Drives the real execution stack (unlike ``_real_delegated_agent_tool``,
+    which fakes ``resolve_agent_model_llms`` -- the very seam under test), so
+    the child has to actually run on the fallback LLM.
+    """
 
     fallback_calls: list[tuple[int, tuple[str, ...]]] = []
+    llm = _StubSingleCallLLM(
+        {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "final_answer",
+                        "arguments": json.dumps({"answer": "delegated output"}),
+                    },
+                }
+            ],
+            "done": False,
+        }
+    )
 
     def _get_configured_defaults(self, user_id=None, *, config_types, **_kwargs):
         fallback_calls.append((user_id, config_types))
-        return _StubSingleCallLLM(), None, None, None
+        return llm, None, None, None
 
     from xagent.web.services.llm_utils import UserAwareModelStorage
 
@@ -876,11 +896,16 @@ async def test_empty_model_config_falls_back_to_the_configured_default(monkeypat
         "get_configured_defaults",
         _get_configured_defaults,
     )
+    monkeypatch.setattr(
+        mod, "WebToolConfig", lambda **_kwargs: _SucceedingCloseConfig()
+    )
 
-    async def _trace_delegation(self, status, **_kwargs):
-        return None
+    async def _no_tools(*_args, **_kwargs):
+        return []
 
-    monkeypatch.setattr(AgentTool, "_trace_delegation", _trace_delegation)
+    import xagent.core.tools.adapters.vibe.factory as factory_module
+
+    monkeypatch.setattr(factory_module.ToolFactory, "create_all_tools", _no_tools)
 
     tool = AgentTool(
         agent_id=1,
@@ -905,12 +930,68 @@ async def test_empty_model_config_falls_back_to_the_configured_default(monkeypat
 
     result = await tool.run_json_async({"task": "run"})
 
-    # Only the general slot: the other three are left as resolved (here None),
-    # so the fallback does not instantiate three default LLMs to discard.
+    assert tool_result_succeeded(result) is True
+    assert "delegated output" in str(result.get("response"))
+    # Only the general slot: the other three stay as resolved, so the fallback
+    # does not instantiate three default LLMs to discard. Narrower than the
+    # plain chat path, which backfills all four.
     assert fallback_calls == [(7, ("general",))]
-    assert result.get("response") != (
-        "Error: No valid model configured for agent Delegated"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_model_that_no_longer_resolves_still_fails_closed(monkeypatch):
+    """A stated choice that is gone or no longer visible must keep failing
+    closed -- the fallback covers an unset config, not a resolution failure."""
+
+    called: list[int] = []
+
+    def _get_configured_defaults(self, user_id=None, **_kwargs):
+        called.append(user_id)
+        return None, None, None, None
+
+    from xagent.web.services.llm_utils import UserAwareModelStorage
+
+    monkeypatch.setattr(
+        UserAwareModelStorage, "get_configured_defaults", _get_configured_defaults
     )
+
+    async def _trace_delegation(self, status, **_kwargs):
+        return None
+
+    monkeypatch.setattr(AgentTool, "_trace_delegation", _trace_delegation)
+
+    import xagent.core.tools.adapters.vibe.agent_model_resolution as resolution
+
+    # What a stale or newly invisible id resolves to.
+    monkeypatch.setattr(
+        resolution, "resolve_agent_model_llms", lambda *_args: (None, None, None, None)
+    )
+
+    tool = AgentTool(
+        agent_id=1,
+        agent_name="Delegated",
+        agent_description="d",
+        session_factory=lambda: _DelegatedSession(
+            SimpleNamespace(
+                id=1,
+                name="Delegated",
+                instructions=None,
+                knowledge_bases=None,
+                skills=None,
+                tool_categories=[],
+                models={"general": 999999},
+                execution_mode=None,
+            )
+        ),
+        user_id=7,
+        tool_name="delegated",
+        tool_description="d",
+    )
+
+    result = await tool.run_json_async({"task": "run"})
+
+    assert result["response"] == "Error: No valid model configured for agent Delegated"
+    assert called == []
 
 
 class _StubSingleCallLLM:

@@ -792,26 +792,27 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (userDefaultsRes.ok) {
           const userDefaults = await userDefaultsRes.json()
 
-          for (const m of userDefaults) {
-            if (m.config_type === 'general') userDefaultGeneralRef.current = m.model.id
+          // One pass: the general-default ref is needed in edit mode too (the
+          // seed effect above reads it), the rest only seeds a new agent.
+          const config: AgentModelConfig = {
+            general: null,
+            small_fast: null,
+            visual: null,
+            compact: null,
+          }
+          for (const m of Array.isArray(userDefaults) ? userDefaults : []) {
+            const id = m?.model?.id
+            if (!id) continue
+            if (m.config_type === 'general') {
+              config.general = id
+              userDefaultGeneralRef.current = id
+            }
+            else if (m.config_type === 'small_fast') config.small_fast = id
+            else if (m.config_type === 'visual') config.visual = id
+            else if (m.config_type === 'compact') config.compact = id
           }
 
-          // Set model config based on user defaults (only for new agent)
           if (!isEditMode) {
-            const config: AgentModelConfig = {
-              general: null,
-              small_fast: null,
-              visual: null,
-              compact: null,
-            }
-
-            for (const m of userDefaults) {
-              if (m.config_type === 'general') config.general = m.model.id
-              else if (m.config_type === 'small_fast') config.small_fast = m.model.id
-              else if (m.config_type === 'visual') config.visual = m.model.id
-              else if (m.config_type === 'compact') config.compact = m.model.id
-            }
-
             // Fallback: If no general model set, pick first available LLM
             if (!config.general && availableModels.length > 0) {
               // models endpoint was called with ?category=llm so these should be LLMs
@@ -853,12 +854,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     // Not in a read-only cross-user view: the default below is the viewer's,
     // so seeding there would render someone else's model as this agent's.
     if (!isEditMode || readOnly || !isInitialDataLoaded || !originalData) return
-    if (seededGeneralRef.current !== null) return
+    if (seededGeneralRef.current !== null || modelConfig.general) return
     const seeded = userDefaultGeneralRef.current
     if (!seeded) return
     seededGeneralRef.current = seeded
-    setModelConfig(prev => (prev.general ? prev : { ...prev, general: seeded }))
-  }, [isEditMode, isInitialDataLoaded, originalData])
+    setModelConfig(prev => ({ ...prev, general: seeded }))
+  }, [isEditMode, readOnly, isInitialDataLoaded, originalData, modelConfig.general])
 
   // Load agent data in edit mode
   useEffect(() => {
@@ -1291,7 +1292,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     })
   }
 
-  const isDirty = useMemo(() => {
+  const isDirtyBeyondGeneralModel = useMemo(() => {
     if (!originalData) return false
 
     // Helper to normalize arrays for comparison
@@ -1331,21 +1332,27 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     const originalNonMcpCategories = (originalData.tool_categories || []).filter((c: string) => !c.startsWith('mcp:'))
     if (normalize(nonMcpCategories) !== normalize(originalNonMcpCategories)) return true
 
-    // Compare models
+    // Compare models. The general slot is compared outside this memo: the
+    // seed has to leave Update enabled (that is the only flow that persists
+    // it) while not blocking Publish.
     const origModels = originalData.models || {}
-    // A seeded slot is not a user edit: counting it would disable Publish on
-    // open for exactly the agents this seed exists to unblock. The stored-slot
-    // test is what keeps a real edit that lands on the seeded model dirty.
-    const seededOnly =
-      (origModels.general || null) === null &&
-      modelConfig.general === seededGeneralRef.current
-    if (!seededOnly && (modelConfig.general || null) !== (origModels.general || null)) return true
     if ((modelConfig.small_fast || null) !== (origModels.small_fast || null)) return true
     if ((modelConfig.visual || null) !== (origModels.visual || null)) return true
     if ((modelConfig.compact || null) !== (origModels.compact || null)) return true
 
     return false
   }, [name, description, instructions, executionMode, ownership, visibility, logoFile, logoRemoved, suggestedPrompts, selectedKbs, selectedSkills, selectedToolCategories, selectedMcpServers, modelConfig, originalData])
+
+  const generalModelDiffers =
+    (modelConfig.general || null) !== ((originalData?.models || {}).general || null)
+  // Enables Update, so the seeded value has a way into the database: Publish
+  // posts no body and never persists models.
+  const isDirty = isDirtyBeyondGeneralModel || generalModelDiffers
+  // ...but a slot this page seeded is not an edit the user made, so it must
+  // not block Publish for the very agents the seed exists to unblock.
+  const publishBlockedByEdits =
+    isDirtyBeyondGeneralModel ||
+    (generalModelDiffers && modelConfig.general !== seededGeneralRef.current)
 
   // After a successful save, align server-side ownership with the chosen control:
   // promote a personal agent to team (with visibility) or demote a team agent back
@@ -2033,7 +2040,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                   <Button
                     variant="secondary"
                     onClick={handlePublish}
-                    disabled={isCreating || loadingAgent || isDirty}
+                    disabled={isCreating || loadingAgent || publishBlockedByEdits}
                   >
                     {t("builds.editor.header.publish")}
                   </Button>

@@ -258,13 +258,37 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
   })
 
-  it("keeps Publish enabled on open: a seeded slot is not a user edit", async () => {
+  it("leaves Publish enabled and Update reachable on open", async () => {
+    // Publish posts no body, so Update is the only flow that persists the
+    // seeded slot -- it has to stay reachable, and Publish must not be
+    // blocked for the very agents the seed exists to unblock.
     installApi({ models: null })
     render(<AgentBuilder agentId={AGENT_ID} />)
     await loaded()
 
-    await waitFor(() => expect(publishButton()).not.toBeDisabled())
-    expect(updateButton()).toBeDisabled()
+    await waitFor(() => expect(updateButton()).not.toBeDisabled())
+    expect(publishButton()).not.toBeDisabled()
+  })
+
+  it("persists the seeded slot when Update is clicked with nothing else changed", async () => {
+    installApi({ models: null })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    await waitFor(() => expect(updateButton()).not.toBeDisabled())
+    fireEvent.click(updateButton())
+
+    expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
+  })
+
+  it("still blocks Publish once the user edits something else", async () => {
+    installApi({ models: null })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    fireEvent.change(nameBox(), { target: { value: "Renamed" } })
+
+    await waitFor(() => expect(publishButton()).toBeDisabled())
   })
 
   it("does not overwrite a slot the owner already chose", async () => {
@@ -289,6 +313,23 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     const models = await savedModels()
     expect(models.general).toBe(DEFAULT_MODEL_ID)
     expect(models.compact).toBe(3)
+  })
+
+  it("ignores a malformed entry without losing a valid one", async () => {
+    installApi({
+      models: null,
+      userDefaults: [
+        { config_type: "general", model: { id: DEFAULT_MODEL_ID } },
+        { config_type: "general", model: null },
+      ],
+    })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    await waitFor(() => expect(updateButton()).not.toBeDisabled())
+    fireEvent.click(updateButton())
+
+    expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
   })
 
   it("does not fall back to the first available LLM in edit mode", async () => {

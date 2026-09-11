@@ -469,9 +469,9 @@ async def test_agent_tool_execution_enforces_target_allowed_agent_ids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_execution_allows_cross_user_only_with_target_allowlist(
-    no_resolvable_default_llm: None,
-) -> None:
+async def test_agent_tool_execution_allows_cross_user_only_with_target_allowlist() -> (
+    None
+):
     db, db_path, SessionLocal = _create_session()
     try:
         owner = User(username="cross_owner", password_hash="x", is_admin=False)
@@ -533,9 +533,9 @@ async def test_agent_tool_execution_allows_cross_user_only_with_target_allowlist
 
 
 @pytest.mark.asyncio
-async def test_delegation_allowed_agent_ids_do_not_block_current_worker_execution(
-    no_resolvable_default_llm: None,
-) -> None:
+async def test_delegation_allowed_agent_ids_do_not_block_current_worker_execution() -> (
+    None
+):
     db, db_path, SessionLocal = _create_session()
     try:
         owner = User(username="nested_owner", password_hash="x", is_admin=False)

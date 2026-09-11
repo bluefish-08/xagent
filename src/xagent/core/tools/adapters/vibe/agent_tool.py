@@ -2180,14 +2180,27 @@ class AgentTool(AbstractBaseTool):
                 default_llm, fast_llm, vision_llm, compact_llm = (
                     resolve_agent_model_llms(db, storage, agent_models, self._user_id)
                 )
-                # Server-side creation paths persisted no model config, and an
-                # unset slot must not fail the delegation outright. This is the
-                # same chain the plain chat path already resolves through, env
-                # tail included -- see resolve_llms_from_names.
-                if not default_llm:
-                    default_llm, _, _, _ = storage.get_configured_defaults(
-                        self._user_id, config_types=("general",)
-                    )
+                # Only an unset config, never a resolution failure: a stored id
+                # that is gone or no longer visible has to keep failing closed
+                # rather than silently run on a different model.
+                if not agent_models and not default_llm:
+                    from .....web.services.llm_utils import AutoModelUnavailableError
+
+                    try:
+                        default_llm, _, _, _ = storage.get_configured_defaults(
+                            self._user_id, config_types=("general",)
+                        )
+                    except AutoModelUnavailableError:
+                        default_llm = None
+                    if default_llm is not None:
+                        logger.info(
+                            "Agent %s has no model config; delegating on the "
+                            "configured default %s",
+                            self._agent_id,
+                            getattr(
+                                default_llm, "model_name", type(default_llm).__name__
+                            ),
+                        )
             # ---- Phase 1 session closed here. ----
 
             if not default_llm:
