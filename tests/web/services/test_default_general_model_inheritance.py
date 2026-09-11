@@ -278,6 +278,27 @@ def test_a_stranger_pointing_at_a_shared_model_does_not_qualify(
     assert with_default_general_model(db, None, user_id=user_id) is None
 
 
+def test_one_visible_admin_s_default_on_another_s_shared_model(db: Session) -> None:
+    """Owner and sharer both have to be visible, but need not be the same user.
+
+    ``_is_model_visible_to_user`` considers this model visible, so requiring
+    one user to be both would silently drop a usable default.
+    """
+    user_id = _user(db, "onlooker")
+    naming_admin = _user(db, "admin_who_names", is_admin=True)
+    sharing_admin = _user(db, "admin_who_shares", is_admin=True)
+    model_pk = _model(db, "cross-admin-llm")
+    _own(db, sharing_admin, model_pk, is_shared=True)
+    _default(db, naming_admin, model_pk)
+
+    from xagent.web.services.model_service import _is_model_visible_to_user
+
+    assert _is_model_visible_to_user(db, model_pk, user_id) is True
+    assert with_default_general_model(db, None, user_id=user_id) == {
+        "general": model_pk
+    }
+
+
 def test_a_default_row_does_not_borrow_a_stranger_s_sharing(db: Session) -> None:
     """The shared layer joins on both model_id and user_id, so the row's owner
     has to be the one sharing it.
@@ -302,11 +323,12 @@ def test_a_default_row_does_not_borrow_a_stranger_s_sharing(db: Session) -> None
 
 
 def test_a_read_error_degrades_to_an_unset_slot(db: Session, monkeypatch) -> None:
-    """A transient read failure must not turn into a failed create.
+    """A read failure must not turn into a failed create.
 
-    ``add_agent`` calls this before flush and the create handler's only
-    specific catch is IntegrityError, so raising here would surface as a 500
-    instead of the pre-existing empty-slot behaviour.
+    The resolver runs inside ``add_agent`` before flush, and the create paths
+    do not catch this: ``api/agents.py`` would 500 it, and
+    ``workforce_creator``'s ``begin_nested`` retry catches IntegrityError
+    alone. Degrading to an unset slot is the pre-existing behaviour anyway.
     """
     user_id = _user(db, "unlucky")
     model_pk = _model(db, "fine-llm")
@@ -327,6 +349,66 @@ def test_a_read_error_degrades_to_an_unset_slot(db: Session, monkeypatch) -> Non
     db.commit()
     db.refresh(agent)
     assert agent.models is None
+
+
+def test_a_failed_statement_leaves_the_session_usable(db: Session, monkeypatch) -> None:
+    """The savepoint is what makes the degrade real.
+
+    A failed statement aborts the surrounding transaction on PostgreSQL, so
+    swallowing the exception without rolling back would only move the error
+    to the caller's next statement. Emulated here by failing inside the
+    resolver's own query and then writing through the same session.
+    """
+    user_id = _user(db, "aborted")
+    model_pk = _model(db, "unreachable-llm")
+    _own(db, user_id, model_pk)
+    _default(db, user_id, model_pk)
+
+    import xagent.web.services.model_service as module
+
+    calls: list[int] = []
+    real_visible = module._is_model_visible_to_user
+
+    def _boom_once(*args: Any, **kwargs: Any) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("server closed the connection unexpectedly")
+        return real_visible(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_is_model_visible_to_user", _boom_once)
+
+    agent = AgentStore(db).add_agent(
+        user_id=user_id, name="after-abort", description=None, instructions=None
+    )
+    db.commit()
+    db.refresh(agent)
+    assert agent.models is None
+
+    # The session still works afterwards, and so does the resolver.
+    monkeypatch.undo()
+    second = AgentStore(db).add_agent(
+        user_id=user_id, name="recovered", description=None, instructions=None
+    )
+    db.commit()
+    db.refresh(second)
+    assert second.models == {"general": model_pk}
+
+
+def test_the_fallback_survives_a_nested_savepoint(db: Session) -> None:
+    """``workforce_creator`` calls ``add_agent`` inside ``db.begin_nested()``;
+    the resolver's own savepoint has to nest inside that one."""
+    user_id = _user(db, "workforce_owner")
+    model_pk = _model(db, "workforce-llm")
+    _own(db, user_id, model_pk)
+    _default(db, user_id, model_pk)
+
+    with db.begin_nested():
+        agent = AgentStore(db).add_agent(
+            user_id=user_id, name="nested", description=None, instructions=None
+        )
+    db.commit()
+    db.refresh(agent)
+    assert agent.models == {"general": model_pk}
 
 
 def test_an_invisible_own_default_falls_through_to_the_shared_layer(

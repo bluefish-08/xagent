@@ -10,7 +10,6 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional, cast
 
-from sqlalchemy import and_ as sa_and
 from sqlalchemy.orm import Session
 
 from xagent.core.model.image.base import BaseImageModel, default_image_abilities
@@ -251,56 +250,14 @@ def resolve_default_model_id(
     opens with a ``cache_get`` -- a Redis round-trip inside the caller's write
     transaction (the pattern issue #889 is about).
     """
-    from ..models.user import UserDefaultModel, UserModel
-
     try:
-        # Every candidate, not just the newest. Defence in depth: both
-        # writers upsert on (user_id, config_type) so one row is all this
-        # should ever see, but uq_user_default_model lives only in the ORM
-        # metadata -- were a second row to exist, the newest could be the one
-        # that stopped being visible.
-        own_ids = [
-            int(row[0])
-            for row in db.query(UserDefaultModel.model_id)
-            .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-            .filter(
-                UserDefaultModel.user_id == user_id,
-                UserDefaultModel.config_type == config_type,
-                DBModel.is_active.is_(True),
-            )
-            .order_by(UserDefaultModel.id.desc())
-            .all()
-        ]
-        for candidate in own_ids:
-            if _is_model_visible_to_user(db, candidate, user_id):
-                return candidate
-
-        shared = (
-            db.query(UserDefaultModel.model_id)
-            .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-            .join(
-                UserModel,
-                sa_and(
-                    UserModel.model_id == UserDefaultModel.model_id,
-                    UserModel.user_id == UserDefaultModel.user_id,
-                ),
-            )
-            .filter(
-                UserDefaultModel.config_type == config_type,
-                DBModel.is_active.is_(True),
-                UserModel.is_shared.is_(True),
-                UserDefaultModel.user_id.in_(_get_visible_user_ids(db, user_id)),
-            )
-            .order_by(UserDefaultModel.id.desc())
-            .first()
-        )
-        return int(shared[0]) if shared is not None else None
-    except AutoModelUnavailableError:
-        raise
+        # Own savepoint: a failed read aborts the transaction on PostgreSQL, so
+        # returning None would only move the error to the caller's next
+        # statement -- and in workforce_creator's begin_nested retry loop
+        # (which catches IntegrityError alone) that escapes as a 500.
+        with db.begin_nested():
+            return _resolve_default_model_id(db, user_id, config_type)
     except Exception as exc:
-        # Runs inside AgentStore.add_agent before flush, where an escape would
-        # reach the handler's catch-all and 500 the create: degrade to an
-        # unset slot instead, which is the pre-existing behaviour anyway.
         logger.warning(
             "Failed to resolve the %s default model for user %s: %s",
             config_type,
@@ -308,6 +265,56 @@ def resolve_default_model_id(
             exc,
         )
         return None
+
+
+def _resolve_default_model_id(
+    db: Session, user_id: int, config_type: str
+) -> Optional[int]:
+    from ..models.user import UserDefaultModel, UserModel
+
+    # Every candidate, not just the newest. Defence in depth: both
+    # writers upsert on (user_id, config_type) so one row is all this
+    # should ever see, but uq_user_default_model lives only in the ORM
+    # metadata -- were a second row to exist, the newest could be the one
+    # that stopped being visible.
+    own_ids = [
+        int(row[0])
+        for row in db.query(UserDefaultModel.model_id)
+        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+        .filter(
+            UserDefaultModel.user_id == user_id,
+            UserDefaultModel.config_type == config_type,
+            DBModel.is_active.is_(True),
+        )
+        .order_by(UserDefaultModel.id.desc())
+        .all()
+    ]
+    for candidate in own_ids:
+        if _is_model_visible_to_user(db, candidate, user_id):
+            return candidate
+
+    # Both sides have to be visible, and they need not be the same user:
+    # the row's owner (or the default would come from a stranger whose
+    # preferences say nothing here) and the sharer (or the model is not
+    # actually visible). Requiring one user to be both drops a default that
+    # one visible admin set on a model another visible admin shares --
+    # which ``_is_model_visible_to_user`` does consider visible.
+    visible_ids = _get_visible_user_ids(db, user_id)
+    shared = (
+        db.query(UserDefaultModel.model_id)
+        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+        .join(UserModel, UserModel.model_id == UserDefaultModel.model_id)
+        .filter(
+            UserDefaultModel.config_type == config_type,
+            DBModel.is_active.is_(True),
+            UserModel.is_shared.is_(True),
+            UserModel.user_id.in_(visible_ids),
+            UserDefaultModel.user_id.in_(visible_ids),
+        )
+        .order_by(UserDefaultModel.id.desc())
+        .first()
+    )
+    return int(shared[0]) if shared is not None else None
 
 
 def with_default_general_model(db: Session, models: Any, *, user_id: int) -> Any:
