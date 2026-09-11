@@ -149,5 +149,7 @@ def test_relative_resolution_clamps_impossible_depth() -> None:
     package = "xagent.core.tools.core.RAG_tools.kb"
 
     assert _resolve_relative("web.api.kb", 6, package) == "xagent.web.api.kb"
-    # Deeper than the package: must not wrap around into a shorter prefix.
-    assert _resolve_relative("web.api.kb", 99, package) == "web.api.kb"
+    # Two past the package depth. Without the clamp this is parts[:-1], which
+    # keeps five segments and resolves to a module no rule matches; level=99
+    # would not show it, since an out-of-range negative slice is already empty.
+    assert _resolve_relative("web.api.kb", 8, package) == "web.api.kb"

@@ -24,6 +24,7 @@ import pytest
 
 import xagent.core.tools.core.RAG_tools.kb.coordinator as coordinator_module
 from xagent.core.tools.core.RAG_tools.kb import (
+    KBAccessMode,
     KBBackendCapabilities,
     KBContextRequest,
     KBCoordinator,
@@ -34,11 +35,16 @@ from xagent.core.tools.core.RAG_tools.kb import (
 # property that returns it, the factory the shim is built from, and the
 # module-level accessors the sibling facades already use.
 SHIM_ATTRIBUTES = frozenset({"_storage_shim", "storage_shim", "_storage_factory"})
+# Every accessor KBStorageShimCompatibilityFacade exposes, not just the four
+# the coordinator happens to use today.
 STORE_ACCESSORS = frozenset(
     {
+        "get_kb_write_coordinator",
         "get_metadata_store",
         "get_vector_index_store",
+        "get_vector_store_raw_connection",
         "get_ingestion_status_store",
+        "get_prompt_template_store",
         "get_main_pointer_store",
     }
 )
@@ -72,6 +78,13 @@ def _methods_touching_shim(source: str) -> set[str]:
                 elif isinstance(node, ast.Constant) and node.value in SHIM_ATTRIBUTES:
                     offenders.add(method.name)
                 elif isinstance(node, ast.Name) and node.id in STORE_ACCESSORS:
+                    offenders.add(method.name)
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and (node.module or "").split(".")[0] == "storage"
+                ):
+                    # Catches an accessor renamed on import, which no name
+                    # match can see.
                     offenders.add(method.name)
     return offenders
 
@@ -111,6 +124,14 @@ class KBCoordinator:
 
         return get_metadata_store()
 
+    def via_unlisted_accessor(self):
+        return self._storage_factory.get_vector_store_raw_connection()
+
+    def via_renamed_import(self):
+        from ..storage.factory import get_metadata_store as _grab
+
+        return _grab()
+
     def via_imported_module(self):
         from ..storage import factory
 
@@ -130,6 +151,8 @@ class KBCoordinator:
         "via_factory",
         "via_module_accessor",
         "via_imported_module",
+        "via_unlisted_accessor",
+        "via_renamed_import",
     }
 
 
@@ -300,8 +323,11 @@ async def test_resolved_capabilities_reach_the_handle() -> None:
 @pytest.mark.asyncio
 async def test_declared_backend_binding_drives_capability_resolution() -> None:
     """An explicit lancedb binding resolves the same way an absent one does."""
+    # Production writers persist the nested object (pipeline_compatibility.py:171).
     collection_info = _FakeCollectionInfo(
-        extra_metadata={coordinator_module.KB_STORAGE_METADATA_KEY: "lancedb"}
+        extra_metadata={
+            coordinator_module.KB_STORAGE_METADATA_KEY: {"backend": "lancedb"}
+        }
     )
     coordinator, provider, _metadata_store = _coordinator(collection_info)
 
@@ -325,3 +351,53 @@ async def test_unknown_backend_binding_fails_before_a_handle_is_opened() -> None
         await coordinator.open_collection(KBContextRequest(collection="c"))
 
     assert provider.handles == []
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_read_forwards_caller_identity_and_limit() -> None:
+    """Non-default scope must reach the handle, not be defaulted away."""
+    coordinator, provider, _metadata_store = _coordinator()
+
+    await coordinator.list_document_records(
+        collection="c", user_id=7, is_admin=False, limit=3
+    )
+
+    name, args, kwargs = provider.handles[0].calls[0]
+    assert name == "list_documents"
+    assert kwargs == {"user_id": 7, "is_admin": False, "limit": 3}
+    assert args == ()
+    assert provider.contexts[0].user_scope.user_id == 7
+    assert provider.contexts[0].user_scope.is_admin is False
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_cleanup_forwards_its_target_and_write_access() -> None:
+    """Destructive cleanup must carry its target and open a WRITE context."""
+    coordinator, provider, _metadata_store = _coordinator()
+
+    await coordinator.cleanup_vectors_for_operation(
+        collection="c",
+        doc_id="d",
+        parse_hash="p",
+        chunk_ids=["ch1"],
+        model_tag="m",
+        user_id=7,
+        is_admin=False,
+        preview_only=False,
+        confirm=True,
+    )
+
+    name, args, kwargs = provider.handles[0].calls[0]
+    assert name == "cleanup_embeddings_for_operation"
+    assert args == ()
+    assert kwargs == {
+        "doc_id": "d",
+        "parse_hash": "p",
+        "chunk_ids": ["ch1"],
+        "model_tag": "m",
+        "preview_only": False,
+        "confirm": True,
+    }
+    context = provider.contexts[0]
+    assert context.access_mode is KBAccessMode.WRITE
+    assert context.user_scope.user_id == 7
