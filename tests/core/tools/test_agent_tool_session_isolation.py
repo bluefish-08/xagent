@@ -938,6 +938,87 @@ async def test_empty_model_config_falls_back_to_the_configured_default(
     assert fallback_calls == [(7, ("general",))]
 
 
+@pytest.mark.parametrize(
+    "models",
+    [
+        pytest.param({"compact": 3}, id="compact_only"),
+        pytest.param({"general": None, "compact": 3}, id="explicit_null_general"),
+        pytest.param({}, id="empty_dict"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_partial_config_without_a_general_slot_falls_back(monkeypatch, models):
+    """An unset general slot is unset whether or not other slots carry ids."""
+
+    fallback_calls: list[int] = []
+    llm = _StubSingleCallLLM(
+        {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "final_answer",
+                        "arguments": json.dumps({"answer": "delegated output"}),
+                    },
+                }
+            ],
+            "done": False,
+        }
+    )
+
+    def _get_configured_defaults(self, user_id=None, **_kwargs):
+        fallback_calls.append(user_id)
+        return llm, None, None, None
+
+    from xagent.web.services.llm_utils import UserAwareModelStorage
+
+    monkeypatch.setattr(
+        UserAwareModelStorage, "get_configured_defaults", _get_configured_defaults
+    )
+    monkeypatch.setattr(
+        mod, "WebToolConfig", lambda **_kwargs: _SucceedingCloseConfig()
+    )
+
+    async def _no_tools(*_args, **_kwargs):
+        return []
+
+    import xagent.core.tools.adapters.vibe.agent_model_resolution as resolution
+    import xagent.core.tools.adapters.vibe.factory as factory_module
+
+    monkeypatch.setattr(factory_module.ToolFactory, "create_all_tools", _no_tools)
+    # Whatever the other slots resolve to, the general one stays empty.
+    monkeypatch.setattr(
+        resolution, "resolve_agent_model_llms", lambda *_args: (None, None, None, None)
+    )
+
+    tool = AgentTool(
+        agent_id=1,
+        agent_name="Delegated",
+        agent_description="d",
+        session_factory=lambda: _DelegatedSession(
+            SimpleNamespace(
+                id=1,
+                name="Delegated",
+                instructions=None,
+                knowledge_bases=None,
+                skills=None,
+                tool_categories=[],
+                models=models,
+                execution_mode=None,
+            )
+        ),
+        user_id=7,
+        tool_name="delegated",
+        tool_description="d",
+    )
+
+    result = await tool.run_json_async({"task": "run"})
+
+    assert tool_result_succeeded(result) is True
+    assert fallback_calls == [7]
+
+
 @pytest.mark.asyncio
 async def test_a_stored_model_that_no_longer_resolves_still_fails_closed(monkeypatch):
     """A stated choice that is gone or no longer visible must keep failing

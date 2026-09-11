@@ -1349,10 +1349,14 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   // posts no body and never persists models.
   const isDirty = isDirtyBeyondGeneralModel || generalModelDiffers
   // ...but a slot this page seeded is not an edit the user made, so it must
-  // not block Publish for the very agents the seed exists to unblock.
+  // not block Publish for the very agents the seed exists to unblock. The
+  // stored-slot test retires the exemption: once an Update has persisted a
+  // model, re-picking the seeded one is an ordinary unsaved edit again.
+  const seedStillUnsaved = ((originalData?.models || {}).general || null) === null
   const publishBlockedByEdits =
     isDirtyBeyondGeneralModel ||
-    (generalModelDiffers && modelConfig.general !== seededGeneralRef.current)
+    (generalModelDiffers &&
+      !(seedStillUnsaved && modelConfig.general === seededGeneralRef.current))
 
   // After a successful save, align server-side ownership with the chosen control:
   // promote a personal agent to team (with visibility) or demote a team agent back

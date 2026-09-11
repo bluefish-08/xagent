@@ -112,7 +112,21 @@ vi.mock("@/components/ui/multi-select", () => ({
     </div>
   ),
 }))
-vi.mock("@/components/ui/select", () => ({ Select: () => null }))
+vi.mock("@/components/ui/select", () => ({
+  Select: ({ value, onValueChange, options }: any) => (
+    <select
+      data-testid="model-select"
+      value={value ?? ""}
+      onChange={(e) => onValueChange(e.target.value)}
+    >
+      {(options || []).map((o: any) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  ),
+}))
 vi.mock("@/components/build/build-file-preview-sheet", () => ({
   BuildFilePreviewSheet: () => null,
 }))
@@ -172,10 +186,15 @@ function installApi(opts: {
   }
   apiRequestMock.mockImplementation(
     (url: string, o?: { method?: string; body?: string }) => {
-      if (o?.method === "PUT")
+      if (o?.method === "PUT") {
+        const sent = JSON.parse(o.body || "{}")
         return Promise.resolve(
-          new Response(JSON.stringify(agentResponse(opts.models)), { status: 200 })
+          new Response(
+            JSON.stringify(agentResponse(sent.models ?? opts.models)),
+            { status: 200 }
+          )
         )
+      }
       if (url.endsWith("/api/kb/collections"))
         return Promise.resolve(
           new Response(JSON.stringify({ collections: [] }), { status: 200 })
@@ -213,6 +232,8 @@ function installApi(opts: {
   )
 }
 
+const generalSelect = () =>
+  screen.getAllByTestId("model-select")[0] as HTMLSelectElement
 const updateButton = () => screen.getByText("builds.editor.header.update")
 const publishButton = () => screen.getByText("builds.editor.header.publish")
 const nameBox = () => screen.getByDisplayValue("Seed Test Agent")
@@ -353,16 +374,17 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     ).toBeUndefined()
   })
 
-  it("shows the seeded model in the flow view when the viewer owns the agent", async () => {
+  it("shows the seeded model when the viewer owns the agent", async () => {
     installApi({
       models: null,
       llms: [{ id: DEFAULT_MODEL_ID, model_name: "seeded-llm" }],
     })
     render(<AgentBuilder agentId={AGENT_ID} />)
     await loaded()
-    fireEvent.click(screen.getByText("builds.editor.viewTabs.flow"))
 
-    await waitFor(() => expect(screen.getByText("seeded-llm")).toBeInTheDocument())
+    await waitFor(() =>
+      expect(generalSelect().value).toBe(String(DEFAULT_MODEL_ID))
+    )
   })
 
   it("does not seed a read-only cross-user view", async () => {
@@ -375,10 +397,9 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     })
     render(<AgentBuilder agentId={AGENT_ID} />)
     await loaded()
-    fireEvent.click(screen.getByText("builds.editor.viewTabs.flow"))
 
-    await waitFor(() => expect(screen.getByText("—")).toBeInTheDocument())
-    expect(screen.queryByText("seeded-llm")).toBeNull()
+    await waitFor(() => expect(generalSelect()).toBeDisabled())
+    expect(generalSelect().value).toBe("")
   })
 
   it("seeds when the agent load resolves last", async () => {
@@ -410,5 +431,57 @@ describe("AgentBuilder edit-mode general-model seed", () => {
     fireEvent.click(updateButton())
 
     expect((await savedModels()).general).toBe(DEFAULT_MODEL_ID)
+  })
+})
+
+describe("AgentBuilder seed provenance after a save", () => {
+  const OTHER_MODEL_ID = 7
+
+  it("stops exempting the seeded model once an Update has persisted another", async () => {
+    // seed A -> pick B -> Update (B is now stored) -> pick A again. A is no
+    // longer "the slot this page seeded", it is an unsaved edit, and Publish
+    // cannot persist it (the request carries no body).
+    installApi({
+      models: null,
+      llms: [
+        { id: DEFAULT_MODEL_ID, model_name: "seeded-llm" },
+        { id: OTHER_MODEL_ID, model_name: "other-llm" },
+      ],
+    })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+    await waitFor(() => expect(publishButton()).not.toBeDisabled())
+
+    fireEvent.change(generalSelect(), { target: { value: String(OTHER_MODEL_ID) } })
+    fireEvent.click(updateButton())
+    expect((await savedModels()).general).toBe(OTHER_MODEL_ID)
+
+    await waitFor(() => expect(updateButton()).toBeDisabled())
+    fireEvent.change(generalSelect(), {
+      target: { value: String(DEFAULT_MODEL_ID) },
+    })
+
+    await waitFor(() => expect(publishButton()).toBeDisabled())
+  })
+
+  it("still exempts the seeded model before any save", async () => {
+    installApi({
+      models: null,
+      llms: [
+        { id: DEFAULT_MODEL_ID, model_name: "seeded-llm" },
+        { id: OTHER_MODEL_ID, model_name: "other-llm" },
+      ],
+    })
+    render(<AgentBuilder agentId={AGENT_ID} />)
+    await loaded()
+
+    await waitFor(() => expect(publishButton()).not.toBeDisabled())
+    fireEvent.change(generalSelect(), { target: { value: String(OTHER_MODEL_ID) } })
+    await waitFor(() => expect(publishButton()).toBeDisabled())
+
+    fireEvent.change(generalSelect(), {
+      target: { value: String(DEFAULT_MODEL_ID) },
+    })
+    await waitFor(() => expect(publishButton()).not.toBeDisabled())
   })
 })

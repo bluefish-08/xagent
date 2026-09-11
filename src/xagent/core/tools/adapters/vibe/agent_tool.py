@@ -2180,10 +2180,16 @@ class AgentTool(AbstractBaseTool):
                 default_llm, fast_llm, vision_llm, compact_llm = (
                     resolve_agent_model_llms(db, storage, agent_models, self._user_id)
                 )
-                # Only an unset config, never a resolution failure: a stored id
-                # that is gone or no longer visible has to keep failing closed
-                # rather than silently run on a different model.
-                if not agent_models and not default_llm:
+                # Keyed on the general slot, not on the whole mapping: an
+                # agent carrying only e.g. {"compact": id} has an unset general
+                # slot too. A stated id that no longer resolves keeps failing
+                # closed rather than silently running on a different model.
+                stated_general = (
+                    agent_models.get("general")
+                    if isinstance(agent_models, dict)
+                    else None
+                )
+                if not stated_general and not default_llm:
                     from .....web.services.llm_utils import AutoModelUnavailableError
 
                     try:
@@ -2194,8 +2200,8 @@ class AgentTool(AbstractBaseTool):
                         default_llm = None
                     if default_llm is not None:
                         logger.info(
-                            "Agent %s has no model config; delegating on the "
-                            "configured default %s",
+                            "Agent %s has no general model set; delegating on "
+                            "the configured default %s",
                             self._agent_id,
                             getattr(
                                 default_llm, "model_name", type(default_llm).__name__
