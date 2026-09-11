@@ -12,9 +12,7 @@ from ...core.utils.type_check import ensure_list
 from ..models.agent import Agent, AgentOrigin, AgentStatus
 from ..models.agent_api_key import AgentApiKey
 from ..models.database import release_db_connection_if_clean
-from ..models.model import Model as DBModel
 from ..models.task import Task
-from ..models.user import UserDefaultModel
 from .agent_team_scope import (
     get_agent_team_scope,
     owned_agent_clause,
@@ -138,45 +136,6 @@ def clean_tool_categories(categories: Any) -> list[str]:
     so ``None`` renders as ``[]`` here. Never use this on a write path.
     """
     return normalize_tool_categories(categories) or []
-
-
-def with_default_general_model(db: Session, models: Any, *, user_id: int) -> Any:
-    """Fill an omitted ``general`` slot from the owner's default model.
-
-    An explicit ``{"general": None}`` means "no main model" and is kept; a
-    non-dict payload is unvalidated template YAML this layer must not reject.
-    """
-    if models is not None and not isinstance(models, dict):
-        return models
-    if models is not None and "general" in models:
-        return models
-
-    # Read user_default_models directly: ModelStore's getter opens with a
-    # cache_get, putting a Redis round-trip inside this write txn (#889).
-    # .first(), not .scalar(): user_default_models predates the alembic chain,
-    # so an old deployment may lack uq_user_default_model and hold two rows.
-    row = (
-        db.query(UserDefaultModel.model_id)
-        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
-        .filter(
-            UserDefaultModel.user_id == user_id,
-            UserDefaultModel.config_type == "general",
-            DBModel.is_active.is_(True),
-        )
-        .first()
-    )
-    if row is None:
-        return models
-    default_model_id = row[0]
-
-    from .model_service import _is_model_visible_to_user
-
-    # A team-membership change leaves the default row pointing at a model the
-    # owner can no longer see, and such an id would slip past _validate_models
-    # (AgentManagementService validates before add_agent, not after).
-    if not _is_model_visible_to_user(db, int(default_model_id), user_id):
-        return models
-    return {**(models or {}), "general": int(default_model_id)}
 
 
 class AgentStore:
@@ -433,6 +392,8 @@ class AgentStore:
         if visibility is not None and visibility not in _VALID_VISIBILITIES:
             raise ValueError(f"Unsupported agent visibility: {visibility}")
         widget_key = new_widget_key() if widget_enabled else None
+        from .model_service import with_default_general_model
+
         models = with_default_general_model(self.db, models, user_id=user_id)
         # Agents are created personal (team_id NULL). Team ownership is granted
         # only by an explicit promote (see ``promote_agent_to_team``); a create

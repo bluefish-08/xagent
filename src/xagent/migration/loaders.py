@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from ..web.models.agent import Agent
 from ..web.models.skill import UserSkill
 from ..web.models.user import User
-from ..web.services.agent_store import with_default_general_model
+from ..web.services.model_service import with_default_general_model
 from .bundle import ArchivedItem, MigrationBundle
 
 # xagent's scheduled triggers currently fire on a fixed interval only; standard

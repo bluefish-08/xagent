@@ -228,6 +228,72 @@ def get_default_vision_model(
     return None
 
 
+def resolve_default_model_id(
+    db: Session, user_id: int, config_type: str
+) -> Optional[int]:
+    """Resolve the ``DBModel.id`` a user's default for *config_type* points at.
+
+    Own default first, then a visible user's shared one -- the same two layers
+    the LLM-returning resolvers apply, so a user whose only usable default is
+    an admin-shared model is not treated as having none.
+
+    Visibility is re-checked on the own-default path because nothing prunes a
+    ``user_default_models`` row when its model stops being visible.
+    """
+    from ..models.user import UserDefaultModel, UserModel
+
+    own = (
+        db.query(UserDefaultModel.model_id)
+        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+        .filter(
+            UserDefaultModel.user_id == user_id,
+            UserDefaultModel.config_type == config_type,
+            DBModel.is_active.is_(True),
+        )
+        # Deterministic pick: uq_user_default_model lives only in the ORM
+        # metadata, never in an alembic revision, so an old database can hold
+        # more than one row for this pair. Not covered by a test -- the
+        # fixtures build the schema from that same metadata, constraint
+        # included, so a duplicate row cannot be inserted to exercise it.
+        .order_by(UserDefaultModel.updated_at.desc(), UserDefaultModel.id.desc())
+        .first()
+    )
+    if own is not None and _is_model_visible_to_user(db, int(own[0]), user_id):
+        return int(own[0])
+
+    shared = (
+        db.query(UserDefaultModel.model_id)
+        .join(DBModel, UserDefaultModel.model_id == DBModel.id)
+        .join(UserModel, UserDefaultModel.model_id == UserModel.model_id)
+        .filter(
+            UserDefaultModel.config_type == config_type,
+            DBModel.is_active.is_(True),
+            UserModel.is_shared.is_(True),
+            UserModel.user_id.in_(_get_visible_user_ids(db, user_id)),
+        )
+        .order_by(UserDefaultModel.updated_at.desc(), UserDefaultModel.id.desc())
+        .first()
+    )
+    return int(shared[0]) if shared is not None else None
+
+
+def with_default_general_model(db: Session, models: Any, *, user_id: int) -> Any:
+    """Fill an omitted ``general`` slot from the owner's default model.
+
+    An explicit ``{"general": None}`` means "no main model" and is kept; a
+    non-dict payload is unvalidated template YAML this layer must not reject.
+    """
+    if models is not None and not isinstance(models, dict):
+        return models
+    if models is not None and "general" in models:
+        return models
+
+    default_model_id = resolve_default_model_id(db, user_id, "general")
+    if default_model_id is None:
+        return models
+    return {**(models or {}), "general": default_model_id}
+
+
 def get_default_model(user_id: Optional[int] = None) -> Optional[BaseLLM]:
     """
     Get the default general model for a specific user.
