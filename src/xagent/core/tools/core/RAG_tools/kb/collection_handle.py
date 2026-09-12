@@ -198,7 +198,9 @@ def _condition_row_mask(batch_df: Any, conditions: Sequence[FilterExpression]) -
         elif operator is FilterOperator.IS_NOT_NULL:
             column_mask = column.notna()
         elif operator is FilterOperator.CONTAINS:
-            column_mask = column.astype(str).str.contains(
+            # astype(str) renders NULL as "None"/"nan", which a short needle
+            # would then match; drop those rows before comparing.
+            column_mask = column.notna() & column.astype(str).str.contains(
                 str(value), na=False, regex=False
             )
         else:

@@ -445,3 +445,27 @@ def test_a_list_value_reaches_the_backend_as_membership() -> None:
 
     conditions = _conditions(store.search_vectors_by_model.call_args.kwargs["filters"])
     assert ("doc_id", "in", ["d1", "d3"]) in conditions, conditions
+
+
+def test_contains_does_not_match_the_rendering_of_a_null() -> None:
+    """`astype(str)` renders NULL as "None"/"nan"; a short needle must not hit it."""
+    handle, _ctx, _store = _make_handle()
+    frame = _operator_frame()
+    frame["label"] = ["alpha", None, "beta", "gamma"]
+    table = _projecting_table(frame)
+
+    for needle in ("on", "an", "No", "na"):
+        results = handle._substring_fallback(
+            table=table,
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters=FilterCondition(
+                field="label", operator=FilterOperator.CONTAINS, value=needle
+            ),
+            current_warnings=[],
+        )
+        assert "c2" not in [r.chunk_id for r in results], (
+            f"needle {needle!r} matched the NULL row"
+        )
