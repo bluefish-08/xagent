@@ -154,57 +154,81 @@ def _condition_fields(conditions: Sequence[FilterExpression]) -> list[str]:
     return [c.field for c in conditions if isinstance(c, FilterCondition)]
 
 
-def _condition_row_mask(batch_df: Any, conditions: Sequence[FilterExpression]) -> Any:
-    """AND the conditions into a pandas mask, skipping absent columns.
+def _require_flat_condition(condition: FilterExpression) -> FilterCondition:
+    """A scan evaluates plain conditions only; a nested group has no column."""
+    if not isinstance(condition, FilterCondition):
+        raise ValueError(
+            "Scan fallback cannot evaluate a nested filter expression: "
+            f"{type(condition).__name__}"
+        )
+    return condition
 
-    The sync fallback cannot push predicates down and the async one pushes only
-    scalar equality, so what is left is evaluated here against the same parsed
-    conditions the indexed paths hand to the backend, though a scan cannot
-    reproduce every backend semantic exactly. A column the batch does not carry
-    is skipped, matching the pre-parse behaviour.
-    """
-    mask = None
-    for condition in conditions:
-        if not isinstance(condition, FilterCondition):
-            raise ValueError(
-                "Scan fallback cannot evaluate a nested filter expression: "
-                f"{type(condition).__name__}"
-            )
-        field = condition.field
-        if field not in batch_df.columns:
-            continue
-        column = batch_df[field]
-        operator = condition.operator
-        value = condition.value
+
+def _single_condition_mask(batch_df: Any, condition: FilterCondition) -> Any:
+    """Evaluate one condition against a batch, or say why it cannot be."""
+    field = condition.field
+    if field not in batch_df.columns:
+        raise ValueError(
+            f"Scan fallback cannot filter on {field!r}: the table does not "
+            "carry that column"
+        )
+    column = batch_df[field]
+    operator = condition.operator
+    value = condition.value
+    try:
         if operator is FilterOperator.IN or (
             operator is FilterOperator.EQ and isinstance(value, (list, tuple, set))
         ):
-            column_mask = column.isin(list(value))
-        elif operator is FilterOperator.EQ:
-            column_mask = column == value
-        elif operator is FilterOperator.NE:
+            return column.isin(list(value))
+        if operator is FilterOperator.EQ:
+            return column == value
+        if operator is FilterOperator.NE:
+            if value is None:
+                # SQL reads `field != NULL` as NULL, which selects nothing.
+                return pd.Series(False, index=column.index)
             # SQL drops NULL rows on `!=`; pandas would keep them.
-            column_mask = (column != value) & column.notna()
-        elif operator is FilterOperator.GT:
-            column_mask = column > value
-        elif operator is FilterOperator.GTE:
-            column_mask = column >= value
-        elif operator is FilterOperator.LT:
-            column_mask = column < value
-        elif operator is FilterOperator.LTE:
-            column_mask = column <= value
-        elif operator is FilterOperator.IS_NULL:
-            column_mask = column.isna()
-        elif operator is FilterOperator.IS_NOT_NULL:
-            column_mask = column.notna()
-        elif operator is FilterOperator.CONTAINS:
+            return (column != value) & column.notna()
+        if operator is FilterOperator.GT:
+            return column > value
+        if operator is FilterOperator.GTE:
+            return column >= value
+        if operator is FilterOperator.LT:
+            return column < value
+        if operator is FilterOperator.LTE:
+            return column <= value
+        if operator is FilterOperator.IS_NULL:
+            return column.isna()
+        if operator is FilterOperator.IS_NOT_NULL:
+            return column.notna()
+        if operator is FilterOperator.CONTAINS:
             # astype(str) renders NULL as "None"/"nan", which a short needle
             # would then match; drop those rows before comparing.
-            column_mask = column.notna() & column.astype(str).str.contains(
+            return column.notna() & column.astype(str).str.contains(
                 str(value), na=False, regex=False
             )
-        else:
-            raise ValueError(f"Unsupported filter operator for scan: {operator}")
+    except TypeError as exc:
+        # The backend rejects a mismatched comparison too; say which one.
+        raise ValueError(
+            f"Scan fallback cannot compare {field!r} ({column.dtype}) with "
+            f"{value!r}: {exc}"
+        ) from exc
+    raise ValueError(f"Unsupported filter operator for scan: {operator}")
+
+
+def _condition_row_mask(batch_df: Any, conditions: Sequence[FilterExpression]) -> Any:
+    """AND the conditions into a pandas mask.
+
+    The sync fallback cannot push predicates down and the async one pushes only
+    scalar equality, so what is left is evaluated here against the same parsed
+    conditions the indexed paths hand to the backend. A condition the scan
+    cannot evaluate raises: dropping it would hand back rows the caller
+    filtered out.
+    """
+    mask = None
+    for condition in conditions:
+        column_mask = _single_condition_mask(
+            batch_df, _require_flat_condition(condition)
+        )
         mask = column_mask if mask is None else (mask & column_mask)
     return mask
 
@@ -2491,12 +2515,8 @@ class LanceDBCollectionHandle(KBCollectionHandle):
         # cannot express the operator conditions, so those are scanned here.
         query_filters: Dict[str, Any] = {"collection": collection}
         scan_conditions: list[FilterCondition] = []
-        for condition in normalize_filter_conditions(filters):
-            if not isinstance(condition, FilterCondition):
-                raise ValueError(
-                    "Scan fallback cannot evaluate a nested filter expression: "
-                    f"{type(condition).__name__}"
-                )
+        for raw_condition in normalize_filter_conditions(filters):
+            condition = _require_flat_condition(raw_condition)
             if condition.operator is FilterOperator.EQ and not isinstance(
                 condition.value, (list, tuple, set)
             ):

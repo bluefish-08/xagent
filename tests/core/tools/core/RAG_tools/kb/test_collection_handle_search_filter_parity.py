@@ -409,26 +409,25 @@ def test_scan_evaluates_every_operator_it_accepts(
     assert [r.chunk_id for r in results] == expected
 
 
-def test_scan_skips_a_filter_on_a_column_the_table_lacks() -> None:
-    """A missing column is skipped, not turned into an empty result set.
+def test_scan_refuses_a_filter_on_a_column_the_table_lacks() -> None:
+    """Dropping an unapplicable filter would return rows the caller excluded.
 
-    The embeddings schema carries no arbitrary metadata columns, so projecting
-    one would fail the whole scan inside the swallowing except.
+    The embeddings schema carries no arbitrary metadata columns, so a filter on
+    one cannot be evaluated by a scan; failing beats widening the result set.
     """
     handle, _ctx, _store = _make_handle()
     table = _projecting_table(_operator_frame())
 
-    results = handle._substring_fallback(
-        table=table,
-        collection="docs",
-        query_text="alpha",
-        model_tag="model-a",
-        top_k=10,
-        filters={"page_number": {"operator": "gte", "value": 2}},
-        current_warnings=[],
-    )
-
-    assert [r.chunk_id for r in results] == ["c1", "c2", "c3", "c4"]
+    with pytest.raises(ValueError, match="page_number"):
+        handle._substring_fallback(
+            table=table,
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters={"page_number": {"operator": "gte", "value": 2}},
+            current_warnings=[],
+        )
 
 
 def test_a_list_value_reaches_the_backend_as_membership() -> None:
@@ -468,4 +467,59 @@ def test_contains_does_not_match_the_rendering_of_a_null() -> None:
         )
         assert "c2" not in [r.chunk_id for r in results], (
             f"needle {needle!r} matched the NULL row"
+        )
+
+
+def test_an_empty_membership_filter_stays_valid_sql() -> None:
+    """`IN ()` is a syntax error; an empty membership is simply false."""
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_filter_utils import (
+        translate_filter_expression,
+    )
+    from xagent.core.tools.core.RAG_tools.utils.filter_utils import (
+        parse_legacy_filters,
+    )
+
+    expression = parse_legacy_filters({"doc_id": []})
+
+    assert translate_filter_expression(expression) == "FALSE"
+
+
+def test_scan_reads_ne_against_null_the_way_sql_does() -> None:
+    """`field != NULL` is NULL in SQL, so it selects nothing."""
+    handle, _ctx, _store = _make_handle()
+    frame = _operator_frame()
+    frame["label"] = ["a", None, "b", "c"]
+    table = _projecting_table(frame)
+
+    results = handle._substring_fallback(
+        table=table,
+        collection="docs",
+        query_text="alpha",
+        model_tag="model-a",
+        top_k=10,
+        filters=FilterCondition(field="label", operator=FilterOperator.NE, value=None),
+        current_warnings=[],
+    )
+
+    assert results == []
+
+
+def test_scan_names_the_column_when_a_comparison_cannot_be_made() -> None:
+    """A dtype mismatch fails on the backend too; say which column and value."""
+    handle, _ctx, _store = _make_handle()
+    frame = _operator_frame()
+    frame["created_at"] = pd.to_datetime(
+        ["2020-01-01", "2021-01-01", "2022-01-01", "2023-01-01"]
+    )
+    table = _projecting_table(frame)
+
+    with pytest.raises(ValueError, match="created_at"):
+        handle._substring_fallback(
+            table=table,
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters={"created_at": {"operator": "gte", "value": 2}},
+            current_warnings=[],
         )
