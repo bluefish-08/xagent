@@ -523,3 +523,45 @@ def test_scan_names_the_column_when_a_comparison_cannot_be_made() -> None:
             filters={"created_at": {"operator": "gte", "value": 2}},
             current_warnings=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_both_scans_refuse_the_same_inapplicable_filter() -> None:
+    """The async scan must not turn a refused filter into a quiet empty page.
+
+    Its broad ``except`` swallows store errors; a filter it cannot apply has to
+    reach the caller the way the sync scan's does.
+    """
+    handle, _ctx, store = _make_handle()
+    frame = _operator_frame()
+    store.open_embeddings_table.return_value = (
+        _projecting_table(frame),
+        "embeddings_model_a",
+    )
+
+    async def _iter_batches_async(**kwargs: Any):
+        yield _batch_for(frame, kwargs["columns"])
+
+    store.iter_batches_async = _iter_batches_async
+    bad_filter = {"page_number": {"operator": "gte", "value": 2}}
+
+    with pytest.raises(ValueError, match="page_number"):
+        await handle._substring_fallback_async(
+            model_tag="model-a",
+            collection="docs",
+            query_text="alpha",
+            top_k=10,
+            filters=bad_filter,
+            current_warnings=[],
+        )
+
+    with pytest.raises(ValueError, match="page_number"):
+        handle._substring_fallback(
+            table=_projecting_table(frame),
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters=bad_filter,
+            current_warnings=[],
+        )

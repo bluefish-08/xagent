@@ -149,15 +149,34 @@ def _table_column_names(table: Any) -> set[str] | None:
         return None
 
 
+def _projected_columns(table: Any, names: Iterable[str]) -> list[str]:
+    """De-duplicated column list, narrowed to what the table actually carries."""
+    wanted = list(dict.fromkeys(names))
+    available = _table_column_names(table)
+    # An empty name set is not a credible schema; narrowing on it would ask for
+    # no columns at all and quietly scan nothing.
+    if not available:
+        return wanted
+    return [name for name in wanted if name in available]
+
+
 def _condition_fields(conditions: Sequence[FilterExpression]) -> list[str]:
     """Columns a scan must project so every condition can be evaluated."""
     return [c.field for c in conditions if isinstance(c, FilterCondition)]
 
 
+class ScanFilterError(ValueError):
+    """A scan fallback cannot apply a filter the caller asked for.
+
+    Distinct from the store errors the fallbacks swallow, so that an
+    inapplicable filter reaches the caller instead of becoming an empty result.
+    """
+
+
 def _require_flat_condition(condition: FilterExpression) -> FilterCondition:
     """A scan evaluates plain conditions only; a nested group has no column."""
     if not isinstance(condition, FilterCondition):
-        raise ValueError(
+        raise ScanFilterError(
             "Scan fallback cannot evaluate a nested filter expression: "
             f"{type(condition).__name__}"
         )
@@ -168,7 +187,7 @@ def _single_condition_mask(batch_df: Any, condition: FilterCondition) -> Any:
     """Evaluate one condition against a batch, or say why it cannot be."""
     field = condition.field
     if field not in batch_df.columns:
-        raise ValueError(
+        raise ScanFilterError(
             f"Scan fallback cannot filter on {field!r}: the table does not "
             "carry that column"
         )
@@ -207,12 +226,13 @@ def _single_condition_mask(batch_df: Any, condition: FilterCondition) -> Any:
                 str(value), na=False, regex=False
             )
     except TypeError as exc:
-        # The backend rejects a mismatched comparison too; say which one.
-        raise ValueError(
+        # Only the ordered comparisons raise on a dtype mismatch; EQ/NE/IN
+        # answer False/True instead, and still disagree with the backend.
+        raise ScanFilterError(
             f"Scan fallback cannot compare {field!r} ({column.dtype}) with "
             f"{value!r}: {exc}"
         ) from exc
-    raise ValueError(f"Unsupported filter operator for scan: {operator}")
+    raise ScanFilterError(f"Unsupported filter operator for scan: {operator}")
 
 
 def _condition_row_mask(batch_df: Any, conditions: Sequence[FilterExpression]) -> Any:
@@ -220,9 +240,9 @@ def _condition_row_mask(batch_df: Any, conditions: Sequence[FilterExpression]) -
 
     The sync fallback cannot push predicates down and the async one pushes only
     scalar equality, so what is left is evaluated here against the same parsed
-    conditions the indexed paths hand to the backend. A condition the scan
-    cannot evaluate raises: dropping it would hand back rows the caller
-    filtered out.
+    conditions the indexed paths hand to the backend, though a scan cannot
+    reproduce every backend semantic exactly. A condition the scan cannot
+    evaluate raises: dropping it would hand back rows the caller filtered out.
     """
     mask = None
     for condition in conditions:
@@ -2409,20 +2429,18 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             "metadata",
         }
         scan_conditions = normalize_filter_conditions(filters)
-        # A filtered column absent from the projection would be skipped by the
-        # mask below rather than applied. Projecting one the table does not have
-        # would fail the whole scan, so ask only for what the schema carries.
+        # Ask only for columns the schema carries: projecting a missing one
+        # raises inside the swallowing except below and returns empty, where the
+        # mask instead reports which column it could not filter on.
         desired_columns.update(_condition_fields(scan_conditions))
-        table_columns = _table_column_names(table)
-        if table_columns is not None:
-            desired_columns &= table_columns
+        projected = _projected_columns(table, sorted(desired_columns))
 
         results: List[SearchResult] = []
 
         try:
             if hasattr(table, "to_batches"):
                 batch_iter: Iterable[Any] = table.to_batches(
-                    columns=list(desired_columns), batch_size=batch_size
+                    columns=projected, batch_size=batch_size
                 )
             else:
                 if pa is None:  # pragma: no cover - Safety guard when pyarrow missing
@@ -2430,7 +2448,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                         "pyarrow is required for substring fallback when LanceDB table does not expose to_batches()."
                     )
                 arrow_table: PyArrowTable = table.to_arrow()  # type: ignore
-                arrow_table = arrow_table.select(list(desired_columns))
+                arrow_table = arrow_table.select(projected)
                 batch_iter = arrow_table.to_batches(max_chunksize=batch_size)
         except Exception as exc:  # noqa: BLE001
             logger.error("Substring fallback failed to read batches: %s", exc)
@@ -2539,18 +2557,17 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                     # below would skip them. A repeat of a base column would
                     # make to_pandas() return duplicate labels, which breaks
                     # every mask built from it.
-                    columns=list(
-                        dict.fromkeys(
-                            [
-                                "doc_id",
-                                "chunk_id",
-                                "text",
-                                "parse_hash",
-                                "created_at",
-                                "metadata",
-                                *_condition_fields(scan_conditions),
-                            ]
-                        )
+                    columns=_projected_columns(
+                        _table,
+                        [
+                            "doc_id",
+                            "chunk_id",
+                            "text",
+                            "parse_hash",
+                            "created_at",
+                            "metadata",
+                            *_condition_fields(scan_conditions),
+                        ],
                     ),
                     batch_size=batch_size,
                     filters=query_filters,
@@ -2610,6 +2627,9 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                     )
                 )
 
+        except ScanFilterError:
+            # The sync scan lets this reach the caller; both must answer alike.
+            raise
         except Exception as exc:
             logger.error("Async substring fallback failed: %s", exc)
         finally:
