@@ -63,6 +63,45 @@ _COMPLETED_RESULT_RANK: dict[str, int] = {
 }
 
 
+# Verbs that mark an mcp_* call as changing something outside this task. Matched
+# against whole "_"-separated segments, never as substrings, or a read like
+# mcp_Drive_list_shared_files trips "share". Known ceilings: only mcp_* tools are
+# classified, so a built-in tool with outside effects is missed; and a noun
+# segment ("mcp_X_verify_post_asset") still over-reports, which costs a
+# redundant notice rather than a silent one - keep the bias that way round.
+_EXTERNAL_WRITE_VERBS = frozenset(
+    (
+        "create",
+        "post",
+        "publish",
+        "send",
+        "share",
+        "update",
+        "delete",
+        "remove",
+        "write",
+        "upload",
+        "add",
+        "set",
+        "move",
+        "invite",
+    )
+)
+
+
+def _is_external_write(name: str) -> bool:
+    return any(segment.lower() in _EXTERNAL_WRITE_VERBS for segment in name.split("_"))
+
+
+def _tool_call_name(tool_call: Any) -> str:
+    if not isinstance(tool_call, dict):
+        return ""
+    function_payload = tool_call.get("function")
+    if isinstance(function_payload, dict) and function_payload.get("name"):
+        return str(function_payload["name"])
+    return str(tool_call.get("name") or tool_call.get("tool_name") or "")
+
+
 @dataclass
 class DAGCompletionAssessment:
     complete: bool
@@ -202,6 +241,7 @@ class _DAGStepRuntime:
         await self.parent.on_tool_start(tool_call=self._with_step(tool_call))
 
     async def on_tool_end(self, *, tool_call: dict[str, Any], result: Any) -> None:
+        self.dag_pattern.record_external_action(tool_call)
         await self.parent.on_tool_end(
             tool_call=self._with_step(tool_call), result=result
         )
@@ -390,6 +430,7 @@ class DAGPattern(AgentPattern):
         self.active_step_pattern_states: dict[str, dict[str, Any]] = {}
         self.active_step_contexts: dict[str, dict[str, Any]] = {}
         self.step_results: dict[str, Any] = {}
+        self.executed_external_actions: list[dict[str, Any]] = []
         self.planned_user_message_count = 0
         self.memory_input_text: str | None = None
         self.completion_feedback: str | None = None
@@ -1169,6 +1210,9 @@ class DAGPattern(AgentPattern):
             "active_step_pattern_states": dict(self.active_step_pattern_states),
             "active_step_contexts": dict(self.active_step_contexts),
             "step_results": dict(self.step_results),
+            "executed_external_actions": [
+                dict(action) for action in self.executed_external_actions
+            ],
             "planned_user_message_count": self.planned_user_message_count,
             "memory_input_text": self.memory_input_text,
             "max_concurrency": self.max_concurrency,
@@ -1259,6 +1303,11 @@ class DAGPattern(AgentPattern):
             )
         self._sync_legacy_active_step()
         self.step_results = dict(state.get("step_results", {}))
+        self.executed_external_actions = [
+            action
+            for action in state.get("executed_external_actions") or []
+            if isinstance(action, dict)
+        ]
         self.planned_user_message_count = int(
             state.get("planned_user_message_count", 0)
         )
@@ -1524,7 +1573,9 @@ class DAGPattern(AgentPattern):
             response=response,
             metadata={"phase": "dag_completion_assessment"},
         )
-        assessment = self._parse_completion_assessment(response)
+        assessment = self._append_executed_writes(
+            self._parse_completion_assessment(response)
+        )
         if assessment.complete:
             await final_answer_stream.finish(assessment.answer)
         return assessment
@@ -1558,6 +1609,7 @@ class DAGPattern(AgentPattern):
             "messages": latest_messages,
             "plan": self.plan.to_dict() if self.plan is not None else None,
             "step_results": self.step_results,
+            "executed_external_actions": self.executed_external_actions,
             "candidate_output": self._final_output(),
             "previous_completion_feedback": self.completion_feedback,
         }
@@ -1572,7 +1624,15 @@ class DAGPattern(AgentPattern):
                     "of execution only; they cannot add deliverables, claims, "
                     "formats, or acceptance criteria that the user did not ask "
                     "for. Do not mark the goal incomplete solely because an "
-                    "intermediate step proposed extra work. Call the assessment "
+                    "intermediate step proposed extra work. "
+                    "executed_external_actions lists calls this turn already "
+                    "made to outside systems; every one of them succeeded. "
+                    "They are verified execution records, not claims to weigh "
+                    "against the conversation: the answer must never say such a "
+                    "call did not run or was cancelled, however plainly the user "
+                    "asked for it to be skipped. When one ran against the "
+                    "user's wishes, say it ran and that it cannot be taken back. "
+                    "Call the assessment "
                     "tool exactly once. If "
                     "the goal is satisfied, choose status=completed and put the "
                     "final user-facing answer in answer. If anything material is "
@@ -1732,6 +1792,46 @@ class DAGPattern(AgentPattern):
         return terminal_steps or [
             step for step in self.plan.steps if step.status == "completed"
         ]
+
+    def record_external_action(self, tool_call: Any) -> None:
+        """Remember a succeeded mcp_* call as a fact the answer has to live with."""
+        name = _tool_call_name(tool_call)
+        if not name.startswith("mcp_"):
+            return
+        if any(action.get("tool") == name for action in self.executed_external_actions):
+            return
+        self.executed_external_actions.append(
+            {"tool": name, "changes_outside_state": _is_external_write(name)}
+        )
+
+    def _executed_external_writes(self) -> list[str]:
+        return [
+            str(action["tool"])
+            for action in self.executed_external_actions
+            if action.get("changes_outside_state") and action.get("tool")
+        ]
+
+    def _append_executed_writes(
+        self, assessment: DAGCompletionAssessment
+    ) -> DAGCompletionAssessment:
+        """State the outside writes in the answer whatever the answer says.
+
+        Asking the model to confirm them instead would leave the one case this
+        exists for -- a model that has decided the call never happened -- free
+        to confirm and deny in the same breath.
+        """
+        if not assessment.complete:
+            return assessment
+        writes = self._executed_external_writes()
+        if not writes:
+            return assessment
+        notice = (
+            "Note: this turn executed "
+            + ", ".join(writes)
+            + ". Those calls succeeded and their effects are live."
+        )
+        answer = f"{assessment.answer}\n\n{notice}" if assessment.answer else notice
+        return replace(assessment, answer=answer)
 
     def _dependency_summary(self, step: PlanStep) -> dict[str, Any]:
         return {dep: self.step_results.get(dep) for dep in step.dependencies}

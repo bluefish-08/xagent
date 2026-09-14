@@ -5716,3 +5716,202 @@ async def test_language_nudge_keeps_the_validated_plan_on_invalid_retry_plan() -
     assert llm.calls == 2
     assert [step.id for step in plan.steps] == ["rewrite"]
     assert plan.steps[0].task.startswith("重写")
+
+
+def test_dag_records_only_outward_mcp_calls() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_get_profile"}})
+    # A built-in write: the mcp_ prefix, not the verb, is what keeps it out.
+    pattern.record_external_action({"name": "write_file"})
+
+    assert pattern._executed_external_writes() == ["mcp_LinkedIn_create_post"]
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "mcp_Drive_list_shared_files",
+        "mcp_Maps_geocode_address",
+        "mcp_Jira_get_issue_updates",
+        "mcp_Slack_list_posts",
+    ],
+)
+def test_dag_reads_are_not_taken_for_writes(tool_name: str) -> None:
+    # Each of these contains a write verb as a substring; only whole "_"
+    # segments count, so none of them may drag a notice onto the answer.
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    pattern.record_external_action({"function": {"name": tool_name}})
+
+    assert pattern._executed_external_writes() == []
+
+
+def test_dag_over_reports_a_read_whose_segment_is_a_write_verb() -> None:
+    # The accepted ceiling, pinned so it stays a known cost and not a surprise:
+    # a noun segment that is also a verb over-reports. Erring the other way
+    # would put an executed write back into silence, which is the incident.
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    pattern.record_external_action(
+        {"function": {"name": "mcp_LinkedIn_verify_post_asset"}}
+    )
+
+    assert pattern._executed_external_writes() == ["mcp_LinkedIn_verify_post_asset"]
+
+
+def test_dag_multi_segment_server_names_still_classify() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    pattern.record_external_action(
+        {"function": {"name": "mcp_Google_Drive_create_file"}}
+    )
+
+    assert pattern._executed_external_writes() == ["mcp_Google_Drive_create_file"]
+
+
+def test_dag_repeated_calls_are_recorded_once() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    for _ in range(3):
+        pattern.record_external_action(
+            {"function": {"name": "mcp_LinkedIn_create_post"}}
+        )
+
+    assert pattern.executed_external_actions == [
+        {"tool": "mcp_LinkedIn_create_post", "changes_outside_state": True}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dag_step_runtime_records_the_step_s_external_calls() -> None:
+    class RecordingRuntime(PatternRuntime):
+        async def on_tool_end(self, *, tool_call: dict[str, Any], result: Any) -> None:
+            return None
+
+    pattern = DAGPattern(lambda **_: build_plan())
+    runtime = _DAGStepRuntime(
+        parent=RecordingRuntime(),
+        dag_pattern=pattern,
+        root_context=ExecutionContext(execution_id="dag-root"),
+        step_id="publish",
+    )
+
+    await runtime.on_tool_end(
+        tool_call={"function": {"name": "mcp_LinkedIn_create_post"}},
+        result={"success": True},
+    )
+
+    assert pattern._executed_external_writes() == ["mcp_LinkedIn_create_post"]
+
+
+def test_dag_completion_answer_cannot_deny_an_executed_publish() -> None:
+    # The reported incident: the user picked Cancel, the publish step ran
+    # anyway, and the assessment dismissed the step's own URN as unreliable
+    # and told the user nothing had gone live.
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+
+    enforced = pattern._append_executed_writes(
+        dag_module.DAGCompletionAssessment(
+            complete=True,
+            answer="Understood - I've cancelled the publish. Nothing has gone live.",
+        )
+    )
+
+    assert "Nothing has gone live." in enforced.answer
+    assert "mcp_LinkedIn_create_post" in enforced.answer
+    assert "effects are live" in enforced.answer
+
+
+def test_dag_completion_states_the_write_even_when_the_answer_already_did() -> None:
+    # The notice does not depend on what the answer says: an assessment that
+    # reports the publish honestly still gets it, because the check that would
+    # tell the two apart is the model's own word.
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+
+    enforced = pattern._append_executed_writes(
+        dag_module.DAGCompletionAssessment(
+            complete=True, answer="Your post is live on LinkedIn."
+        )
+    )
+
+    assert enforced.answer.startswith("Your post is live on LinkedIn.")
+    assert "mcp_LinkedIn_create_post" in enforced.answer
+
+
+def test_dag_completion_answer_untouched_without_an_outside_write() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_get_profile"}})
+
+    enforced = pattern._append_executed_writes(
+        dag_module.DAGCompletionAssessment(complete=True, answer="Here is the profile.")
+    )
+
+    assert enforced.answer == "Here is the profile."
+
+
+def test_dag_completion_payload_carries_executed_actions() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+    context = ExecutionContext(system_prompt="You are helpful.")
+    context.add_user_message("Publish it")
+
+    messages = pattern._completion_assessment_messages(context)
+
+    assert json.loads(messages[1]["content"])["executed_external_actions"] == [
+        {"tool": "mcp_LinkedIn_create_post", "changes_outside_state": True}
+    ]
+    assert "must never say such a" in messages[0]["content"]
+
+
+def test_dag_executed_actions_survive_a_state_round_trip() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+
+    restored = DAGPattern(lambda **_: build_plan())
+    restored.load_state(pattern.get_state())
+
+    assert restored._executed_external_writes() == ["mcp_LinkedIn_create_post"]
+
+
+def test_dag_get_state_does_not_alias_recorded_actions() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+
+    pattern.get_state()["executed_external_actions"][0]["tool"] = "mutated"
+
+    assert pattern._executed_external_writes() == ["mcp_LinkedIn_create_post"]
+
+
+@pytest.mark.asyncio
+async def test_dag_assessment_appends_an_executed_write_the_answer_denied() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+    context = ExecutionContext(system_prompt="You are helpful.")
+    context.add_user_message("Cancel")
+
+    assessment = await pattern._assess_completion(
+        context=context,
+        llm=SequenceLLM(
+            [completion_assessment_response(answer="Nothing has gone live.")]
+        ),
+        runtime=PatternRuntime(),
+    )
+
+    assert "mcp_LinkedIn_create_post" in assessment.answer
+
+
+def test_dag_incomplete_assessment_is_left_alone() -> None:
+    # An incomplete assessment carries no user-facing answer - it replans, and
+    # the replan's own assessment is where the notice belongs.
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.record_external_action({"function": {"name": "mcp_LinkedIn_create_post"}})
+
+    enforced = pattern._append_executed_writes(
+        dag_module.DAGCompletionAssessment(complete=False, missing_work="publish")
+    )
+
+    assert enforced.answer == ""
