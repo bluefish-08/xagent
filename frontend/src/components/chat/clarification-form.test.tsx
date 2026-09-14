@@ -932,7 +932,7 @@ describe("ClarificationForm answer framing", () => {
   // the framing, so both are pinned: an untested one can silently regress.
   it.each([
     ["en", 'Answer to "How should I publish this LinkedIn post?": Cancel'],
-    ["zh", "\u5bf9\u300cHow should I publish this LinkedIn post?\u300d\u7684\u56de\u7b54\uff1aCancel"],
+    ["zh", "对「How should I publish this LinkedIn post?」的回答：Cancel"],
   ] as const)("submits a picked option as an answer in %s", async (locale, expected) => {
     i18nMock.translate = (key, vars) =>
       resolveTranslation(locale, key as Parameters<typeof resolveTranslation>[1], vars)
