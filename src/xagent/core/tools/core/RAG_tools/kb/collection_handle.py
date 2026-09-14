@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, cast
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, cast
 
 if TYPE_CHECKING:
     from .models import KBVectorStorageCleanupResult
@@ -149,15 +149,28 @@ def _table_column_names(table: Any) -> set[str] | None:
         return None
 
 
-def _projected_columns(table: Any, names: Iterable[str]) -> list[str]:
-    """De-duplicated column list, narrowed to what the table actually carries."""
-    wanted = list(dict.fromkeys(names))
+def _projected_columns(
+    table: Any, base: Sequence[str], filtered: Iterable[str]
+) -> list[str]:
+    """Base columns plus the filtered ones the table actually carries.
+
+    A filtered column the table lacks is dropped here and reported by the mask,
+    which names it. Projecting a base column the table lacks instead fails
+    inside a swallowing except and returns an empty page, so that is reported
+    here rather than left to look like a result.
+    """
     available = _table_column_names(table)
-    # An empty name set is not a credible schema; narrowing on it would ask for
-    # no columns at all and quietly scan nothing.
-    if not available:
-        return wanted
-    return [name for name in wanted if name in available]
+    extra = list(dict.fromkeys(name for name in filtered if name not in base))
+    # An empty name set is not a credible schema, so it narrows nothing.
+    if available:
+        missing_base = [name for name in base if name not in available]
+        if missing_base:
+            raise ScanFilterError(
+                "Scan fallback cannot read this table: it is missing "
+                f"{', '.join(sorted(missing_base))}"
+            )
+        extra = [name for name in extra if name in available]
+    return [*base, *extra]
 
 
 def _condition_fields(conditions: Sequence[FilterExpression]) -> list[str]:
@@ -171,6 +184,31 @@ class ScanFilterError(ValueError):
     Distinct from the store errors the fallbacks swallow, so that an
     inapplicable filter reaches the caller instead of becoming an empty result.
     """
+
+
+def _build_search_filter(
+    collection: str | None, filters: FilterExpression | dict[str, Any] | None
+) -> FilterExpression | None:
+    """Combine the collection scope and the caller's filters into one AND group.
+
+    Every search engine assembled this identically; keeping one copy is what
+    stops the engines drifting apart again (#671).
+    """
+    conditions: list[FilterExpression] = []
+    if collection:
+        conditions.append(
+            FilterCondition(
+                field="collection", operator=FilterOperator.EQ, value=collection
+            )
+        )
+    conditions.extend(normalize_filter_conditions(filters))
+    if not conditions:
+        return None
+    expression: FilterExpression = (
+        conditions[0] if len(conditions) == 1 else tuple(conditions)
+    )
+    validate_filter_depth(expression)
+    return expression
 
 
 def _require_flat_condition(condition: FilterExpression) -> FilterCondition:
@@ -2112,24 +2150,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             index_result_obj = vector_store.create_index(model_tag, readonly)
             index_status = index_result_obj.status
             index_advice = index_result_obj.advice
-            filter_expr: FilterExpression | None = None
-            if collection or filters:
-                conditions: list[FilterExpression] = []
-                if collection:
-                    conditions.append(
-                        FilterCondition(
-                            field="collection",
-                            operator=FilterOperator.EQ,
-                            value=collection,
-                        )
-                    )
-                conditions.extend(normalize_filter_conditions(filters))
-                if len(conditions) == 1:
-                    filter_expr = conditions[0]
-                elif len(conditions) > 1:
-                    filter_expr = tuple(conditions)
-            if filter_expr is not None:
-                validate_filter_depth(filter_expr)
+            filter_expr = _build_search_filter(collection, filters)
             raw_results = vector_store.search_vectors_by_model(
                 model_tag=model_tag,
                 query_vector=query_vector,
@@ -2181,24 +2202,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             index_result_obj = vector_store.create_index(model_tag, readonly)
             index_status = index_result_obj.status
             index_advice = index_result_obj.advice
-            filter_expr: FilterExpression | None = None
-            if collection or filters:
-                conditions: list[FilterExpression] = []
-                if collection:
-                    conditions.append(
-                        FilterCondition(
-                            field="collection",
-                            operator=FilterOperator.EQ,
-                            value=collection,
-                        )
-                    )
-                conditions.extend(normalize_filter_conditions(filters))
-                if len(conditions) == 1:
-                    filter_expr = conditions[0]
-                elif len(conditions) > 1:
-                    filter_expr = tuple(conditions)
-            if filter_expr is not None:
-                validate_filter_depth(filter_expr)
+            filter_expr = _build_search_filter(collection, filters)
             raw_results = await vector_store.search_vectors_by_model_async(
                 model_tag=model_tag,
                 query_vector=query_vector,
@@ -2419,7 +2423,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
     ) -> List[SearchResult]:
         """Perform a memory-friendly substring scan across the table when FTS misses."""
 
-        desired_columns: Set[str] = {
+        base_columns = (
             "collection",
             "doc_id",
             "chunk_id",
@@ -2427,13 +2431,14 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             "parse_hash",
             "created_at",
             "metadata",
-        }
+        )
         scan_conditions = normalize_filter_conditions(filters)
-        # Ask only for columns the schema carries: projecting a missing one
-        # raises inside the swallowing except below and returns empty, where the
-        # mask instead reports which column it could not filter on.
-        desired_columns.update(_condition_fields(scan_conditions))
-        projected = _projected_columns(table, sorted(desired_columns))
+        # Ask only for filtered columns the schema carries: projecting a missing
+        # one raises inside the swallowing except below and returns empty, where
+        # the mask instead reports which column it could not filter on.
+        projected = _projected_columns(
+            table, base_columns, _condition_fields(scan_conditions)
+        )
 
         results: List[SearchResult] = []
 
@@ -2559,15 +2564,15 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                     # every mask built from it.
                     columns=_projected_columns(
                         _table,
-                        [
+                        (
                             "doc_id",
                             "chunk_id",
                             "text",
                             "parse_hash",
                             "created_at",
                             "metadata",
-                            *_condition_fields(scan_conditions),
-                        ],
+                        ),
+                        _condition_fields(scan_conditions),
                     ),
                     batch_size=batch_size,
                     filters=query_filters,
@@ -2694,34 +2699,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
 
             search_query = table.search(query_text, query_type="fts").limit(top_k)
 
-            # Convert legacy dict format to FilterExpression if needed
-            filter_expr: Optional[FilterExpression] = None
-            if collection or filters:
-                # Build filter conditions
-                conditions: List[FilterExpression] = []
-
-                # Add collection filter
-                if collection:
-                    conditions.append(
-                        FilterCondition(
-                            field="collection",
-                            operator=FilterOperator.EQ,
-                            value=collection,
-                        )
-                    )
-
-                # Add custom filters
-                conditions.extend(normalize_filter_conditions(filters))
-
-                # Combine conditions with AND
-                if len(conditions) == 1:
-                    filter_expr = conditions[0]
-                elif len(conditions) > 1:
-                    filter_expr = tuple(conditions)
-
-            # Validate filter expression depth to prevent DoS
-            if filter_expr is not None:
-                validate_filter_depth(filter_expr)
+            filter_expr = _build_search_filter(collection, filters)
 
             # Use abstract filter builder to get backend-specific syntax
             if filter_expr:
@@ -2866,29 +2844,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                 )
 
             # Convert API-facing dict filters into abstract FilterExpression
-            filter_expr: Optional[FilterExpression] = None
-            if collection or filters:
-                conditions: List[FilterExpression] = []
-
-                if collection:
-                    conditions.append(
-                        FilterCondition(
-                            field="collection",
-                            operator=FilterOperator.EQ,
-                            value=collection,
-                        )
-                    )
-
-                conditions.extend(normalize_filter_conditions(filters))
-
-                if len(conditions) == 1:
-                    filter_expr = conditions[0]
-                elif len(conditions) > 1:
-                    filter_expr = tuple(conditions)
-
-            # Validate filter expression depth to prevent DoS
-            if filter_expr is not None:
-                validate_filter_depth(filter_expr)
+            filter_expr = _build_search_filter(collection, filters)
 
             # Execute async FTS search using abstraction layer (by model_tag)
             raw_results = await vector_store.search_fts_by_model_async(

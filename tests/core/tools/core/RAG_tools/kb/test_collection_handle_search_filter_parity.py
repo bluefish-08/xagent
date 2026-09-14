@@ -16,6 +16,7 @@ import pytest
 
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     LanceDBCollectionHandle,
+    ScanFilterError,
 )
 from xagent.core.tools.core.RAG_tools.storage.contracts import (
     FilterCondition,
@@ -418,7 +419,7 @@ def test_scan_refuses_a_filter_on_a_column_the_table_lacks() -> None:
     handle, _ctx, _store = _make_handle()
     table = _projecting_table(_operator_frame())
 
-    with pytest.raises(ValueError, match="page_number"):
+    with pytest.raises(ScanFilterError, match="page_number"):
         handle._substring_fallback(
             table=table,
             collection="docs",
@@ -513,7 +514,7 @@ def test_scan_names_the_column_when_a_comparison_cannot_be_made() -> None:
     )
     table = _projecting_table(frame)
 
-    with pytest.raises(ValueError, match="created_at"):
+    with pytest.raises(ScanFilterError, match="created_at"):
         handle._substring_fallback(
             table=table,
             collection="docs",
@@ -545,7 +546,7 @@ async def test_both_scans_refuse_the_same_inapplicable_filter() -> None:
     store.iter_batches_async = _iter_batches_async
     bad_filter = {"page_number": {"operator": "gte", "value": 2}}
 
-    with pytest.raises(ValueError, match="page_number"):
+    with pytest.raises(ScanFilterError, match="page_number"):
         await handle._substring_fallback_async(
             model_tag="model-a",
             collection="docs",
@@ -555,7 +556,7 @@ async def test_both_scans_refuse_the_same_inapplicable_filter() -> None:
             current_warnings=[],
         )
 
-    with pytest.raises(ValueError, match="page_number"):
+    with pytest.raises(ScanFilterError, match="page_number"):
         handle._substring_fallback(
             table=_projecting_table(frame),
             collection="docs",
@@ -563,5 +564,47 @@ async def test_both_scans_refuse_the_same_inapplicable_filter() -> None:
             model_tag="model-a",
             top_k=10,
             filters=bad_filter,
+            current_warnings=[],
+        )
+
+
+def test_a_deeply_nested_filter_is_refused_before_it_reaches_the_backend() -> None:
+    """The depth guard rides along with the shared filter assembly."""
+    handle, _ctx, store = _make_handle()
+    store.create_index.return_value = _index_result()
+    store.search_vectors_by_model.return_value = []
+
+    nested: Any = FilterCondition(
+        field="doc_id", operator=FilterOperator.EQ, value="d1"
+    )
+    for _ in range(12):
+        nested = (nested,)
+
+    response = handle.search_dense("model-a", [0.5], top_k=5, filters=nested)
+
+    assert response.status == "failed"
+    assert any("depth" in warning.message for warning in response.warnings)
+    # The guard has to stop it before the backend sees the expression.
+    store.search_vectors_by_model.assert_not_called()
+
+
+def test_scan_reports_a_table_missing_a_column_it_always_needs() -> None:
+    """Projecting a missing base column fails inside the swallowing except.
+
+    That path returns an empty page with no warning, so the missing column is
+    reported before the projection is attempted.
+    """
+    handle, _ctx, _store = _make_handle()
+    frame = _operator_frame().drop(columns=["parse_hash"])
+    table = _projecting_table(frame)
+
+    with pytest.raises(ScanFilterError, match="parse_hash"):
+        handle._substring_fallback(
+            table=table,
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters=None,
             current_warnings=[],
         )

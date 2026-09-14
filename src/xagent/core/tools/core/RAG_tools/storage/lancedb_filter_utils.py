@@ -41,7 +41,10 @@ def translate_condition(condition: FilterCondition) -> str:
         values = ", ".join(format_value(v) for v in value)
         return f"{field} IN ({values})"
     elif op == FilterOperator.CONTAINS:
-        return f"{field} LIKE '%{escape_lancedb_string(value)}%'"
+        # CONTAINS is a literal substring, so the needle's own % and _ must not
+        # act as LIKE wildcards; a scan reads them literally either way.
+        needle = escape_lancedb_string(value).replace("%", r"\%").replace("_", r"\_")
+        return f"{field} LIKE '%{needle}%' ESCAPE '\\'"
     elif op == FilterOperator.IS_NULL:
         return f"{field} IS NULL"
     elif op == FilterOperator.IS_NOT_NULL:

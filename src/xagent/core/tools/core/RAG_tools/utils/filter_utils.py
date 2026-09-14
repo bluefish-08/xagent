@@ -50,7 +50,6 @@ def validate_filter_depth(
 
 def parse_legacy_filters(
     filters: Optional[Dict[str, Any]],
-    max_depth: int = 10,
 ) -> Optional[FilterExpression]:
     """Convert Dict-based filters to an abstract FilterExpression.
 
@@ -64,13 +63,12 @@ def parse_legacy_filters(
 
     Args:
         filters: Filter dictionary from API layer.
-        max_depth: Maximum allowed nesting depth (default: 10).
 
     Returns:
         Parsed FilterExpression, or None if filters is None/empty.
 
     Raises:
-        ValueError: If an unsupported operator is provided or depth exceeds max_depth.
+        ValueError: If an unsupported operator or value shape is provided.
     """
     if not filters:
         return None
@@ -94,10 +92,22 @@ def parse_legacy_filters(
                 raise ValueError(
                     f"Unknown filter operator: {op_str}. Supported operators: {sorted(op_map.keys())}"
                 )
+            operator = op_map[op_str]
+            value = spec["value"]
+            if isinstance(value, (list, tuple, set)):
+                # Only membership can carry a collection. Equality against one
+                # renders as `field == '[...]'`, which matches nothing, while a
+                # scan reads it as membership -- the two paths would disagree.
+                if operator is FilterOperator.EQ:
+                    operator = FilterOperator.IN
+                elif operator is not FilterOperator.IN:
+                    raise ValueError(
+                        f"Filter operator {op_str!r} does not accept a "
+                        f"collection value for field {field!r}; use 'in'"
+                    )
+                value = list(value)
             conditions.append(
-                FilterCondition(
-                    field=field, operator=op_map[op_str], value=spec["value"]
-                )
+                FilterCondition(field=field, operator=operator, value=value)
             )
         elif isinstance(spec, (list, tuple, set)):
             # Membership, not equality: EQ would translate to `field == '[...]'`.
@@ -117,8 +127,7 @@ def parse_legacy_filters(
 
 
 def normalize_filter_conditions(
-    filters: Any,
-    max_depth: int = 10,
+    filters: FilterExpression | dict[str, Any] | None,
 ) -> list[FilterExpression]:
     """Return the conditions to AND together for any accepted filter shape.
 
@@ -134,7 +143,7 @@ def normalize_filter_conditions(
         return []
 
     if isinstance(filters, dict):
-        parsed = parse_legacy_filters(filters, max_depth=max_depth)
+        parsed = parse_legacy_filters(filters)
         if parsed is None:
             return []
         return list(parsed) if isinstance(parsed, tuple) else [parsed]
