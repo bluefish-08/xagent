@@ -195,7 +195,7 @@ class TestContentCleaner:
         html = """
         <html>
             <body>
-                <a href="https://example.com">Example Link</a>
+                <a href="https://linked-site.test/page?q=1">Example Link</a>
             </body>
         </html>
         """
@@ -204,7 +204,7 @@ class TestContentCleaner:
         markdown = result["content_markdown"]
 
         assert "Example Link" in markdown
-        assert "https://example.com" not in markdown
+        assert "linked-site.test" not in markdown
 
     def test_images_in_markdown(self):
         """Image alt text is preserved; the src URL is not."""
@@ -293,3 +293,112 @@ class TestContentCleaner:
         assert "help.example.com" not in content
         assert "tickets are organised into folders by month" in content
         assert "this guide" in content
+
+    def test_url_shaped_alt_text_is_stripped(self):
+        """images_to_alt keeps alt text -- but not when the alt is itself a URL."""
+        cleaner = ContentCleaner()
+
+        html = """
+        <html>
+            <body>
+                <p>Before.</p>
+                <img src="https://cdn.example.test/x.png?sig=abc"
+                     alt="https://tracking.example.test/pixel?id=123">
+                <p>After.</p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "tracking.example.test" not in content
+        assert "Before." in content and "After." in content
+
+    def test_autolink_text_is_stripped(self):
+        """ignore_links drops the href, so a URL used as its own anchor text needs stripping."""
+        cleaner = ContentCleaner()
+
+        html = """
+        <html>
+            <body>
+                <p>See <a href="https://x.example.test/a?b=1">https://x.example.test/a?b=1</a>
+                   and <a href="/rel">www.example.test/path</a> for details.</p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "x.example.test" not in content
+        assert "www.example.test" not in content
+        assert "See and for details." in content
+
+    def test_adjacent_inline_elements_do_not_fuse(self):
+        """Removing link punctuation must not glue neighbouring anchors into one token."""
+        cleaner = ContentCleaner()
+
+        html = """
+        <html>
+            <body>
+                <nav><a href="/a">One</a><a href="/b">Two</a><a href="/c">Three</a></nav>
+                <p><img src="/a.png" alt="First"><img src="/b.png" alt="Second"></p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "OneTwo" not in content
+        assert "FirstSecond" not in content
+        assert "One Two Three" in content
+        assert "First Second" in content
+
+    def test_prose_spacing_and_punctuation_are_preserved(self):
+        """URL stripping must not leave gaps or orphan punctuation in the prose."""
+        cleaner = ContentCleaner()
+
+        html = """
+        <html>
+            <body>
+                <p>Read <a href="/g">the guide</a>, then <a href="/h">the FAQ</a>.</p>
+                <p>The export is a <b>ZIP file</b>. Inside, tickets sit in <i>folders</i> by month.</p>
+                <p>Visit <a href="/x">https://x.example.test/a</a>, then stop.</p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "Read the guide, then the FAQ." in content
+        assert "Inside, tickets sit in _folders_ by month." in content
+        assert "Visit, then stop." in content
+
+    def test_image_without_alt_yields_nothing(self):
+        """A bare image contributes no text and must not leak its src."""
+        cleaner = ContentCleaner()
+
+        html = """
+        <html>
+            <body>
+                <p>Before.</p>
+                <img src="https://cdn.example.test/x.png?sig=abc">
+                <img src="https://cdn.example.test/y.png?sig=def" alt="">
+                <p>After.</p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "cdn.example.test" not in content
+        assert "Before." in content and "After." in content
