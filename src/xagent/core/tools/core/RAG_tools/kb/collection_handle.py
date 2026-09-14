@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .models import KBVectorStorageCleanupResult
 
 import pandas as pd
+from pandas.api.types import is_string_dtype
 
 try:
     import pyarrow as pa  # type: ignore
@@ -258,6 +259,13 @@ def _single_condition_mask(batch_df: Any, condition: FilterCondition) -> Any:
         if operator is FilterOperator.IS_NOT_NULL:
             return column.notna()
         if operator is FilterOperator.CONTAINS:
+            if column.dtype != object and not is_string_dtype(column):
+                # The backend cannot LIKE a non-string column, so coercing one
+                # here would answer where the indexed path errors.
+                raise ScanFilterError(
+                    f"Scan fallback cannot match {field!r} ({column.dtype}) "
+                    "against a substring"
+                )
             # astype(str) renders NULL as "None"/"nan", which a short needle
             # would then match; drop those rows before comparing.
             return column.notna() & column.astype(str).str.contains(

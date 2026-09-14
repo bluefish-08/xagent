@@ -608,3 +608,45 @@ def test_scan_reports_a_table_missing_a_column_it_always_needs() -> None:
             filters=None,
             current_warnings=[],
         )
+
+
+def test_contains_refuses_a_column_the_backend_cannot_like() -> None:
+    """LIKE needs a string column; coercing one here would answer where the
+    indexed path errors."""
+    handle, _ctx, _store = _make_handle()
+    table = _projecting_table(_operator_frame())
+
+    with pytest.raises(ScanFilterError, match="created_at"):
+        handle._substring_fallback(
+            table=table,
+            collection="docs",
+            query_text="alpha",
+            model_tag="model-a",
+            top_k=10,
+            filters={"created_at": {"operator": "contains", "value": "2"}},
+            current_warnings=[],
+        )
+
+
+NEAR_MISS_OPERATOR_FORMS = [
+    ("typo_value_key", {"operator": "gte", "val": 2}),
+    ("typo_operator_key", {"op": "gte", "value": 2}),
+    ("missing_value", {"operator": "gte"}),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "spec"),
+    NEAR_MISS_OPERATOR_FORMS,
+    ids=[row[0] for row in NEAR_MISS_OPERATOR_FORMS],
+)
+def test_a_near_miss_of_the_operator_form_is_refused(
+    case: str, spec: dict[str, Any]
+) -> None:
+    """Equality against a dict matches nothing on either path, silently."""
+    from xagent.core.tools.core.RAG_tools.utils.filter_utils import (
+        normalize_filter_conditions,
+    )
+
+    with pytest.raises(ValueError, match="operator form"):
+        normalize_filter_conditions({"page_number": spec})

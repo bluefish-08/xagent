@@ -86,7 +86,15 @@ def parse_legacy_filters(
 
     conditions: list[FilterCondition] = []
     for field, spec in filters.items():
-        if isinstance(spec, dict) and "operator" in spec and "value" in spec:
+        if isinstance(spec, dict) and not ("operator" in spec and "value" in spec):
+            # Equality against a dict matches nothing on either path, so a
+            # near-miss of the operator form would fail silently.
+            raise ValueError(
+                f"Filter for field {field!r} looks like the operator form but "
+                f"is missing {'value' if 'operator' in spec else 'operator'}; "
+                'expected {"operator": ..., "value": ...}'
+            )
+        if isinstance(spec, dict):
             op_str = str(spec["operator"]).lower()
             if op_str not in op_map:
                 raise ValueError(
