@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from xagent.core.tools.core.RAG_tools.core.config import DEFAULT_INDEX_POLICY
+from xagent.core.tools.core.RAG_tools.core.config import (
+    DEFAULT_FTS_PARAMS,
+    DEFAULT_INDEX_POLICY,
+    IndexPolicy,
+)
 from xagent.core.tools.core.RAG_tools.core.exceptions import DatabaseOperationError
 from xagent.core.tools.core.RAG_tools.storage.factory import StorageFactory
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
@@ -1035,6 +1039,37 @@ def test_trigger_reindex_failure(mock_get_connection: Mock) -> None:
     assert result is False
 
 
+def test_default_fts_params_use_jieba() -> None:
+    """The FTS tokenizer must segment words; ngram prefix_only matched nothing."""
+    assert DEFAULT_FTS_PARAMS["base_tokenizer"] == "jieba/default"
+    assert "prefix_only" not in DEFAULT_FTS_PARAMS
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_trigger_reindex_rebuilds_fts_with_given_policy(
+    mock_get_connection: Mock,
+) -> None:
+    """Test trigger_reindex rebuilds the FTS index from the policy it is given."""
+    mock_conn = Mock()
+    mock_get_connection.return_value = mock_conn
+    mock_table = Mock()
+    mock_index = Mock()
+    mock_index.index_type = "FTS"
+    mock_index.columns = ["text"]
+    mock_table.list_indices.return_value = [mock_index]
+    mock_conn.open_table.return_value = mock_table
+    policy = IndexPolicy(fts_params={"base_tokenizer": "raw"})
+
+    store = LanceDBVectorIndexStore()
+
+    assert store.trigger_reindex("embeddings_test", policy=policy) is True
+    mock_table.create_fts_index.assert_called_once_with(
+        "text", replace=True, with_position=True, base_tokenizer="raw"
+    )
+
+
 @pytest.mark.asyncio
 @patch(
     "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
@@ -1505,7 +1540,7 @@ async def test_search_fts_async_basic(
 
     mock_search.to_arrow = mock_to_arrow
 
-    mock_table.search = Mock(return_value=mock_search)
+    mock_table.search = AsyncMock(return_value=mock_search)
 
     store = LanceDBVectorIndexStore()
 
@@ -1517,6 +1552,37 @@ async def test_search_fts_async_basic(
 
     assert len(results) == 2
     assert results[0]["doc_id"] == "doc1"
+    built = mock_table.search.call_args.args[0]
+    assert [match.query for _, match in built.queries] == ["hello"]
+
+
+@pytest.mark.asyncio
+@patch("lancedb.connect_async", new_callable=AsyncMock)
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+async def test_search_fts_async_skips_query_without_terms(
+    mock_get_connection: Mock, mock_connect_async: AsyncMock
+) -> None:
+    """A whitespace-only query would match every chunk that contains whitespace."""
+    mock_conn = Mock()
+    mock_conn.uri = "test_uri"
+    mock_get_connection.return_value = mock_conn
+
+    mock_async_conn = Mock()
+    mock_connect_async.return_value = mock_async_conn
+    mock_table = Mock()
+    mock_table.search = AsyncMock()
+    mock_async_conn.open_table = AsyncMock(return_value=mock_table)
+
+    results = await LanceDBVectorIndexStore().search_fts_async(
+        table_name="chunks",
+        query_text="  ,. ",
+        top_k=5,
+    )
+
+    assert results == []
+    mock_table.search.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3229,6 +3295,29 @@ def test_compact_tables_never_opens_unrelated_tables(
         "documents",
         "documents",
     ]
+
+
+@patch(
+    "xagent.core.tools.core.RAG_tools.storage.lancedb_stores.get_connection_from_env"
+)
+def test_compact_tables_rebuilds_fts_with_the_caller_policy(
+    mock_get_connection: Mock,
+) -> None:
+    """The policy reaches the FTS rebuild, instead of the module default."""
+    index = Mock()
+    index.index_type = "FTS"
+    index.columns = ["text"]
+    table = _mock_table_with_fragments(500)
+    table.list_indices.return_value = [index]
+    mock_get_connection.return_value = _mock_conn_with_tables(documents=table)
+
+    policy = IndexPolicy(fts_params={"base_tokenizer": "raw"})
+    store = LanceDBVectorIndexStore()
+
+    assert store.compact_tables(["documents"], policy) == ["documents"]
+    table.create_fts_index.assert_called_once_with(
+        "text", replace=True, with_position=True, base_tokenizer="raw"
+    )
 
 
 @patch(

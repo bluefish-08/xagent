@@ -5,11 +5,13 @@ implementing a three-tier fallback pattern for maximum compatibility.
 """
 
 import logging
+import re
 from collections.abc import Callable, Iterable
 from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 import pyarrow as pa  # type: ignore
+from lancedb.query import BooleanQuery, MatchQuery, Occur
 
 logger = logging.getLogger(__name__)
 
@@ -144,3 +146,28 @@ def list_table_names(conn: Any) -> list[str]:
 def list_embeddings_table_names(conn: Any, prefix: str = "embeddings_") -> list[str]:
     """List embeddings table names (default prefix: `embeddings_`)."""
     return [name for name in list_table_names(conn) if str(name).startswith(prefix)]
+
+
+_FTS_TERM_SEPARATORS = re.compile(r"[\s，。！？；：、]+")
+
+
+def build_fts_query(
+    query_text: str, text_column: str = "text"
+) -> Optional[BooleanQuery]:
+    """Build an OR-of-terms FTS query, or ``None`` when the text has no terms.
+
+    Whitespace and CJK punctuation are themselves indexed tokens (lance folds
+    ``，`` onto ASCII ``,``), so leaving them in a term matches every chunk that
+    contains one. ASCII punctuation stays: ``COVID-19`` and ``C++`` are single
+    tokens in the index and splitting them makes the query miss entirely.
+    """
+    terms = [
+        term
+        for term in _FTS_TERM_SEPARATORS.split(query_text)
+        if re.search(r"\w", term)
+    ]
+    if not terms:
+        return None
+    return BooleanQuery(
+        [(Occur.SHOULD, MatchQuery(term, text_column)) for term in terms]
+    )

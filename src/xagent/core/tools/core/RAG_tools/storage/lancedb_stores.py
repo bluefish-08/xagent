@@ -28,7 +28,11 @@ from ..core.config import (
 )
 from ..core.schemas import CollectionInfo, IndexResult
 from ..LanceDB.schema_manager import ensure_documents_table
-from ..utils.lancedb_query_utils import list_table_names, query_to_list
+from ..utils.lancedb_query_utils import (
+    build_fts_query,
+    list_table_names,
+    query_to_list,
+)
 from ..utils.string_utils import (
     build_lancedb_filter_expression,
     build_user_id_filter_for_table,
@@ -1590,7 +1594,10 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             _safe_close_table(table)
 
     def trigger_reindex(
-        self, table_name: str, cleanup_older_than: Optional[timedelta] = None
+        self,
+        table_name: str,
+        cleanup_older_than: Optional[timedelta] = None,
+        policy: Optional[IndexPolicy] = None,
     ) -> bool:
         """Compact data files, prune versions older than the retention window."""
         from ..LanceDB.schema_manager import _safe_close_table
@@ -1609,7 +1616,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # Must precede optimize: its incremental FTS merge is reported to
             # panic on older-writer indices, taking the index step down (lance#8310).
             try:
-                self._rebuild_fts_index(table, table_name)
+                self._rebuild_fts_index(table, table_name, policy)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException as exc:  # noqa: BLE001
@@ -1628,7 +1635,9 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         finally:
             _safe_close_table(table)
 
-    def _rebuild_fts_index(self, table: Any, table_name: str) -> None:
+    def _rebuild_fts_index(
+        self, table: Any, table_name: str, policy: Optional[IndexPolicy] = None
+    ) -> None:
         """Rebuild the FTS index, if this table has one.
 
         Guarded because ``compact_tables`` routes documents, parses, chunks and
@@ -1641,7 +1650,8 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         if not has_fts:
             return
 
-        fts_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
+        policy = policy or DEFAULT_INDEX_POLICY
+        fts_params = {"with_position": True, **(policy.fts_params or {})}
         table.create_fts_index("text", replace=True, **fts_params)
         logger.info("Rebuilt FTS index for %s before optimize", table_name)
 
@@ -1741,7 +1751,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                     logger.debug("%s is being compacted elsewhere; skipping", name)
                     continue
                 if self.should_compact(name, policy) and self.trigger_reindex(
-                    name, cleanup_older_than=cleanup_older_than
+                    name, cleanup_older_than=cleanup_older_than, policy=policy
                 ):
                     compacted.append(name)
         return compacted
@@ -2342,12 +2352,12 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 filters, user_id=None, is_admin=False
             )
 
-            # Build FTS search query
-            # Note: LanceDB async API supports query_type="fts"
-            search_query = table.search(
-                query_text,
-                query_type="fts",
-            )
+            fts_query = build_fts_query(query_text, text_column_name)
+            if fts_query is None:
+                return []
+            # AsyncTable.search is a coroutine; the builder chain starts on its
+            # result, not on the call.
+            search_query = await table.search(fts_query, query_type="fts")
 
             if backend_filter:
                 search_query = search_query.where(backend_filter)
