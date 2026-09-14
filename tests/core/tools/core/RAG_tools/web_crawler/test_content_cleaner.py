@@ -189,7 +189,7 @@ class TestContentCleaner:
         assert cleaner.is_valid_content("a" * 50, min_length=100) is False
 
     def test_links_in_markdown(self):
-        """Test that links are preserved in Markdown."""
+        """Link text is preserved; the URL itself is not."""
         cleaner = ContentCleaner()
 
         html = """
@@ -204,10 +204,10 @@ class TestContentCleaner:
         markdown = result["content_markdown"]
 
         assert "Example Link" in markdown
-        assert "https://example.com" in markdown
+        assert "https://example.com" not in markdown
 
     def test_images_in_markdown(self):
-        """Test that images are preserved in Markdown."""
+        """Image alt text is preserved; the src URL is not."""
         cleaner = ContentCleaner()
 
         html = """
@@ -221,7 +221,7 @@ class TestContentCleaner:
         result = cleaner.clean_and_convert(html, "https://example.com")
         markdown = result["content_markdown"]
 
-        assert "image.jpg" in markdown
+        assert "image.jpg" not in markdown
         assert "Test Image" in markdown
 
     def test_code_blocks(self):
@@ -263,3 +263,33 @@ class TestContentCleaner:
 
         assert "Header 1" in markdown
         assert "Data 1" in markdown
+
+    def test_image_and_link_urls_are_dropped_but_text_survives(self):
+        """A signed CDN URL must not reach the chunk; its surrounding prose must."""
+        cleaner = ContentCleaner()
+
+        signed = (
+            "https://downloads.intercomcdn.com/i/o/i31ha1vw/1916506582/"
+            "15f517dbe751ff1f426f58f75e1d/Screenshot.png"
+            "?expires=1787108400&signature=f6ffdfa27f7a4a4463637a36d7f3dae1"
+        )
+        html = f"""
+        <html>
+            <body>
+                <p>The PDF export is downloaded as a ZIP file. Inside,
+                   tickets are organised into folders by month.</p>
+                <p><a href="{signed}"><img src="{signed}" alt="Print Settings"></a></p>
+                <p>See <a href="https://help.example.com/en/articles/123">this guide</a>.</p>
+            </body>
+        </html>
+        """
+
+        content = cleaner.clean_and_convert(html, "https://example.com")[
+            "content_markdown"
+        ]
+
+        assert "intercomcdn.com" not in content
+        assert "signature=" not in content
+        assert "help.example.com" not in content
+        assert "tickets are organised into folders by month" in content
+        assert "this guide" in content

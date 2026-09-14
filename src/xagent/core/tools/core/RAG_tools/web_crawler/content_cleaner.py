@@ -188,9 +188,12 @@ class ContentCleaner:
         """
         h2t = html2text.HTML2Text()
         h2t.body_width = 0  # No line wrapping
-        h2t.ignore_images = False
+        # Drop URLs, keep their text: a signed CDN link is hundreds of characters
+        # of noise that nobody searches for, and it crowds the prose out of a chunk.
+        # images_to_alt rather than ignore_images so alt text still reaches the index.
+        h2t.images_to_alt = True
         h2t.ignore_emphasis = False
-        h2t.ignore_links = False
+        h2t.ignore_links = True
         h2t.ignore_tables = False
 
         markdown = h2t.handle(str(soup))
