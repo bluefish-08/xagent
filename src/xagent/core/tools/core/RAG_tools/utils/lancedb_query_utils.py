@@ -148,7 +148,9 @@ def list_embeddings_table_names(conn: Any, prefix: str = "embeddings_") -> list[
     return [name for name in list_table_names(conn) if str(name).startswith(prefix)]
 
 
-_FTS_TERM_SEPARATORS = re.compile(r"[\s，。！？；：、]+")
+_FTS_TERM_SEPARATORS = re.compile(
+    r"[\s，。！？；：、（）【】「」『』《》〈〉“”‘’—…～]+"
+)
 
 
 def build_fts_query(

@@ -22,6 +22,20 @@ def test_build_fts_query_splits_on_whitespace_and_cjk_punctuation():
     ]
 
 
+def test_build_fts_query_splits_on_cjk_brackets_and_dashes():
+    """Brackets, quotes and dashes are indexed tokens too, full-width ones folded."""
+    assert _terms("点击「保存」按钮（右上角）即可。参见《手册》——权限……") == [
+        ("点击", "text"),
+        ("保存", "text"),
+        ("按钮", "text"),
+        ("右上角", "text"),
+        ("即可", "text"),
+        ("参见", "text"),
+        ("手册", "text"),
+        ("权限", "text"),
+    ]
+
+
 @pytest.mark.parametrize("query_text", ["COVID-19", "GPT-4o", "C++", "3.5", "it's"])
 def test_build_fts_query_keeps_ascii_punctuation_inside_a_term(query_text: str):
     """These are single tokens in the index; splitting them makes the query miss."""
