@@ -190,7 +190,9 @@ class ContentCleaner:
         h2t.body_width = 0  # No line wrapping
         # Drop URLs, keep their text: a signed CDN link is hundreds of characters
         # of noise that nobody searches for, and it crowds the prose out of a chunk.
-        # images_to_alt rather than ignore_images so alt text still reaches the index.
+        # images_to_alt rather than ignore_images so alt text still reaches the index;
+        # it is nested under `not ignore_images`, so that flag must stay False.
+        h2t.ignore_images = False
         h2t.images_to_alt = True
         h2t.ignore_emphasis = False
         h2t.ignore_links = True
