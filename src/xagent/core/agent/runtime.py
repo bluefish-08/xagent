@@ -304,6 +304,15 @@ class PatternRuntime:
         finally:
             self._active_llm_tasks.discard(task)
 
+    def plan_predates_latest_user_message(self) -> bool:
+        """Whether the plan that ordered this call is older than the last message.
+
+        Base runtimes plan nothing, so nothing they run is ever stale. The DAG
+        step adapter overrides this.
+        """
+
+        return False
+
     async def run_tool_call(self, invoke: Callable[[], Any]) -> Any:
         """Run a tool call as a cancellable subtask owned by this runtime."""
 

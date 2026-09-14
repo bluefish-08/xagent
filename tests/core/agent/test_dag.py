@@ -39,6 +39,7 @@ from xagent.core.agent.pattern.dag.plan_generator import (
     PLAN_GENERATION_REQUIRED_TOOL_MESSAGE,
     PlanLanguageMismatchError,
 )
+from xagent.core.agent.pattern.react import react as react_module
 from xagent.core.memory.core import MemoryNote as StoredMemoryNote
 from xagent.core.memory.core import MemoryResponse
 from xagent.core.model.chat.types import ChunkType, StreamChunk
@@ -5716,3 +5717,238 @@ async def test_language_nudge_keeps_the_validated_plan_on_invalid_retry_plan() -
     assert llm.calls == 2
     assert [step.id for step in plan.steps] == ["rewrite"]
     assert plan.steps[0].task.startswith("重写")
+
+
+def _context_with_user_messages(count: int) -> ExecutionContext:
+    context = ExecutionContext(execution_id="dag-stale")
+    for index in range(count):
+        context.add_user_message(f"message {index}")
+    return context
+
+
+def test_dag_reports_a_plan_the_user_has_spoken_past_as_stale() -> None:
+    # The incident: the plan carrying the publish step was generated under
+    # "go ahead post on this in my linkedin", and the Cancel that followed was
+    # forwarded into the waiting step instead of triggering a replan.
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.plan_generation_user_message_count = 2
+
+    assert pattern.plan_predates_latest_user_message(_context_with_user_messages(3))
+
+
+def test_dag_reports_a_plan_generated_under_the_latest_message_as_fresh() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.plan_generation_user_message_count = 3
+
+    assert not pattern.plan_predates_latest_user_message(_context_with_user_messages(3))
+
+
+def test_dag_step_runtime_reports_staleness_to_react() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.plan_generation_user_message_count = 2
+    runtime = _DAGStepRuntime(
+        parent=PatternRuntime(),
+        dag_pattern=pattern,
+        root_context=_context_with_user_messages(3),
+        step_id="publish",
+    )
+
+    assert runtime.plan_predates_latest_user_message()
+
+
+def test_pattern_runtime_is_never_stale_on_its_own() -> None:
+    assert PatternRuntime().plan_predates_latest_user_message() is False
+
+
+class FakeConnectorWriteTool:
+    """An MCP write tool shaped like the one the incident published through."""
+
+    def __init__(self, name: str = "mcp_Connector_create_post") -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.metadata = type(
+            "Metadata",
+            (),
+            {
+                "name": name,
+                "description": "Publish a post through the connector.",
+                # What most connectors actually ship: no annotations at all.
+                "mcp_write_hint": "undeclared",
+                "mcp_non_idempotent_write": None,
+            },
+        )()
+
+    def args_type(self) -> type:
+        class Args:
+            @staticmethod
+            def model_json_schema() -> dict[str, Any]:
+                return {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                }
+
+        return Args
+
+    async def run_json_async(self, args: dict[str, Any]) -> Any:
+        self.calls.append(args)
+        return {"success": True, "urn": "urn:example:share:1"}
+
+
+async def _run_cancelled_publish_turn(
+    publish_tool: "FakeConnectorWriteTool",
+) -> None:
+    """Drive the incident: plan under one message, Cancel arrives after it.
+
+    The turn-2 LLM script forces the publish step to call the connector, so the
+    assertion is about the guard, never about whether a model felt like
+    publishing on a given run.
+    """
+    plan = build_plan(
+        PlanStep(id="confirm", task="Confirm before publishing"),
+        PlanStep(id="publish", task="Publish the post", dependencies=["confirm"]),
+    )
+    context = ExecutionContext(execution_id="dag-cancelled-publish")
+    context.add_user_message("go ahead and post this")
+
+    pattern = DAGPattern(lambda **_: plan)
+    first = await pattern.run(
+        context=context,
+        tools=[publish_tool],
+        llm=SequenceLLM(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "ask-publish",
+                            "function": {
+                                "name": "send_message",
+                                "arguments": json.dumps(
+                                    {
+                                        "message": "Publish it now?",
+                                        "message_type": "question",
+                                        "expect_response": True,
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                    "done": False,
+                }
+            ]
+        ),
+    )
+    assert first["status"] == "waiting_for_user"
+
+    resumed_context = ExecutionContext.from_dict(context.to_dict())
+    resumed_context.add_user_message("Cancel")
+    resumed = DAGPattern(lambda **_: plan)
+    resumed.load_state(pattern.get_state())
+    await resumed.run(
+        context=resumed_context,
+        tools=[publish_tool],
+        llm=SequenceLLM(
+            [
+                {"content": "Cancelled, nothing published.", "done": True},
+                {
+                    "tool_calls": [
+                        {
+                            "id": "publish-anyway",
+                            "function": {
+                                "name": "mcp_Connector_create_post",
+                                "arguments": json.dumps({"text": "the post"}),
+                            },
+                        }
+                    ],
+                    "done": False,
+                },
+                {"content": "Done.", "done": True},
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_the_guard_the_cancelled_publish_goes_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the pair: without the guard this scenario publishes.
+
+    Pinned so the test above cannot quietly degrade into one that would pass
+    even with the guard removed.
+    """
+    monkeypatch.setattr(react_module, "tool_needs_fresh_plan", lambda tool: False)
+    publish_tool = FakeConnectorWriteTool()
+
+    await _run_cancelled_publish_turn(publish_tool)
+
+    assert publish_tool.calls == [{"text": "the post"}]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_confirmation_does_not_publish() -> None:
+    """Replay of the incident, end to end.
+
+    Turn 1 plans confirm -> publish and pauses on the confirmation. Turn 2
+    carries the user's Cancel, which is forwarded into the waiting step rather
+    than replanned, so the publish step runs under the turn-1 plan. The write
+    must not reach the connector.
+    """
+    publish_tool = FakeConnectorWriteTool()
+
+    await _run_cancelled_publish_turn(publish_tool)
+
+    assert publish_tool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_single_turn_publish_still_reaches_the_connector() -> None:
+    """The guard must not cost the ordinary case: plan and write in one turn."""
+    publish_tool = FakeConnectorWriteTool()
+    plan = build_plan(PlanStep(id="publish", task="Publish the post"))
+    context = ExecutionContext(execution_id="dag-single-turn-publish")
+    context.add_user_message("publish this now")
+
+    pattern = DAGPattern(lambda **_: plan)
+    await pattern.run(
+        context=context,
+        tools=[publish_tool],
+        llm=SequenceLLM(
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "publish-now",
+                            "function": {
+                                "name": "mcp_Connector_create_post",
+                                "arguments": json.dumps({"text": "the post"}),
+                            },
+                        }
+                    ],
+                    "done": False,
+                },
+                {"content": "Published.", "done": True},
+            ]
+        ),
+    )
+
+    assert publish_tool.calls == [{"text": "the post"}]
+
+
+def test_forwarding_a_reply_does_not_pass_the_plan_off_as_freshly_generated() -> None:
+    # planned_user_message_count moves when a reply is forwarded; the
+    # generation count must not, or the stale plan looks current again.
+    pattern = DAGPattern(lambda **_: build_plan())
+    pattern.planned_user_message_count = 2
+    pattern.plan_generation_user_message_count = 1
+    context = ExecutionContext(execution_id="dag-forwarded")
+    for index in range(2):
+        context.add_user_message(f"message {index}")
+
+    assert pattern.plan_predates_latest_user_message(context)
+
+
+def test_a_checkpoint_without_the_generation_count_keeps_its_old_behaviour() -> None:
+    pattern = DAGPattern(lambda **_: build_plan())
+
+    pattern.load_state({"planned_user_message_count": 4})
+
+    assert pattern.plan_generation_user_message_count == 4

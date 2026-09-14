@@ -24,6 +24,9 @@ from xagent.core.agent import (
 )
 from xagent.core.agent.context.execution import CLOCK_TIMEZONE_METADATA_KEY
 from xagent.core.agent.pattern.final_answer_stream import ReActFinalAnswerStreamer
+from xagent.core.agent.pattern.react.duplicate_write_guard import (
+    DUPLICATE_WRITE_SUPPRESSED_KEY,
+)
 from xagent.core.agent.pattern.react.react import (
     _INTERACTION_TRIM_CHARS,
     _normalize_ask_user_interactions,
@@ -9313,3 +9316,110 @@ async def test_react_final_checkpoint_failure_preserves_completed_call(
     assert pattern.tool_ledger["final-1"].status == "completed"
     assert pattern.tool_ledger["final-1"].error is None
     assert len(context.get_messages_by_role("tool")) == 1
+
+
+class _StalePlanRuntime(PatternRuntime):
+    def __init__(self, stale: bool = True) -> None:
+        super().__init__()
+        self.stale = stale
+        # The duplicate guard is scoped by turn: without a stamped turn it
+        # fails open, and a test that left it unstamped would not notice the
+        # refusal being recorded as a completed write.
+        self.active_turn_id = "turn-1"
+
+    def plan_predates_latest_user_message(self) -> bool:
+        return self.stale
+
+
+def _mcp_tool(name: str, hint: str) -> FakeTool:
+    tool = FakeTool()
+    tool.metadata.name = name
+    tool.metadata.mcp_write_hint = hint
+    # A real connector write is also declared non-idempotent, which is what
+    # arms the duplicate guard the refusal must not be mistaken for.
+    tool.metadata.mcp_non_idempotent_write = hint != "read_only"
+    return tool
+
+
+@pytest.mark.asyncio
+async def test_a_stale_plan_write_never_reaches_the_tool() -> None:
+    # The incident's last step: the publish was ordered by a plan generated
+    # before the user's Cancel. The refusal has to stop the call, not report
+    # it after the fact.
+    pattern = ReActPattern()
+    tool = _mcp_tool("mcp_LinkedIn_create_post", "undeclared")
+
+    result = await pattern._execute_tool_safely(
+        {"name": "mcp_LinkedIn_create_post", "args": {"expression": "1+1"}},
+        [tool],
+        _StalePlanRuntime(),
+    )
+
+    assert tool.calls == []
+    assert result["status"] == "refused_stale_plan"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_plan_write_runs() -> None:
+    pattern = ReActPattern()
+    tool = _mcp_tool("mcp_LinkedIn_create_post", "undeclared")
+
+    result = await pattern._execute_tool_safely(
+        {"name": "mcp_LinkedIn_create_post", "args": {"expression": "1+1"}},
+        [tool],
+        _StalePlanRuntime(stale=False),
+    )
+
+    assert tool.calls == [{"expression": "1+1"}]
+    assert result["result"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stale_plan_still_runs_a_server_declared_read() -> None:
+    # Holding back reads would strand the turn before it can reach an
+    # assessment and replan.
+    pattern = ReActPattern()
+    tool = _mcp_tool("mcp_LinkedIn_get_profile", "read_only")
+
+    result = await pattern._execute_tool_safely(
+        {"name": "mcp_LinkedIn_get_profile", "args": {"expression": "1+1"}},
+        [tool],
+        _StalePlanRuntime(),
+    )
+
+    assert tool.calls == [{"expression": "1+1"}]
+    assert result["result"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stale_plan_leaves_internal_tools_alone() -> None:
+    pattern = ReActPattern()
+    tool = FakeTool()
+    tool.metadata.name = "calculator"
+
+    result = await pattern._execute_tool_safely(
+        {"name": "calculator", "args": {"expression": "1+1"}},
+        [tool],
+        _StalePlanRuntime(),
+    )
+
+    assert tool.calls == [{"expression": "1+1"}]
+    assert result["result"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refused_write_stays_retryable() -> None:
+    # Recorded failed, not completed: once a fresh plan orders the same call
+    # it must execute, not be suppressed as a duplicate of the refusal.
+    pattern = ReActPattern()
+    tool = _mcp_tool("mcp_LinkedIn_create_post", "undeclared")
+    runtime = _StalePlanRuntime()
+    call = {"name": "mcp_LinkedIn_create_post", "args": {"expression": "1+1"}}
+
+    await pattern._execute_tool_safely(dict(call), [tool], runtime)
+    runtime.stale = False
+    result = await pattern._execute_tool_safely(dict(call), [tool], runtime)
+
+    assert tool.calls == [{"expression": "1+1"}]
+    assert result["result"] == 2
+    assert DUPLICATE_WRITE_SUPPRESSED_KEY not in result

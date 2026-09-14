@@ -283,6 +283,11 @@ class _AutoChildRuntime:
             metadata=child_metadata,
         )
 
+    def plan_predates_latest_user_message(self) -> bool:
+        # Auto plans nothing itself; when its child is a DAG, that pattern's
+        # own step runtime answers this instead of reaching here.
+        return self.parent.plan_predates_latest_user_message()
+
     async def on_tool_start(self, *, tool_call: dict[str, Any]) -> None:
         await self.parent.on_tool_start(tool_call=tool_call)
 

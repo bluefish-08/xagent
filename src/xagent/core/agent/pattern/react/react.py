@@ -121,6 +121,7 @@ from .duplicate_write_guard import (
     build_suppression_envelope,
     tool_requires_duplicate_write_guard,
 )
+from .stale_plan_guard import build_stale_plan_refusal, tool_needs_fresh_plan
 
 logger = logging.getLogger(__name__)
 
@@ -3790,6 +3791,23 @@ class ReActPattern(AgentPattern):
             },
         ).to_dict()
 
+    def _stale_plan_refusal(
+        self,
+        tool_call: dict[str, Any],
+        tools: list[Any],
+        runtime: PatternRuntime,
+    ) -> dict[str, Any] | None:
+        """Return the refusal envelope when a stale plan ordered an outside call."""
+        if not runtime.plan_predates_latest_user_message():
+            return None
+        try:
+            tool = self._find_tool(tool_call["name"], tools)
+        except Exception:  # noqa: BLE001 - unknown tool fails in _execute_tool
+            return None
+        if not tool_needs_fresh_plan(tool):
+            return None
+        return build_stale_plan_refusal(str(tool_call["name"]))
+
     def _suppressed_duplicate_write_result(
         self,
         tool_call: dict[str, Any],
@@ -3907,6 +3925,24 @@ class ReActPattern(AgentPattern):
             # evidence when the model reuses the prior call's id. The scan and
             # the envelope record are synchronous, preserving the
             # distinct-fallback-id invariant for concurrent batch members.
+            # Ordered before the duplicate scan so a refusal never lands in
+            # the ledger as a completed write: a later legitimate retry of the
+            # same call would otherwise be suppressed as its duplicate.
+            refusal = self._stale_plan_refusal(tool_call, tools, runtime)
+            if refusal is not None:
+                self._record_tool_call(
+                    tool_call,
+                    status="failed",
+                    result=refusal,
+                    error=str(refusal["error"]),
+                )
+                await runtime.on_tool_start(tool_call=tool_call)
+                await runtime.on_tool_error(
+                    tool_call=tool_call,
+                    error=RuntimeError(str(refusal["error"])),
+                    result=refusal,
+                )
+                return refusal
             suppressed = self._suppressed_duplicate_write_result(tool_call, tools)
             if suppressed is not None:
                 # Never overwrite the matched genuine record with the

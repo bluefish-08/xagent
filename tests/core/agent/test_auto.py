@@ -2537,3 +2537,32 @@ def test_auto_child_runtime_forwards_dag_turn_resolution() -> None:
     # with a default is what hides a raising property, so the assertion has
     # to go through the same access to catch a regression.
     assert getattr(step_runtime, "active_turn_id", None) == "turn-42"
+
+
+def test_every_runtime_adapter_answers_plan_staleness() -> None:
+    # The adapters duck-type PatternRuntime rather than subclassing it, so a
+    # method added to the base reaches them only if each one forwards it. A
+    # missing forward surfaces as an AttributeError from deep inside a tool
+    # call, which is how this one was found.
+    from xagent.core.agent.pattern.auto.auto import _AutoChildRuntime
+    from xagent.core.agent.pattern.dag.dag import _DAGStepRuntime
+
+    for adapter in (_AutoChildRuntime, _DAGStepRuntime):
+        assert hasattr(adapter, "plan_predates_latest_user_message"), adapter.__name__
+
+
+@pytest.mark.asyncio
+async def test_auto_child_runtime_forwards_plan_staleness_to_its_parent() -> None:
+    from xagent.core.agent.pattern.auto.auto import AutoPattern, _AutoChildRuntime
+
+    class StaleParent(PatternRuntime):
+        def plan_predates_latest_user_message(self) -> bool:
+            return True
+
+    runtime = _AutoChildRuntime(
+        parent=StaleParent(),
+        auto_pattern=AutoPattern(),
+        root_context=ExecutionContext(execution_id="auto-stale"),
+    )
+
+    assert runtime.plan_predates_latest_user_message() is True

@@ -198,6 +198,9 @@ class _DAGStepRuntime:
             metadata=step_metadata,
         )
 
+    def plan_predates_latest_user_message(self) -> bool:
+        return self.dag_pattern.plan_predates_latest_user_message(self.root_context)
+
     async def on_tool_start(self, *, tool_call: dict[str, Any]) -> None:
         await self.parent.on_tool_start(tool_call=self._with_step(tool_call))
 
@@ -391,6 +394,7 @@ class DAGPattern(AgentPattern):
         self.active_step_contexts: dict[str, dict[str, Any]] = {}
         self.step_results: dict[str, Any] = {}
         self.planned_user_message_count = 0
+        self.plan_generation_user_message_count = 0
         self.memory_input_text: str | None = None
         self.completion_feedback: str | None = None
         self.completion_replan_count = 0
@@ -1170,6 +1174,9 @@ class DAGPattern(AgentPattern):
             "active_step_contexts": dict(self.active_step_contexts),
             "step_results": dict(self.step_results),
             "planned_user_message_count": self.planned_user_message_count,
+            "plan_generation_user_message_count": (
+                self.plan_generation_user_message_count
+            ),
             "memory_input_text": self.memory_input_text,
             "max_concurrency": self.max_concurrency,
             "completion_feedback": self.completion_feedback,
@@ -1261,6 +1268,16 @@ class DAGPattern(AgentPattern):
         self.step_results = dict(state.get("step_results", {}))
         self.planned_user_message_count = int(
             state.get("planned_user_message_count", 0)
+        )
+        # A checkpoint written before this field existed carries no separate
+        # generation count; falling back to the consumed count keeps those
+        # resumes behaving exactly as they did, rather than declaring every one
+        # of them stale.
+        self.plan_generation_user_message_count = int(
+            state.get(
+                "plan_generation_user_message_count",
+                self.planned_user_message_count,
+            )
         )
         stored_memory_input = state.get("memory_input_text")
         if stored_memory_input:
@@ -1837,6 +1854,11 @@ class DAGPattern(AgentPattern):
         self.plan.validate()
         self._apply_completed_results_to_plan()
         self.planned_user_message_count = self._user_message_count(context)
+        # Tracked apart from planned_user_message_count, which
+        # _forward_user_response_to_waiting_step advances when it hands a reply
+        # to a waiting step - that marks the reply consumed, not the plan
+        # regenerated, and only this assignment means the latter.
+        self.plan_generation_user_message_count = self._user_message_count(context)
         if replan:
             runtime.clear_interrupt()
         await runtime.checkpoint(
@@ -1890,6 +1912,17 @@ class DAGPattern(AgentPattern):
             if step.id in self.step_results:
                 step.status = "completed"
                 step.result = self.step_results[step.id]
+
+    def plan_predates_latest_user_message(self, context: Any) -> bool:
+        """Whether the user has spoken since the running plan was generated.
+
+        Same comparison ``_needs_replan`` makes, minus the status gate: a
+        forwarded reply leaves the status untouched while making the plan just
+        as stale.
+        """
+        return (
+            self._user_message_count(context) > self.plan_generation_user_message_count
+        )
 
     def _needs_replan(self, context: Any) -> bool:
         if self.status not in {"interrupted", "waiting_for_user", "replanning"}:
