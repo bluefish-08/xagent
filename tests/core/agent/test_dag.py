@@ -837,6 +837,54 @@ async def test_dag_interrupt_outranks_replan_after_reply() -> None:
     assert pattern.replan_after_reply is True
 
 
+class InterruptAndMessageAtStepEndRuntime(InterruptAtStepEndRuntime):
+    async def on_dag_step_end(
+        self,
+        *,
+        context: Any,
+        step_id: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if step_id == self.interrupt_at_step_id:
+            context.add_user_message("Also add a footnote")
+        await super().on_dag_step_end(context=context, step_id=step_id, data=data)
+
+
+@pytest.mark.asyncio
+async def test_dag_interrupt_outranks_replan_after_reply_with_new_message() -> None:
+    """A new user message arriving in the same window must not route the
+    replan around the interrupt check: either way _generate_plan clears the
+    interrupt, so the Stop has to win first."""
+
+    events: list[Any] = []
+    tool = RecordingPublishTool(events)
+    llm = ConfirmThenPublishLLM(events)
+    pattern = DAGPattern(
+        RecordingPlanGenerator([confirm_publish_steps, confirm_only_steps], events)
+    )
+
+    context = ExecutionContext(execution_id="dag-replan-interrupt-message")
+    context.add_user_message("Publish my post")
+    first = await pattern.run(context=context, tools=[tool], llm=llm)
+    assert first["status"] == "waiting_for_user", first
+
+    resumed = ExecutionContext.from_dict(context.to_dict())
+    resumed.add_user_message("Cancel")
+    result = await pattern.run(
+        context=resumed,
+        tools=[tool],
+        llm=llm,
+        runtime=InterruptAndMessageAtStepEndRuntime("confirm"),
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "interrupted"
+    assert ("plan", True) not in events
+    assert tool.calls == []
+    assert pattern.replan_after_reply is True
+    assert pattern._has_new_user_message(resumed) is True
+
+
 @pytest.mark.asyncio
 async def test_dag_replan_after_reply_flag_survives_state_round_trip() -> None:
     """The flag is raised in one process and acted on in another: the

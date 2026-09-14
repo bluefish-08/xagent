@@ -545,11 +545,8 @@ class DAGPattern(AgentPattern):
             )
 
         while True:
-            if (
-                self.replan_after_reply
-                and self._user_message_count(context) <= self.planned_user_message_count
-            ):
-                # A flag-only replan reaches _generate_plan, which clears the
+            if self.replan_after_reply:
+                # The replan below reaches _generate_plan, which clears the
                 # interrupt; a real Stop must be reported instead.
                 interrupted = await self._interrupt_if_requested(
                     runtime=runtime,
@@ -1097,9 +1094,7 @@ class DAGPattern(AgentPattern):
                 pattern=self,
                 metadata={"active_step_id": step.id},
             )
-            if self._user_message_count(root_context) > (
-                self.planned_user_message_count
-            ):
+            if self._has_new_user_message(root_context):
                 return None
             return {
                 **result,
@@ -1253,6 +1248,8 @@ class DAGPattern(AgentPattern):
             active_frame_ids=active_frame_ids,
             control_state={
                 "planned_user_message_count": self.planned_user_message_count,
+                "reply_consumed_step_id": self.reply_consumed_step_id,
+                "replan_after_reply": self.replan_after_reply,
                 "max_concurrency": self.max_concurrency,
             },
         ).to_dict()
@@ -1926,12 +1923,15 @@ class DAGPattern(AgentPattern):
                 step.status = "completed"
                 step.result = self.step_results[step.id]
 
+    def _has_new_user_message(self, context: Any) -> bool:
+        return self._user_message_count(context) > self.planned_user_message_count
+
     def _needs_replan(self, context: Any) -> bool:
         if self.replan_after_reply:
             return True
         if self.status not in {"interrupted", "waiting_for_user", "replanning"}:
             return False
-        return self._user_message_count(context) > self.planned_user_message_count
+        return self._has_new_user_message(context)
 
     def _forward_user_response_to_waiting_step(self, root_context: Any) -> bool:
         if self.status != "waiting_for_user":
