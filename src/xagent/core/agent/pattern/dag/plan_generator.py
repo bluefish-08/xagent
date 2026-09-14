@@ -338,7 +338,11 @@ class LLMPlanGenerator(PlanGenerator):
                     "self-contained execution plan, not a delta: every "
                     "dependency id must also appear in the returned steps. "
                     "Include completed steps that new work depends on so their "
-                    "results can be reused."
+                    "results can be reused. "
+                    "On a replan, pending_response is the user's authoritative "
+                    "answer to the question a step asked: if it declines, "
+                    "cancels, or narrows the work, drop or modify the remaining "
+                    "steps and do not re-emit work that answer rejected."
                 ),
             },
             {"role": "user", "content": self._build_prompt(request)},
