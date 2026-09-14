@@ -44,9 +44,11 @@ DEFAULT_FTS_PARAMS: Final[Dict[str, Any]] = {
 The previous ``ngram`` + ``prefix_only`` setting indexed prefixes of the whole
 chunk instead of per-word tokens, so only queries matching a chunk's opening
 characters hit anything -- a chunk containing "incident" never matched the
-query ``incident``. Needs lancedb >= 0.32.0 and uses lance's built-in jieba
-dictionary; if ``LANCE_LANGUAGE_MODEL_HOME`` is set, its ``jieba/default``
-directory must be valid or both index creation and querying fail.
+query ``incident``. Needs lancedb >= 0.32.0 and
+``<LANCE_LANGUAGE_MODEL_HOME>/jieba/default/dict.txt``, which
+``ensure_jieba_dictionary`` installs from the PyPI jieba package when a
+connection is opened: only the macOS wheel embeds a dictionary, and on Linux
+both index creation and querying fail without the file.
 """
 
 DEFAULT_LANCEDB_SCAN_BATCH_SIZE: Final[int] = 2048
