@@ -6,8 +6,10 @@ before the jieba switch keep the old tokenizer until the index is rebuilt.
 ``compact_tables`` needs fresh ingestion plus a fragment/version threshold, so a
 quiescent knowledge base never picks the new tokenizer up on its own.
 
-Rebuilds go through ``LanceDBVectorIndexStore.trigger_reindex``, which replaces
-the FTS index in place and is safe to re-run.
+Rebuilds go through ``LanceDBVectorIndexStore.rebuild_text_fts_index``, which
+replaces the index in place, reports what it did, and raises on failure. This
+script deliberately does not compact: compaction is ``compact_tables``' job and
+runs on ingestion.
 """
 
 from __future__ import annotations
@@ -16,11 +18,12 @@ import argparse
 import logging
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from xagent.core.tools.core.RAG_tools.core.config import DEFAULT_INDEX_POLICY
 from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import _safe_close_table
 from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+    FtsRebuildOutcome,
     LanceDBVectorIndexStore,
 )
 from xagent.providers.vector_store.lancedb import get_connection_from_env
@@ -32,6 +35,16 @@ logger = logging.getLogger(__name__)
 
 EMBEDDINGS_PREFIX = "embeddings_"
 
+REBUILD = "rebuild"
+SKIP = "skip"
+ERROR = "error"
+
+
+class Planned(NamedTuple):
+    name: str
+    decision: str
+    snapshot: Dict[str, Any]
+
 
 def list_embeddings_tables(conn: Any) -> List[str]:
     """Embeddings tables only: they are the sole carriers of an FTS index."""
@@ -39,12 +52,7 @@ def list_embeddings_tables(conn: Any) -> List[str]:
 
 
 def describe_indexes(conn: Any, table_name: str) -> Dict[str, Any]:
-    """Snapshot of the index state, for before/after comparison.
-
-    LanceDB does not read the tokenizer back out of a built index, so the
-    operator-visible proof of a rebuild is the table version plus the indexed
-    row counts; the tokenizer being written is reported from the policy.
-    """
+    """Snapshot of the index state, for the eligibility plan and the log."""
     table = None
     try:
         table = conn.open_table(table_name)
@@ -68,22 +76,28 @@ def describe_indexes(conn: Any, table_name: str) -> Dict[str, Any]:
         _safe_close_table(table)
 
 
-def _has_fts(snapshot: Dict[str, Any]) -> bool:
+def _has_text_fts(snapshot: Dict[str, Any]) -> bool:
+    """An FTS index on another column is not one the rebuild can replace."""
     indexes = snapshot.get("indexes") or {}
-    return any(entry["type"] == "FTS" for entry in indexes.values())
+    return any(
+        entry.get("type") == "FTS" and "text" in (entry.get("columns") or [])
+        for entry in indexes.values()
+    )
 
 
-def _fts_rebuilt(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
-    """Whether the FTS index was actually rewritten.
-
-    ``trigger_reindex`` reports whether ``optimize`` succeeded; it logs a failed
-    FTS rebuild and still returns True, and returns False when only the
-    unrelated compaction step failed. The table version is the signal for the
-    one step this script exists for.
-    """
-    if "error" in before or "error" in after:
-        return False
-    return _has_fts(after) and after["version"] > before["version"]
+def build_plan(conn: Any, tables: List[str]) -> List[Planned]:
+    """Classify each table once, so dry-run and execute cannot disagree."""
+    plan = []
+    for name in tables:
+        snapshot = describe_indexes(conn, name)
+        if "error" in snapshot:
+            decision = ERROR
+        elif _has_text_fts(snapshot):
+            decision = REBUILD
+        else:
+            decision = SKIP
+        plan.append(Planned(name, decision, snapshot))
+    return plan
 
 
 def rebuild_fts_indexes(
@@ -103,69 +117,63 @@ def rebuild_fts_indexes(
         tables = [table]
 
     target_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
-    logger.info("Tables to rebuild (%d): %s", len(tables), tables or "none")
+    plan = build_plan(conn, tables)
+    logger.info("Tables examined (%d): %s", len(tables), tables or "none")
     logger.info("Target FTS params: %s", target_params)
+    for item in plan:
+        logger.info("%s: %s, before: %s", item.name, item.decision, item.snapshot)
+
+    result: Dict[str, Any] = {
+        "tables": tables,
+        "succeeded": [],
+        "skipped": [p.name for p in plan if p.decision == SKIP],
+        "failed": [p.name for p in plan if p.decision == ERROR],
+        "dry_run": dry_run,
+    }
 
     if dry_run:
-        for name in tables:
-            logger.info("[dry-run] %s before: %s", name, describe_indexes(conn, name))
-        return {
-            "tables": tables,
-            "succeeded": [],
-            "skipped": [],
-            "failed": [],
-            "dry_run": True,
-        }
+        result["would_rebuild"] = [p.name for p in plan if p.decision == REBUILD]
+        logger.info("[dry-run] would rebuild: %s", result["would_rebuild"] or "none")
+        logger.info("[dry-run] would skip: %s", result["skipped"] or "none")
+        logger.info("[dry-run] unreadable: %s", result["failed"] or "none")
+        return result
 
     store = LanceDBVectorIndexStore()
-    succeeded: List[str] = []
-    failed: List[str] = []
-    skipped: List[str] = []
-
-    for name in tables:
-        before = describe_indexes(conn, name)
-        # trigger_reindex would still run the full compaction on a table that
-        # carries no FTS index, and rebuild nothing.
-        if "error" not in before and not _has_fts(before):
-            logger.info("%s carries no FTS index; skipping", name)
-            skipped.append(name)
+    for item in plan:
+        if item.decision != REBUILD:
             continue
-
         started = time.monotonic()
         try:
-            ok = store.trigger_reindex(name)
-        except Exception as e:  # noqa: BLE001
-            logger.error("%s: rebuild raised %s: %s", name, type(e).__name__, e)
-            ok = False
+            outcome = store.rebuild_text_fts_index(item.name)
+        except BaseException as e:  # noqa: BLE001
+            # BaseException: a pyo3 Rust panic is not an Exception, and a
+            # panicking rebuild must not be reported as a success.
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            logger.error("%s: rebuild raised %s: %s", item.name, type(e).__name__, e)
+            result["failed"].append(item.name)
+            continue
         elapsed = time.monotonic() - started
-        after = describe_indexes(conn, name)
-
-        rebuilt = _fts_rebuilt(before, after)
-        logger.info("%s before: %s", name, before)
-        logger.info("%s after:  %s", name, after)
         logger.info(
-            "%s took %.2fs, fts_rebuilt=%s, optimize_ok=%s",
-            name,
+            "%s took %.2fs, outcome=%s, after: %s",
+            item.name,
             elapsed,
-            rebuilt,
-            ok,
+            outcome.value,
+            describe_indexes(conn, item.name),
         )
-        if not ok:
-            logger.warning(
-                "%s: compaction did not finish; the FTS index is unaffected", name
-            )
-        (succeeded if rebuilt else failed).append(name)
+        if outcome is FtsRebuildOutcome.REBUILT:
+            result["succeeded"].append(item.name)
+        else:
+            # The plan said this table needed a rebuild, so anything else --
+            # a lock held elsewhere, an index that vanished -- is unfinished
+            # work the operator has to re-run, not a clean skip.
+            logger.error("%s was not rebuilt: %s", item.name, outcome.value)
+            result["failed"].append(item.name)
 
-    logger.info("Succeeded (%d): %s", len(succeeded), succeeded or "none")
-    logger.info("Skipped (%d): %s", len(skipped), skipped or "none")
-    logger.info("Failed (%d): %s", len(failed), failed or "none")
-    return {
-        "tables": tables,
-        "succeeded": succeeded,
-        "skipped": skipped,
-        "failed": failed,
-        "dry_run": False,
-    }
+    logger.info("Succeeded (%d): %s", len(result["succeeded"]), result["succeeded"])
+    logger.info("Skipped (%d): %s", len(result["skipped"]), result["skipped"])
+    logger.info("Failed (%d): %s", len(result["failed"]), result["failed"])
+    return result
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -179,7 +187,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="List the tables that would be rebuilt without changing anything",
+        help="Report what would be rebuilt and what would be skipped",
     )
     args = parser.parse_args(argv)
 
