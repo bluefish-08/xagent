@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ProgressPersistence:
     """Handles persistence of progress data to various storage backends."""
 
-    MAX_FILENAME_BYTES = 200
+    MAX_FILENAME_BYTES = 255
 
     def __init__(self, storage_dir: Optional[str] = None):
         """Initialize persistence layer.
@@ -47,9 +47,11 @@ class ProgressPersistence:
         Args:
             task_progress: The task progress to save
         """
-        file_path = self._get_task_file_path(task_progress.task_id)
+        file_path = None
 
         try:
+            file_path = self._get_task_file_path(task_progress.task_id)
+
             # Convert to dict for JSON serialization
             data = {
                 "task_id": task_progress.task_id,
@@ -276,12 +278,17 @@ class ProgressPersistence:
         if not safe_task_id:
             safe_task_id = "unknown"
 
+        suffix = ".json"
         # task_id is caller-supplied and unbounded; filesystems cap a filename at
         # 255 *bytes*, and a CJK collection name is 3 bytes per character.
+        budget = self.MAX_FILENAME_BYTES - len(suffix)
         encoded = safe_task_id.encode("utf-8")
-        if len(encoded) > self.MAX_FILENAME_BYTES:
-            digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:16]
-            prefix = encoded[: self.MAX_FILENAME_BYTES].decode("utf-8", "ignore")
+        if len(encoded) > budget:
+            # surrogatepass: an OS path with undecodable bytes must still hash.
+            digest = hashlib.sha256(
+                task_id.encode("utf-8", "surrogatepass")
+            ).hexdigest()[:16]
+            prefix = encoded[: budget - len(digest) - 1].decode("utf-8", "ignore")
             safe_task_id = f"{prefix}-{digest}"
 
-        return self.storage_dir / f"{safe_task_id}.json"
+        return self.storage_dir / f"{safe_task_id}{suffix}"
