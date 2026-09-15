@@ -1154,34 +1154,34 @@ class FailingConfirmLLM:
 
 
 @pytest.mark.asyncio
-async def test_dag_failed_consuming_step_owes_no_replan() -> None:
+@pytest.mark.parametrize("mode", ["raise", "unfinished"])
+async def test_dag_failed_consuming_step_owes_no_replan(mode: str) -> None:
     """A step that consumed the reply and then failed records no result,
     so the owed replan stays unowed through both failure exits and the
     failure is reported instead."""
 
-    for mode in ("raise", "unfinished"):
-        events: list[Any] = []
-        tool = FakeTool(name="publish_post", events=events)
-        llm = FailingConfirmLLM(events, mode)
-        pattern = DAGPattern(
-            RecordingPlanGenerator([confirm_publish_steps], events),
-            react_max_iterations=1,
-        )
+    events: list[Any] = []
+    tool = FakeTool(name="publish_post", events=events)
+    llm = FailingConfirmLLM(events, mode)
+    pattern = DAGPattern(
+        RecordingPlanGenerator([confirm_publish_steps], events),
+        react_max_iterations=1,
+    )
 
-        context = ExecutionContext(execution_id=f"dag-failed-consumer-{mode}")
-        context.add_user_message("Publish my post")
-        first = await pattern.run(context=context, tools=[tool], llm=llm)
-        assert first["status"] == "waiting_for_user", (mode, first)
+    context = ExecutionContext(execution_id=f"dag-failed-consumer-{mode}")
+    context.add_user_message("Publish my post")
+    first = await pattern.run(context=context, tools=[tool], llm=llm)
+    assert first["status"] == "waiting_for_user", first
 
-        resumed = ExecutionContext.from_dict(context.to_dict())
-        resumed.add_user_message("Go ahead")
-        result = await pattern.run(context=resumed, tools=[tool], llm=llm)
+    resumed = ExecutionContext.from_dict(context.to_dict())
+    resumed.add_user_message("Go ahead")
+    result = await pattern.run(context=resumed, tools=[tool], llm=llm)
 
-        assert result["success"] is False, (mode, result)
-        assert result["failed_step_id"] == "confirm", mode
-        assert "confirm" not in pattern.step_results, mode
-        assert pattern._reply_replan_owed() is False, mode
-        assert ("plan", True) not in events, mode
+    assert result["success"] is False, result
+    assert result["failed_step_id"] == "confirm"
+    assert "confirm" not in pattern.step_results
+    assert pattern._reply_replan_owed() is False
+    assert ("plan", True) not in events
 
 
 @pytest.mark.asyncio
