@@ -151,6 +151,10 @@ def list_embeddings_table_names(conn: Any, prefix: str = "embeddings_") -> list[
 _FTS_TERM_SEPARATORS = re.compile(
     r"[\s，。！？；：、（）【】「」『』《》〈〉“”‘’—…～]+"
 )
+# ``+`` and ``#`` survive at a term edge so C++ and C# keep matching.
+_FTS_TERM_EDGES = re.compile(r"^[^\w+#]+|[^\w+#]+$")
+# Guards against a pasted document arriving as one query.
+_FTS_MAX_TERMS = 64
 
 
 def build_fts_query(
@@ -158,16 +162,17 @@ def build_fts_query(
 ) -> Optional[BooleanQuery]:
     """Build an OR-of-terms FTS query, or ``None`` when the text has no terms.
 
-    Whitespace and CJK punctuation are themselves indexed tokens (lance folds
-    ``，`` onto ASCII ``,``), so leaving them in a term matches every chunk that
-    contains one. ASCII punctuation stays: ``COVID-19`` and ``C++`` are single
-    tokens in the index and splitting them makes the query miss entirely.
+    Whitespace, CJK punctuation and edge ASCII punctuation are indexed tokens of
+    their own (lance folds ``，`` onto ASCII ``,``), so a term carrying them
+    matches every chunk that contains one. Punctuation inside a term stays:
+    ``COVID-19`` and ``3.5`` are single tokens in the index.
     """
-    terms = [
-        term
-        for term in _FTS_TERM_SEPARATORS.split(query_text)
-        if re.search(r"\w", term)
-    ]
+    terms: List[str] = []
+    for chunk in _FTS_TERM_SEPARATORS.split(query_text):
+        term = _FTS_TERM_EDGES.sub("", chunk)
+        if re.search(r"\w", term):
+            terms.append(term)
+    terms = list(dict.fromkeys(terms))[:_FTS_MAX_TERMS]
     if not terms:
         return None
     return BooleanQuery(

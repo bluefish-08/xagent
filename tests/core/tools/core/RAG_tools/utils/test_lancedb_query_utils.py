@@ -42,6 +42,35 @@ def test_build_fts_query_keeps_ascii_punctuation_inside_a_term(query_text: str):
     assert _terms(query_text) == [(query_text, "text")]
 
 
+@pytest.mark.parametrize(
+    ("query_text", "expected"),
+    [
+        ("Save,", "Save"),
+        ("approve?", "approve"),
+        ('"quoted"', "quoted"),
+        ("(right)", "right"),
+        ("3.5.", "3.5"),
+        ("...ellipsis...", "ellipsis"),
+    ],
+)
+def test_build_fts_query_strips_punctuation_off_the_term_edges(
+    query_text: str, expected: str
+):
+    """A trailing comma drags in every chunk that has one."""
+    assert _terms(query_text) == [(expected, "text")]
+
+
+def test_build_fts_query_drops_duplicate_terms():
+    assert _terms("save save SAVE") == [("save", "text"), ("SAVE", "text")]
+
+
+def test_build_fts_query_caps_the_number_of_terms():
+    """A pasted document must not turn into a thousand-clause query."""
+    built = build_fts_query(" ".join(f"term{i}" for i in range(200)))
+    assert built is not None
+    assert len(built.queries) == 64
+
+
 def test_build_fts_query_keeps_single_term_and_column():
     assert _terms("incident", "body") == [("incident", "body")]
 

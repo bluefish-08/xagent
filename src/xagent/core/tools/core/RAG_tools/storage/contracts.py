@@ -1334,10 +1334,7 @@ class VectorIndexStore(ABC):
 
     @abstractmethod
     def trigger_reindex(
-        self,
-        table_name: str,
-        cleanup_older_than: Optional[timedelta] = None,
-        policy: Optional[IndexPolicy] = None,
+        self, table_name: str, cleanup_older_than: Optional[timedelta] = None
     ) -> bool:
         """Optimize a table: compact data files, prune old versions, refresh indices.
 
@@ -1353,8 +1350,6 @@ class VectorIndexStore(ABC):
                 ``DEFAULT_INDEX_POLICY.version_retention_days`` -- a value shared
                 with the compaction predicate, not something internal to the
                 backend.
-            policy: Index policy whose parameters any index rebuild uses;
-                ``None`` falls back to ``DEFAULT_INDEX_POLICY``.
 
         Returns:
             True if the table was optimized successfully.

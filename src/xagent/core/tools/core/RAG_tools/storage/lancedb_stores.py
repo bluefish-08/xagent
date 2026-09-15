@@ -1594,10 +1594,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             _safe_close_table(table)
 
     def trigger_reindex(
-        self,
-        table_name: str,
-        cleanup_older_than: Optional[timedelta] = None,
-        policy: Optional[IndexPolicy] = None,
+        self, table_name: str, cleanup_older_than: Optional[timedelta] = None
     ) -> bool:
         """Compact data files, prune versions older than the retention window."""
         from ..LanceDB.schema_manager import _safe_close_table
@@ -1616,7 +1613,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
             # Must precede optimize: its incremental FTS merge is reported to
             # panic on older-writer indices, taking the index step down (lance#8310).
             try:
-                self._rebuild_fts_index(table, table_name, policy)
+                self._rebuild_fts_index(table, table_name)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException as exc:  # noqa: BLE001
@@ -1635,9 +1632,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         finally:
             _safe_close_table(table)
 
-    def _rebuild_fts_index(
-        self, table: Any, table_name: str, policy: Optional[IndexPolicy] = None
-    ) -> None:
+    def _rebuild_fts_index(self, table: Any, table_name: str) -> None:
         """Rebuild the FTS index, if this table has one.
 
         Guarded because ``compact_tables`` routes documents, parses, chunks and
@@ -1650,8 +1645,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
         if not has_fts:
             return
 
-        policy = policy or DEFAULT_INDEX_POLICY
-        fts_params = {"with_position": True, **(policy.fts_params or {})}
+        fts_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
         table.create_fts_index("text", replace=True, **fts_params)
         logger.info("Rebuilt FTS index for %s before optimize", table_name)
 
@@ -1751,7 +1745,7 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                     logger.debug("%s is being compacted elsewhere; skipping", name)
                     continue
                 if self.should_compact(name, policy) and self.trigger_reindex(
-                    name, cleanup_older_than=cleanup_older_than, policy=policy
+                    name, cleanup_older_than=cleanup_older_than
                 ):
                     compacted.append(name)
         return compacted

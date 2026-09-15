@@ -58,7 +58,7 @@ class TestLanceDBConnectionManager:
         from xagent.core.tools.core.RAG_tools.LanceDB import jieba_dictionary
 
         monkeypatch.setenv("LANCE_LANGUAGE_MODEL_HOME", str(tmp_path / "lm"))
-        monkeypatch.setattr(jieba_dictionary, "_done", False)
+        monkeypatch.setattr(jieba_dictionary, "_installed", False)
 
         connection_manager.get_connection(str(tmp_path / "db"))
 
