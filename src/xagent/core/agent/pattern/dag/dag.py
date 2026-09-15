@@ -391,8 +391,7 @@ class DAGPattern(AgentPattern):
         self.active_step_contexts: dict[str, dict[str, Any]] = {}
         self.step_results: dict[str, Any] = {}
         self.planned_user_message_count = 0
-        self.reply_consumed_step_id: str | None = None
-        self.replan_after_reply = False
+        self.replan_owed_step_id: str | None = None
         self.memory_input_text: str | None = None
         self.completion_feedback: str | None = None
         self.completion_replan_count = 0
@@ -503,15 +502,6 @@ class DAGPattern(AgentPattern):
                 )
                 if interrupted is not None:
                     return interrupted
-            elif self._needs_replan(context):
-                if not self._forward_user_response_to_waiting_step(context):
-                    await self._generate_plan(
-                        context=context,
-                        tools=tools,
-                        llm=llm,
-                        runtime=runtime,
-                        replan=True,
-                    )
         except PlanValidationError as exc:
             return await self._fail(
                 context=context,
@@ -536,22 +526,18 @@ class DAGPattern(AgentPattern):
                 context=context,
                 runtime=runtime,
                 error=str(exc),
-                failure_reason=(
-                    "replan_generation_error"
-                    if self.status == "replanning"
-                    else "plan_generation_error"
-                ),
+                failure_reason="plan_generation_error",
                 checkpoint_label="dag_plan_generation_failed",
             )
 
         while True:
-            if self.replan_after_reply:
-                # The replan below reaches _generate_plan, which clears the
-                # interrupt; a real Stop must be reported instead.
+            if self._reply_replan_owed():
+                # The branch below may reach _generate_plan, which clears
+                # the interrupt; a real Stop must be reported first.
                 interrupted = await self._interrupt_if_requested(
                     runtime=runtime,
                     context=context,
-                    label="dag_before_replan_after_reply",
+                    label="dag_before_owed_replan",
                 )
                 if interrupted is not None:
                     return interrupted
@@ -1064,8 +1050,6 @@ class DAGPattern(AgentPattern):
         except Exception as exc:
             step.status = "failed"
             step.error = str(exc)
-            if self.reply_consumed_step_id == step.id:
-                self.reply_consumed_step_id = None
             self._clear_active_step(step.id)
             await runtime.on_dag_step_end(
                 context=root_context,
@@ -1094,7 +1078,7 @@ class DAGPattern(AgentPattern):
                 pattern=self,
                 metadata={"active_step_id": step.id},
             )
-            if self._has_new_user_message(root_context):
+            if self._needs_replan(root_context):
                 return None
             return {
                 **result,
@@ -1131,8 +1115,6 @@ class DAGPattern(AgentPattern):
         if not result.get("success"):
             step.status = "failed"
             step.error = result.get("error", f"Step {step.id} failed.")
-            if self.reply_consumed_step_id == step.id:
-                self.reply_consumed_step_id = None
             await runtime.on_dag_step_end(
                 context=root_context,
                 step_id=step.id,
@@ -1152,11 +1134,6 @@ class DAGPattern(AgentPattern):
         step.status = "completed"
         step.result = result.get("output", result.get("response", result))
         self.step_results[step.id] = step.result
-        if self.reply_consumed_step_id == step.id:
-            # The remaining plan was drawn up before the user reply this step
-            # just consumed, so it must be re-validated against that reply.
-            self.reply_consumed_step_id = None
-            self.replan_after_reply = not self._all_steps_completed()
         self._clear_active_step(step.id)
         await runtime.on_dag_step_end(
             context=root_context,
@@ -1191,8 +1168,7 @@ class DAGPattern(AgentPattern):
             "active_step_contexts": dict(self.active_step_contexts),
             "step_results": dict(self.step_results),
             "planned_user_message_count": self.planned_user_message_count,
-            "reply_consumed_step_id": self.reply_consumed_step_id,
-            "replan_after_reply": self.replan_after_reply,
+            "replan_owed_step_id": self.replan_owed_step_id,
             "memory_input_text": self.memory_input_text,
             "max_concurrency": self.max_concurrency,
             "completion_feedback": self.completion_feedback,
@@ -1248,8 +1224,7 @@ class DAGPattern(AgentPattern):
             active_frame_ids=active_frame_ids,
             control_state={
                 "planned_user_message_count": self.planned_user_message_count,
-                "reply_consumed_step_id": self.reply_consumed_step_id,
-                "replan_after_reply": self.replan_after_reply,
+                "replan_owed_step_id": self.replan_owed_step_id,
                 "max_concurrency": self.max_concurrency,
             },
         ).to_dict()
@@ -1287,11 +1262,8 @@ class DAGPattern(AgentPattern):
         self.planned_user_message_count = int(
             state.get("planned_user_message_count", 0)
         )
-        consumed_step_id = state.get("reply_consumed_step_id")
-        self.reply_consumed_step_id = (
-            str(consumed_step_id) if consumed_step_id else None
-        )
-        self.replan_after_reply = bool(state.get("replan_after_reply", False))
+        owed_step_id = state.get("replan_owed_step_id")
+        self.replan_owed_step_id = str(owed_step_id) if owed_step_id else None
         stored_memory_input = state.get("memory_input_text")
         if stored_memory_input:
             self.memory_input_text = str(stored_memory_input)
@@ -1840,6 +1812,7 @@ class DAGPattern(AgentPattern):
         runtime: PatternRuntime,
         replan: bool,
     ) -> None:
+        reply_driven = self._reply_awaiting_replan()
         self.status = "replanning" if replan else "planning"
         if replan:
             self._clear_all_active_steps()
@@ -1859,6 +1832,7 @@ class DAGPattern(AgentPattern):
             previous_plan=self.plan,
             available_tool_names=[self._tool_name(tool) for tool in tools],
             completion_feedback=self.completion_feedback,
+            reply_driven=reply_driven,
         )
         self.plan = await self.plan_generator.generate_plan(
             request=request,
@@ -1867,8 +1841,7 @@ class DAGPattern(AgentPattern):
         self.plan.validate()
         self._apply_completed_results_to_plan()
         self.planned_user_message_count = self._user_message_count(context)
-        self.reply_consumed_step_id = None
-        self.replan_after_reply = False
+        self.replan_owed_step_id = None
         if replan:
             runtime.clear_interrupt()
         await runtime.checkpoint(
@@ -1923,15 +1896,25 @@ class DAGPattern(AgentPattern):
                 step.status = "completed"
                 step.result = self.step_results[step.id]
 
-    def _has_new_user_message(self, context: Any) -> bool:
-        return self._user_message_count(context) > self.planned_user_message_count
+    def _reply_awaiting_replan(self) -> bool:
+        """A consumed reply no plan has answered yet; stays true once every
+        step is completed, since the completion replan answers to it too."""
+        return (
+            self.replan_owed_step_id is not None
+            and self.replan_owed_step_id in self.step_results
+        )
+
+    def _reply_replan_owed(self) -> bool:
+        """The plan drawn up before the consumed reply still has work left
+        to re-validate against it."""
+        return self._reply_awaiting_replan() and not self._all_steps_completed()
 
     def _needs_replan(self, context: Any) -> bool:
-        if self.replan_after_reply:
+        if self._reply_replan_owed():
             return True
         if self.status not in {"interrupted", "waiting_for_user", "replanning"}:
             return False
-        return self._has_new_user_message(context)
+        return self._user_message_count(context) > self.planned_user_message_count
 
     def _forward_user_response_to_waiting_step(self, root_context: Any) -> bool:
         if self.status != "waiting_for_user":
@@ -1993,8 +1976,7 @@ class DAGPattern(AgentPattern):
 
         self._set_active_step_context(step_id, child_context.to_dict())
         self.planned_user_message_count = len(root_user_messages)
-        self.reply_consumed_step_id = step_id
-        self.replan_after_reply = False
+        self.replan_owed_step_id = step_id
         self.status = "running"
         return True
 

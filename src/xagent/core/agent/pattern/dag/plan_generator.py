@@ -199,11 +199,13 @@ class PlanGenerationRequest:
     previous_plan: ExecutionPlan | None = None
     available_tool_names: list[str] = field(default_factory=list)
     completion_feedback: str | None = None
+    reply_driven: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "execution_id": self.execution_id,
             "replan": self.replan,
+            "reply_driven": self.reply_driven,
             "completed_step_results": dict(self.completed_step_results),
             "previous_plan": (
                 self.previous_plan.to_dict() if self.previous_plan is not None else None
@@ -338,11 +340,16 @@ class LLMPlanGenerator(PlanGenerator):
                     "self-contained execution plan, not a delta: every "
                     "dependency id must also appear in the returned steps. "
                     "Include completed steps that new work depends on so their "
-                    "results can be reused. "
-                    "On a replan, pending_response is the user's authoritative "
-                    "answer to the question a step asked: if it declines, "
-                    "cancels, or narrows the work, drop or modify the remaining "
-                    "steps and do not re-emit work that answer rejected."
+                    "results can be reused."
+                    + (
+                        " pending_response is the user's authoritative answer "
+                        "to the question a step asked: if it declines, "
+                        "cancels, or narrows the work, drop or modify the "
+                        "remaining steps and do not re-emit work that answer "
+                        "rejected."
+                        if request.reply_driven
+                        else ""
+                    )
                 ),
             },
             {"role": "user", "content": self._build_prompt(request)},
