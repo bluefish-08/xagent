@@ -200,3 +200,69 @@ class TestProgressPersistence:
         # Check that old task is gone
         assert self.persistence.load_task_progress("old_completed") is None
         assert self.persistence.load_task_progress("recent_completed") is not None
+
+    def test_long_task_id_roundtrip(self):
+        """Overlong task IDs must still save, load and delete."""
+        long_source = (
+            "/" + "/".join(f"deep_segment_{i}" for i in range(30)) + "/doc.pdf"
+        )
+        task_id = f"ingest_docs_{long_source.replace('/', '_').replace('.', '_')}"
+        assert len(task_id) >= 300
+
+        task = TaskProgress(
+            task_id=task_id,
+            task_type="ingestion",
+            status=DocumentProcessingStatus.RUNNING,
+        )
+        self.persistence.save_task_progress(task)
+
+        file_path = self.persistence._get_task_file_path(task_id)
+        assert len(file_path.name.encode("utf-8")) <= 255
+        assert file_path.exists()
+
+        loaded = self.persistence.load_task_progress(task_id)
+        assert loaded is not None
+        assert loaded.task_id == task_id
+
+        assert self.persistence.delete_task_progress(task_id) is True
+        assert self.persistence.load_task_progress(task_id) is None
+
+    def test_long_task_ids_do_not_collide(self):
+        """Two long IDs sharing a prefix must map to different files."""
+        prefix = "ingest_docs_" + "x" * 300
+        first, second = f"{prefix}_a", f"{prefix}_b"
+
+        for task_id in (first, second):
+            self.persistence.save_task_progress(
+                TaskProgress(
+                    task_id=task_id,
+                    task_type="ingestion",
+                    status=DocumentProcessingStatus.RUNNING,
+                )
+            )
+
+        assert self.persistence._get_task_file_path(
+            first
+        ) != self.persistence._get_task_file_path(second)
+        assert self.persistence.load_task_progress(first).task_id == first
+        assert self.persistence.load_task_progress(second).task_id == second
+
+    def test_short_task_id_filename_unchanged(self):
+        """Short IDs keep their plain, readable filename."""
+        assert (
+            self.persistence._get_task_file_path("ingest_docs_report_pdf").name
+            == "ingest_docs_report_pdf.json"
+        )
+
+
+def test_multibyte_task_id_filename_stays_under_the_byte_cap(tmp_path):
+    """A CJK collection name is 3 bytes per character, so cap bytes not characters."""
+    persistence = ProgressPersistence(storage_dir=str(tmp_path))
+    first = "ingest_知识库" + "文档" * 150
+    second = "ingest_知识库" + "文档" * 149 + "报告"
+
+    first_path = persistence._get_task_file_path(first)
+    second_path = persistence._get_task_file_path(second)
+
+    assert len(first_path.name.encode("utf-8")) <= 255
+    assert first_path != second_path

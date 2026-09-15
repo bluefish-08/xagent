@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 class ProgressPersistence:
     """Handles persistence of progress data to various storage backends."""
+
+    MAX_FILENAME_BYTES = 200
 
     def __init__(self, storage_dir: Optional[str] = None):
         """Initialize persistence layer.
@@ -44,9 +47,9 @@ class ProgressPersistence:
         Args:
             task_progress: The task progress to save
         """
-        try:
-            file_path = self._get_task_file_path(task_progress.task_id)
+        file_path = self._get_task_file_path(task_progress.task_id)
 
+        try:
             # Convert to dict for JSON serialization
             data = {
                 "task_id": task_progress.task_id,
@@ -65,11 +68,18 @@ class ProgressPersistence:
 
         except Exception as e:
             logger.error(
-                "Failed to save task progress for %s: %s", task_progress.task_id, e
+                "Failed to save task progress for %s to %s: %s",
+                task_progress.task_id,
+                file_path,
+                e,
             )
             raise ProgressPersistenceError(
-                f"Failed to save task progress: {e}",
-                details={"task_id": task_progress.task_id, "error": str(e)},
+                f"Failed to save task progress to {file_path}: {e}",
+                details={
+                    "task_id": task_progress.task_id,
+                    "file_path": str(file_path),
+                    "error": str(e),
+                },
             ) from e
 
     def load_task_progress(self, task_id: str) -> Optional[TaskProgress]:
@@ -265,5 +275,13 @@ class ProgressPersistence:
         safe_task_id = "".join(c for c in task_id if c.isalnum() or c in "-_.").strip()
         if not safe_task_id:
             safe_task_id = "unknown"
+
+        # task_id is caller-supplied and unbounded; filesystems cap a filename at
+        # 255 *bytes*, and a CJK collection name is 3 bytes per character.
+        encoded = safe_task_id.encode("utf-8")
+        if len(encoded) > self.MAX_FILENAME_BYTES:
+            digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:16]
+            prefix = encoded[: self.MAX_FILENAME_BYTES].decode("utf-8", "ignore")
+            safe_task_id = f"{prefix}-{digest}"
 
         return self.storage_dir / f"{safe_task_id}.json"
