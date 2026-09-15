@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from ...context.enrichment import (
     latest_pending_user_response,
+    pending_user_responses,
     top_level_user_request,
 )
 from ...language import (
@@ -342,12 +343,11 @@ class LLMPlanGenerator(PlanGenerator):
                     "Include completed steps that new work depends on so their "
                     "results can be reused."
                     + (
-                        " pending_response is the user's authoritative answer "
-                        "to the question a step asked: if it declines, "
-                        "cancels, or narrows the work, drop or modify the "
-                        "remaining steps and do not re-emit work that answer "
-                        "rejected; earlier answers in messages are "
-                        "authoritative too."
+                        " pending_responses are the user's authoritative "
+                        "answers to questions steps asked, newest last: if "
+                        "any declines, cancels, or narrows the work, drop or "
+                        "modify the remaining steps and do not re-emit work "
+                        "an answer rejected."
                         if request.reply_driven
                         else ""
                     )
@@ -580,6 +580,11 @@ class LLMPlanGenerator(PlanGenerator):
     def _build_prompt(self, request: PlanGenerationRequest) -> str:
         canonical_request = top_level_user_request(request.context)
         pending_response = latest_pending_user_response(request.context)
+        # Scoped to reply-driven replans: the helper spans the whole root
+        # context, so any other call must keep the payload byte-identical.
+        all_pending_responses = (
+            pending_user_responses(request.context) if request.reply_driven else []
+        )
         expected_language, language_source = self._language_authority(request.context)
         latest_messages = [
             {"role": message.role, "content": message.content}
@@ -597,6 +602,14 @@ class LLMPlanGenerator(PlanGenerator):
                 if pending_response is not None
                 else None
             ),
+            "pending_responses": [
+                {
+                    "step_id": response.step_id,
+                    "question": response.question,
+                    "answer": response.answer,
+                }
+                for response in all_pending_responses
+            ],
             "output_language_policy": render_structured_request_language_policy(
                 request_field="latest_user_request",
                 pending_field="pending_response",

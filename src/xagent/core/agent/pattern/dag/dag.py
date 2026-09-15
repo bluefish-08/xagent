@@ -391,7 +391,7 @@ class DAGPattern(AgentPattern):
         self.active_step_contexts: dict[str, dict[str, Any]] = {}
         self.step_results: dict[str, Any] = {}
         self.planned_user_message_count = 0
-        self.replan_owed_step_id: str | None = None
+        self.replan_owed_step_ids: list[str] = []
         self.memory_input_text: str | None = None
         self.completion_feedback: str | None = None
         self.completion_replan_count = 0
@@ -904,7 +904,7 @@ class DAGPattern(AgentPattern):
                         )
                     return winner_result
 
-                if self._needs_replan(root_context):
+                if self._reply_awaiting_replan():
                     # An owed replan reuses whatever this batch finishes, so
                     # let it drain and only stop scheduling new steps.
                     hold_scheduling = True
@@ -1171,7 +1171,7 @@ class DAGPattern(AgentPattern):
             "active_step_contexts": dict(self.active_step_contexts),
             "step_results": dict(self.step_results),
             "planned_user_message_count": self.planned_user_message_count,
-            "replan_owed_step_id": self.replan_owed_step_id,
+            "replan_owed_step_ids": list(self.replan_owed_step_ids),
             "memory_input_text": self.memory_input_text,
             "max_concurrency": self.max_concurrency,
             "completion_feedback": self.completion_feedback,
@@ -1227,7 +1227,7 @@ class DAGPattern(AgentPattern):
             active_frame_ids=active_frame_ids,
             control_state={
                 "planned_user_message_count": self.planned_user_message_count,
-                "replan_owed_step_id": self.replan_owed_step_id,
+                "replan_owed_step_ids": list(self.replan_owed_step_ids),
                 "max_concurrency": self.max_concurrency,
             },
         ).to_dict()
@@ -1265,8 +1265,11 @@ class DAGPattern(AgentPattern):
         self.planned_user_message_count = int(
             state.get("planned_user_message_count", 0)
         )
-        owed_step_id = state.get("replan_owed_step_id")
-        self.replan_owed_step_id = str(owed_step_id) if owed_step_id else None
+        owed_step_ids: list[str] = []
+        for owed_step_id in state.get("replan_owed_step_ids") or []:
+            if owed_step_id and str(owed_step_id) not in owed_step_ids:
+                owed_step_ids.append(str(owed_step_id))
+        self.replan_owed_step_ids = owed_step_ids
         stored_memory_input = state.get("memory_input_text")
         if stored_memory_input:
             self.memory_input_text = str(stored_memory_input)
@@ -1394,7 +1397,7 @@ class DAGPattern(AgentPattern):
         if assessment.complete:
             self.status = "completed"
             self.completion_feedback = None
-            self.replan_owed_step_id = None
+            self.replan_owed_step_ids = []
             output = assessment.answer or self._final_output()
             await runtime.checkpoint("dag_completed", context=context, pattern=self)
             return PatternResult(
@@ -1845,7 +1848,7 @@ class DAGPattern(AgentPattern):
         self.plan.validate()
         self._apply_completed_results_to_plan()
         self.planned_user_message_count = self._user_message_count(context)
-        self.replan_owed_step_id = None
+        self.replan_owed_step_ids = []
         if replan:
             runtime.clear_interrupt()
         await runtime.checkpoint(
@@ -1903,18 +1906,15 @@ class DAGPattern(AgentPattern):
     def _reply_awaiting_replan(self) -> bool:
         """A consumed reply no plan has answered yet; unlike the owed check it
         ignores plan completion, so a completion replan still sees it."""
-        return (
-            self.replan_owed_step_id is not None
-            and self.replan_owed_step_id in self.step_results
+        return any(
+            step_id in self.step_results for step_id in self.replan_owed_step_ids
         )
 
     def _reply_replan_owed(self) -> bool:
-        """The plan made before the consumed reply still has work to
-        re-validate, and no live question is waiting on the user."""
         return (
             self._reply_awaiting_replan()
             and not self._all_steps_completed()
-            and self._waiting_step_id() is None
+            and not self.active_step_ids
         )
 
     def _needs_replan(self, context: Any) -> bool:
@@ -1953,6 +1953,9 @@ class DAGPattern(AgentPattern):
             else None
         )
         marker = pending_user_response_marker(waiting_request)
+        if marker is not None:
+            # The answer belongs to this step; the planner reads the pairing.
+            marker = {**marker, "step_id": step_id}
         raw_response_metadata = getattr(response_message, "metadata", None)
         response_metadata = (
             dict(raw_response_metadata)
@@ -1984,10 +1987,9 @@ class DAGPattern(AgentPattern):
 
         self._set_active_step_context(step_id, child_context.to_dict())
         self.planned_user_message_count = len(root_user_messages)
-        # An earlier reply still owed a replan covers this one too; it must
-        # not be overwritten before it is planned.
-        if not self._reply_awaiting_replan():
-            self.replan_owed_step_id = step_id
+        # Every consumed reply stays listed until a plan absorbs them all.
+        if step_id not in self.replan_owed_step_ids:
+            self.replan_owed_step_ids.append(step_id)
         self.status = "running"
         return True
 
