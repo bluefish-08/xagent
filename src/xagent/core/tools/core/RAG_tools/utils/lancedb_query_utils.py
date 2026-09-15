@@ -148,9 +148,9 @@ def list_embeddings_table_names(conn: Any, prefix: str = "embeddings_") -> list[
     return [name for name in list_table_names(conn) if str(name).startswith(prefix)]
 
 
-_FTS_TERM_SEPARATORS = re.compile(
-    r"[\s，。！？；：、（）【】「」『』《》〈〉“”‘’—…～]+"
-)
+# Whitespace and CJK punctuation: indexed tokens of their own, never part of one.
+_FTS_SEPARATORS = r"\s，。！？；：、（）【】「」『』《》〈〉“”‘’—…～"
+_FTS_TERM_CHUNKS = re.compile(rf"[^{_FTS_SEPARATORS}]+")
 # ``+`` and ``#`` survive at a term edge so C++ and C# keep matching.
 _FTS_TERM_EDGES = re.compile(r"^[^\w+#]+|[^\w+#]+$")
 # Guards against a pasted document arriving as one query.
@@ -162,19 +162,26 @@ def build_fts_query(
 ) -> Optional[BooleanQuery]:
     """Build an OR-of-terms FTS query, or ``None`` when the text has no terms.
 
-    Whitespace, CJK punctuation and edge ASCII punctuation are indexed tokens of
-    their own (lance folds ``，`` onto ASCII ``,``), so a term carrying them
-    matches every chunk that contains one. Punctuation inside a term stays:
-    ``COVID-19`` and ``3.5`` are single tokens in the index.
+    Separators and edge ASCII punctuation are indexed tokens of their own (lance
+    folds ``，`` onto ASCII ``,``), so a term carrying them matches every chunk
+    that contains one. Punctuation inside a term stays: ``COVID-19`` and ``3.5``
+    are single tokens in the index.
     """
-    terms: List[str] = []
-    for chunk in _FTS_TERM_SEPARATORS.split(query_text):
-        term = _FTS_TERM_EDGES.sub("", chunk)
-        if re.search(r"\w", term):
-            terms.append(term)
-    terms = list(dict.fromkeys(terms))[:_FTS_MAX_TERMS]
+    terms: Dict[str, str] = {}
+    truncated = False
+    for chunk in _FTS_TERM_CHUNKS.finditer(query_text):
+        term = _FTS_TERM_EDGES.sub("", chunk.group())
+        if not re.search(r"\w", term) or term.casefold() in terms:
+            continue
+        if len(terms) == _FTS_MAX_TERMS:
+            truncated = True
+            break
+        terms[term.casefold()] = term
+
+    if truncated:
+        logger.warning("FTS query truncated to %d terms", _FTS_MAX_TERMS)
     if not terms:
         return None
     return BooleanQuery(
-        [(Occur.SHOULD, MatchQuery(term, text_column)) for term in terms]
+        [(Occur.SHOULD, MatchQuery(term, text_column)) for term in terms.values()]
     )

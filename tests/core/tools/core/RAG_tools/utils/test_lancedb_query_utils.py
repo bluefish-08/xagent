@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from xagent.core.tools.core.RAG_tools.utils.lancedb_query_utils import build_fts_query
@@ -60,15 +62,26 @@ def test_build_fts_query_strips_punctuation_off_the_term_edges(
     assert _terms(query_text) == [(expected, "text")]
 
 
-def test_build_fts_query_drops_duplicate_terms():
-    assert _terms("save save SAVE") == [("save", "text"), ("SAVE", "text")]
+def test_build_fts_query_drops_case_insensitive_duplicates():
+    """The index lower-cases tokens, so these clauses would score the same row twice."""
+    assert _terms("save save SAVE") == [("save", "text")]
 
 
-def test_build_fts_query_caps_the_number_of_terms():
+def test_build_fts_query_caps_the_number_of_terms(caplog):
     """A pasted document must not turn into a thousand-clause query."""
-    built = build_fts_query(" ".join(f"term{i}" for i in range(200)))
+    with caplog.at_level(logging.WARNING):
+        built = build_fts_query(" ".join(f"term{i}" for i in range(200)))
+
     assert built is not None
     assert len(built.queries) == 64
+    assert "truncated to 64 terms" in caplog.text
+
+
+def test_build_fts_query_does_not_warn_when_nothing_is_dropped(caplog):
+    with caplog.at_level(logging.WARNING):
+        build_fts_query(" ".join(f"term{i}" for i in range(64)))
+
+    assert "truncated" not in caplog.text
 
 
 def test_build_fts_query_keeps_single_term_and_column():

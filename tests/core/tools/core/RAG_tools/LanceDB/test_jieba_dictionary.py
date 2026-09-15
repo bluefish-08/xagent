@@ -84,6 +84,17 @@ def test_ensure_jieba_dictionary_warns_instead_of_raising(
     assert "jieba" in caplog.text and "will fail" in caplog.text
 
 
+def test_ensure_jieba_dictionary_removes_a_stale_staging_file(model_home: Path):
+    """A SIGKILL mid-copy leaves one behind; lance would read it as a dictionary."""
+    target = _target(model_home)
+    target.parent.mkdir(parents=True)
+    (target.parent / "dict.txt.99999.tmp").write_bytes(b"half a dictionary")
+
+    assert ensure_jieba_dictionary() is True
+
+    assert sorted(p.name for p in target.parent.iterdir()) == ["dict.txt"]
+
+
 def test_ensure_jieba_dictionary_cleans_up_a_failed_copy(
     model_home: Path, monkeypatch, caplog
 ):
@@ -127,6 +138,18 @@ def test_ensure_jieba_dictionary_once_retries_after_a_failure(
     ensure_jieba_dictionary_once()
 
     assert _target(model_home).read_bytes() == SOURCE.read_bytes()
+
+
+def test_default_model_home_on_windows_uses_localappdata(monkeypatch):
+    """Lance resolves it with dirs::data_local_dir, which is LOCALAPPDATA."""
+    monkeypatch.delenv("LANCE_LANGUAGE_MODEL_HOME", raising=False)
+    monkeypatch.setattr(jieba_dictionary.sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\tester\AppData\Local")
+
+    assert (
+        jieba_dictionary._language_model_home()
+        == Path(r"C:\Users\tester\AppData\Local") / "lance" / "language_models"
+    )
 
 
 def test_default_model_home_follows_the_platform_data_directory(monkeypatch):

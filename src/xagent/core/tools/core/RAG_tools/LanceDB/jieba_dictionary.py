@@ -16,11 +16,11 @@ _installed = False
 
 
 def _default_model_home() -> Path:
-    """Lance's platform data directory, as the Rust ``dirs`` crate resolves it."""
+    """Lance's local data directory, as the Rust ``dirs::data_local_dir`` resolves it."""
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
     elif sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     return base / "lance" / "language_models"
@@ -53,8 +53,14 @@ def ensure_jieba_dictionary() -> bool:
             return True
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Concurrent workers race on the same path; os.replace is atomic, a
-        # partially copied dict.txt would not be.
+        # Concurrent workers race on this path, so the copy lands through an
+        # atomic os.replace; a SIGKILL mid-copy is what strands a staging file.
+        for stale in target.parent.glob("dict.txt.*.tmp"):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         staged = target.with_name(f"dict.txt.{os.getpid()}.tmp")
         try:
             shutil.copyfile(source, staged)
