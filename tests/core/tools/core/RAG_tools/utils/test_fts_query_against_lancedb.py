@@ -113,3 +113,9 @@ def test_repeated_term_does_not_change_the_score(jieba_table: Any):
 @pytest.mark.integration
 def test_punctuation_only_query_builds_nothing(jieba_table: Any):
     assert build_fts_query(" ,. ") is None
+
+
+@pytest.mark.integration
+def test_stop_words_do_not_break_the_search(jieba_table: Any):
+    """A clause holding an index-time stop word fails the whole lance query."""
+    assert _hits(jieba_table, build_fts_query("print an incident report")) == [0]

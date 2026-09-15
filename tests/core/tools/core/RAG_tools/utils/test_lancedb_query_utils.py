@@ -92,3 +92,19 @@ def test_build_fts_query_keeps_single_term_and_column():
 def test_build_fts_query_returns_none_without_terms(query_text: str):
     """No terms means no FTS query: the space token matches every chunk holding one."""
     assert build_fts_query(query_text) is None
+
+
+def test_build_fts_query_drops_english_stop_words():
+    assert _terms("how do I print an incident report") == [
+        ("how", "text"),
+        ("do", "text"),
+        ("I", "text"),
+        ("print", "text"),
+        ("incident", "text"),
+        ("report", "text"),
+    ]
+
+
+@pytest.mark.parametrize("query_text", ["the a an of to", "THE", "  to  "])
+def test_build_fts_query_returns_none_for_stop_words_only(query_text: str):
+    assert build_fts_query(query_text) is None
