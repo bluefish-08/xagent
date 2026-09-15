@@ -68,6 +68,11 @@ def describe_indexes(conn: Any, table_name: str) -> Dict[str, Any]:
         _safe_close_table(table)
 
 
+def _has_fts(snapshot: Dict[str, Any]) -> bool:
+    indexes = snapshot.get("indexes") or {}
+    return any(entry["type"] == "FTS" for entry in indexes.values())
+
+
 def _fts_rebuilt(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
     """Whether the FTS index was actually rewritten.
 
@@ -78,8 +83,7 @@ def _fts_rebuilt(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
     """
     if "error" in before or "error" in after:
         return False
-    fts = [n for n, i in after["indexes"].items() if i["type"] == "FTS"]
-    return bool(fts) and after["version"] > before["version"]
+    return _has_fts(after) and after["version"] > before["version"]
 
 
 def rebuild_fts_indexes(
@@ -105,14 +109,28 @@ def rebuild_fts_indexes(
     if dry_run:
         for name in tables:
             logger.info("[dry-run] %s before: %s", name, describe_indexes(conn, name))
-        return {"tables": tables, "succeeded": [], "failed": [], "dry_run": True}
+        return {
+            "tables": tables,
+            "succeeded": [],
+            "skipped": [],
+            "failed": [],
+            "dry_run": True,
+        }
 
     store = LanceDBVectorIndexStore()
     succeeded: List[str] = []
     failed: List[str] = []
+    skipped: List[str] = []
 
     for name in tables:
         before = describe_indexes(conn, name)
+        # trigger_reindex would still run the full compaction on a table that
+        # carries no FTS index, and rebuild nothing.
+        if "error" not in before and not _has_fts(before):
+            logger.info("%s carries no FTS index; skipping", name)
+            skipped.append(name)
+            continue
+
         started = time.monotonic()
         try:
             ok = store.trigger_reindex(name)
@@ -139,10 +157,12 @@ def rebuild_fts_indexes(
         (succeeded if rebuilt else failed).append(name)
 
     logger.info("Succeeded (%d): %s", len(succeeded), succeeded or "none")
+    logger.info("Skipped (%d): %s", len(skipped), skipped or "none")
     logger.info("Failed (%d): %s", len(failed), failed or "none")
     return {
         "tables": tables,
         "succeeded": succeeded,
+        "skipped": skipped,
         "failed": failed,
         "dry_run": False,
     }

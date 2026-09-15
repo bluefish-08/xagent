@@ -187,3 +187,29 @@ def test_rebuilt_index_counts_even_when_compaction_fails(
 
     assert result["succeeded"] == ["embeddings_a"]
     assert result["failed"] == []
+
+
+def test_skips_tables_without_an_fts_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """trigger_reindex would compact the table and rebuild nothing."""
+
+    class _NoFtsTable(_FakeTable):
+        def list_indices(self) -> List[_FakeIndex]:
+            return []
+
+    conn = _FakeConn(["embeddings_a", "embeddings_b"])
+    opened = conn.open_table
+
+    def open_table(name: str) -> _FakeTable:
+        return (
+            _NoFtsTable(conn.versions[name]) if name == "embeddings_a" else opened(name)
+        )
+
+    monkeypatch.setattr(conn, "open_table", open_table)
+    recorder = _wire(monkeypatch, conn)
+
+    result = mod.rebuild_fts_indexes(conn=conn)
+
+    assert recorder.calls == ["embeddings_b"]
+    assert result["skipped"] == ["embeddings_a"]
+    assert result["succeeded"] == ["embeddings_b"]
+    assert result["failed"] == []
