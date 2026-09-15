@@ -173,7 +173,9 @@ def build_fts_query(
     that contains one. Punctuation inside a term stays: ``COVID-19`` and ``3.5``
     are single tokens in the index. English stop words are dropped: tantivy
     removes them at index time, so a clause holding one matches nothing and
-    makes lance fail the entire search.
+    makes lance fail the entire search. That removes the most common trigger,
+    not the class -- any clause whose term tokenizes to nothing fails the same
+    way, for instance a term longer than lance's ``max_token_length``.
     """
     terms: Dict[str, str] = {}
     truncated = False

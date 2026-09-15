@@ -23,6 +23,7 @@ DOCS = [
 ]
 # Single words, so every tokenizer -- including the legacy ngram one -- agrees
 # on them; multi-word queries are where the builder deliberately differs.
+# No stop word here: the builder drops those, so the raw string is not its equal.
 QUERIES = ["incident", "Tickets", "manager", "Timesheets", "nonexistent"]
 
 
@@ -50,6 +51,14 @@ def _hits(table: Any, query: Any) -> List[int]:
 @pytest.fixture
 def jieba_table(tmp_path: Path) -> Any:
     return _table(tmp_path, "jieba_table", base_tokenizer="jieba/default")
+
+
+@pytest.fixture
+def jieba_table_with_unindexed_row(tmp_path: Path) -> Any:
+    """Rows added after the index is built are what make lance fail an empty clause."""
+    table = _table(tmp_path, "jieba_tail", base_tokenizer="jieba/default")
+    table.add([{"id": 6, "text": "Printers are listed under Settings."}])
+    return table
 
 
 @pytest.mark.integration
@@ -116,6 +125,7 @@ def test_punctuation_only_query_builds_nothing(jieba_table: Any):
 
 
 @pytest.mark.integration
-def test_stop_words_do_not_break_the_search(jieba_table: Any):
-    """A clause holding an index-time stop word fails the whole lance query."""
-    assert _hits(jieba_table, build_fts_query("print an incident report")) == [0]
+def test_stop_words_do_not_break_the_search(jieba_table_with_unindexed_row: Any):
+    """A stop word in the query no longer fails the whole lance query."""
+    built = build_fts_query("print an incident report")
+    assert _hits(jieba_table_with_unindexed_row, built) == [0]
