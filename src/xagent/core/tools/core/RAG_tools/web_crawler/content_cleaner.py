@@ -198,6 +198,12 @@ class ContentCleaner:
             if isinstance(following, Tag) and following.name in ("a", "img"):
                 element.insert_after(NavigableString(" "))
 
+        # html2text strips the trailing space off the first text run inside an
+        # emphasis tag and refuses to restore it before an <a>; the href is
+        # dropped anyway, so unwrap links and only their text reaches html2text.
+        for element in soup.find_all("a"):
+            element.unwrap()
+
         h2t = html2text.HTML2Text()
         h2t.body_width = 0  # No line wrapping
         # Drop URLs, keep their text: a signed CDN link is hundreds of characters
