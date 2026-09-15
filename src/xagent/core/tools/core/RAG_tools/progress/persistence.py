@@ -69,8 +69,10 @@ class ProgressPersistence:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
         except Exception as e:
+            # %r: a task id carrying a lone surrogate from os.fsdecode cannot be
+            # encoded by a UTF-8 log handler.
             logger.error(
-                "Failed to save task progress for %s to %s: %s",
+                "Failed to save task progress for %r to %s: %s",
                 task_progress.task_id,
                 file_path,
                 e,
@@ -105,7 +107,7 @@ class ProgressPersistence:
             return TaskProgress(**data)
 
         except Exception as e:
-            logger.error("Failed to load task progress for %s: %s", task_id, e)
+            logger.error("Failed to load task progress for %r: %s", task_id, e)
             return None
 
     def delete_task_progress(self, task_id: str) -> bool:
@@ -124,7 +126,7 @@ class ProgressPersistence:
                 return True
             return False
         except Exception as e:
-            logger.error("Failed to delete task progress for %s: %s", task_id, e)
+            logger.error("Failed to delete task progress for %r: %s", task_id, e)
             return False
 
     def list_active_tasks(
