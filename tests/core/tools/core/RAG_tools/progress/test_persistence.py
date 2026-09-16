@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -233,7 +234,7 @@ class TestProgressPersistence:
         assert self.persistence.load_task_progress(task_id) is None
 
     def test_long_task_ids_do_not_collide(self):
-        """Two long IDs sharing a prefix must map to different files."""
+        """Two long IDs sharing a prefix get different files (64-bit digest)."""
         prefix = "ingest_docs_" + "x" * 300
         first, second = f"{prefix}_a", f"{prefix}_b"
 
@@ -263,7 +264,7 @@ class TestProgressPersistence:
 def test_multibyte_task_id_filename_stays_under_the_byte_cap(tmp_path):
     """A CJK collection name is 3 bytes per character, so cap bytes not characters."""
     persistence = ProgressPersistence(storage_dir=str(tmp_path))
-    # Under the 250-character budget but over it in bytes, so only a byte cap catches it.
+    # 250 characters is the wrong unit: this id is under it, over the 250-byte budget.
     first = "ingest_知识库" + "文档" * 60
     second = "ingest_知识库" + "文档" * 59 + "报告"
     assert len(first) < 250 < len(first.encode("utf-8"))
@@ -273,6 +274,18 @@ def test_multibyte_task_id_filename_stays_under_the_byte_cap(tmp_path):
 
     assert len(first_path.name.encode("utf-8")) <= 255
     assert first_path != second_path
+
+    persistence.save_task_progress(
+        TaskProgress(
+            task_id=first,
+            task_type="ingestion",
+            status=DocumentProcessingStatus.RUNNING,
+        )
+    )
+    assert first_path.exists()
+    assert persistence.load_task_progress(first).task_id == first
+    assert persistence.delete_task_progress(first) is True
+    assert persistence.load_task_progress(first) is None
 
 
 def test_task_id_at_the_byte_cap_keeps_its_legacy_filename(tmp_path):
@@ -322,6 +335,7 @@ def test_surrogate_task_id_is_hashable_and_save_reports_a_persistence_error(tmp_
             )
         )
     assert isinstance(excinfo.value.__cause__, UnicodeEncodeError)
+    assert [path.name for path in tmp_path.iterdir() if path.is_file()] == []
 
 
 def test_save_wraps_filename_construction_failures(tmp_path):
@@ -342,3 +356,23 @@ def test_save_wraps_filename_construction_failures(tmp_path):
             )
         )
     assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "None" not in str(excinfo.value)
+    assert excinfo.value.details["file_path"] == str(tmp_path)
+
+
+def test_shrunken_byte_cap_does_not_slice_the_prefix_backwards(tmp_path):
+    """A budget below the digest length must not silently emit an overlong name."""
+    persistence = ProgressPersistence(storage_dir=str(tmp_path))
+    persistence.MAX_FILENAME_BYTES = 10
+    task_id = "ingest_docs_" + "a" * 100
+
+    digest = hashlib.sha256(task_id.encode()).hexdigest()[:16]
+    assert persistence._get_task_file_path(task_id).name == f"-{digest}.json"
+
+
+def test_unnameable_task_ids_share_the_unknown_file(tmp_path):
+    """Pre-existing on main: every id that sanitizes to nothing collides on unknown.json."""
+    persistence = ProgressPersistence(storage_dir=str(tmp_path))
+
+    assert persistence._get_task_file_path("").name == "unknown.json"
+    assert persistence._get_task_file_path("///").name == "unknown.json"

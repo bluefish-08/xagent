@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -65,23 +67,33 @@ class ProgressPersistence:
                 "metadata": task_progress.metadata,
             }
 
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            # A truncated file would survive as broken JSON that
+            # cleanup_old_tasks can never date, and so never remove. mkstemp
+            # rather than a name derived from file_path: two writers racing on
+            # one task id would share that name, and it has no byte budget left.
+            fd, tmp_name = tempfile.mkstemp(dir=self.storage_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_name, file_path)
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
 
         except Exception as e:
+            location = self.storage_dir if file_path is None else file_path
             # %r: a task id carrying a lone surrogate from os.fsdecode cannot be
             # encoded by a UTF-8 log handler.
             logger.error(
                 "Failed to save task progress for %r to %s: %s",
                 task_progress.task_id,
-                file_path,
+                location,
                 e,
             )
             raise ProgressPersistenceError(
-                f"Failed to save task progress to {file_path}: {e}",
+                f"Failed to save task progress to {location}: {e}",
                 details={
                     "task_id": task_progress.task_id,
-                    "file_path": str(file_path),
+                    "file_path": str(location),
                     "error": str(e),
                 },
             ) from e
@@ -287,10 +299,13 @@ class ProgressPersistence:
         encoded = safe_task_id.encode("utf-8")
         if len(encoded) > budget:
             # surrogatepass: an OS path with undecodable bytes must still hash.
+            # 64-bit digest, so ids differing before the cap differ in practice.
             digest = hashlib.sha256(
                 task_id.encode("utf-8", "surrogatepass")
             ).hexdigest()[:16]
-            prefix = encoded[: budget - len(digest) - 1].decode("utf-8", "ignore")
+            prefix = encoded[: max(budget - len(digest) - 1, 0)].decode(
+                "utf-8", "ignore"
+            )
             safe_task_id = f"{prefix}-{digest}"
 
         return self.storage_dir / f"{safe_task_id}{suffix}"
