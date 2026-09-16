@@ -531,7 +531,7 @@ def test_apply_rerank_dashscope_failure_keeps_fused_order(
 
     # Need rerank_model_id set for _resolve_unified_rerank to not short-circuit
     cfg = SearchConfig(embedding_model_id="test-embed", rerank_model_id="qwen3-rerank")
-    monkeypatch.delenv("DASHSCOPE_RERANK_ENABLED", raising=False)
+    monkeypatch.setenv("DASHSCOPE_RERANK_ENABLED", "false")
 
     # Mock _resolve_unified_rerank to return our mock
     with patch(
