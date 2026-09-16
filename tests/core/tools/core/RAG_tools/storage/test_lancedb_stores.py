@@ -4225,7 +4225,12 @@ def test_rebuild_text_fts_index_rebuilds_without_compacting(
     assert outcome is FtsRebuildOutcome.REBUILT
     assert seen == ["embeddings_test"]
     mock_table.create_fts_index.assert_called_once()
-    assert mock_table.create_fts_index.call_args.kwargs["replace"] is True
+    kwargs = mock_table.create_fts_index.call_args.kwargs
+    assert kwargs["replace"] is True
+    # The literal, not DEFAULT_INDEX_POLICY: the whole migration exists to put
+    # this tokenizer into the index, so dropping the policy must fail here.
+    assert kwargs["base_tokenizer"] == "jieba/default"
+    assert kwargs["with_position"] is True
     mock_table.optimize.assert_not_called()
 
 

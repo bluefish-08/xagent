@@ -346,7 +346,7 @@ The script talks to the same database as the application, so it must run with th
 
 Rebuilding reads every indexed row of a table and writes a new index, so size the window by row count, not by table count. It does not rewrite the data files and does not compact: compaction remains the ingestion path's job.
 
-The rebuild takes the same per-table lock that compaction uses, so a table being compacted by a concurrent ingestion is reported as unfinished rather than rebuilt. Run this while ingestion is idle, or re-run afterwards for the tables that were busy. Search keeps serving the old index until the new one commits; no maintenance window is required for readers.
+The rebuild takes the same per-table lock that compaction uses, so a table being compacted by a concurrent ingestion is reported as unfinished rather than rebuilt. That lock is an advisory lock file inside a local `LANCEDB_DIR`: against a remote URI, a directory that is not local, or when the lock file cannot be created, both the rebuild and compaction proceed unlocked and can overlap. Run this while ingestion is idle, or re-run afterwards for the tables that were busy. Search keeps serving the old index until the new one commits; no maintenance window is required for readers.
 
 ### Deployment and migration steps
 
@@ -368,14 +368,14 @@ The dry run classifies every `embeddings_*` table as would-rebuild, would-skip (
 Exit codes:
 
 - `0` — every table that needed a rebuild was rebuilt.
-- `1` — at least one table was not rebuilt: the rebuild raised, or the table's lock was held elsewhere. The other tables still completed.
+- `1` — at least one table was not rebuilt: the rebuild raised, the table's lock was held elsewhere, or the table could not be read at all. The other tables still completed. An unreadable table is classified before any rebuild runs, so `--dry-run` also exits `1` when one is present.
 - `2` — the run never started, for example an unreadable database or a `--table` value that is not an embeddings table.
 
 The script is safe to re-run and rebuilding an already-rebuilt index is not an error, so recovery from exit code 1 is to fix the cause and run it again; with `--table` to retry only what failed.
 
 ### Verification and monitoring
 
-Each table is logged with its index state before and after, so the run itself is the record: compare `version` and `indexed_rows` in the two lines, and confirm the closing summary reports the table under `Succeeded`. A table that was rebuilt reports `unindexed_rows: 0` afterwards.
+Each table is logged with its index state before and after, so the run itself is the record: compare `version` and `indexed_rows` in the two lines, and confirm the closing summary reports the table under `Succeeded`. A rebuilt table normally reports `unindexed_rows: 0` afterwards, but treat the `Succeeded` list as the verdict: when the statistics cannot be read the entry carries `stats_error` instead of row counts, which says nothing about the rebuild.
 
 The tokenizer cannot be read back out of a built index, so there is no stored value to assert against. The behavioural check is a Chinese multi-word keyword search against a collection on that table: before the rebuild it returns nothing or unrelated hits, after it returns the documents containing those words.
 

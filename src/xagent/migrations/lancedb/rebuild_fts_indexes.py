@@ -10,6 +10,10 @@ Rebuilds go through ``LanceDBVectorIndexStore.rebuild_text_fts_index``, which
 replaces the index in place, reports what it did, and raises on failure. This
 script deliberately does not compact: compaction is ``compact_tables``' job and
 runs on ingestion.
+
+Manual, unlike the backfills the ``LANCEDB_AUTO_MIGRATE`` startup runner starts:
+this one re-reads every indexed row of every embeddings table, which belongs in
+a window the operator picks rather than in a server boot.
 """
 
 from __future__ import annotations
@@ -66,6 +70,8 @@ def describe_indexes(conn: Any, table_name: str) -> Dict[str, Any]:
                 stats = table.index_stats(idx.name)
                 entry["indexed_rows"] = stats.num_indexed_rows
                 entry["unindexed_rows"] = stats.num_unindexed_rows
+            # Also catches index_stats() returning None, which is in its type:
+            # a snapshot without row counts still has to name the index.
             except Exception as e:  # noqa: BLE001
                 entry["stats_error"] = str(e)
             indexes[idx.name] = entry
@@ -103,10 +109,14 @@ def build_plan(conn: Any, tables: List[str]) -> List[Planned]:
 def rebuild_fts_indexes(
     table: Optional[str] = None,
     dry_run: bool = False,
-    conn: Any = None,
 ) -> Dict[str, Any]:
-    """Rebuild the FTS index of every ``embeddings_*`` table, or just one."""
-    conn = conn or get_connection_from_env()
+    """Rebuild the FTS index of every ``embeddings_*`` table, or just one.
+
+    Takes no connection: the store resolves its own from the process-wide pool
+    and refuses to cache one per instance, so an injected handle would only let
+    the plan and the rebuild address different databases.
+    """
+    conn = get_connection_from_env()
     tables = list_embeddings_tables(conn)
 
     if table is not None:
@@ -116,10 +126,17 @@ def rebuild_fts_indexes(
             )
         tables = [table]
 
-    target_params = {"with_position": True, **(DEFAULT_INDEX_POLICY.fts_params or {})}
     plan = build_plan(conn, tables)
-    logger.info("Tables examined (%d): %s", len(tables), tables or "none")
-    logger.info("Target FTS params: %s", target_params)
+    if tables:
+        logger.info("Tables examined (%d): %s", len(tables), tables)
+    else:
+        # Silence here is indistinguishable from success, and the usual cause
+        # is a LANCEDB_DIR that does not match the backend's.
+        logger.warning(
+            "No %s* tables found; check that LANCEDB_DIR matches the backend's",
+            EMBEDDINGS_PREFIX,
+        )
+    logger.info("Target FTS params: %s", DEFAULT_INDEX_POLICY.fts_params)
     for item in plan:
         logger.info("%s: %s, before: %s", item.name, item.decision, item.snapshot)
 
@@ -146,8 +163,10 @@ def rebuild_fts_indexes(
         try:
             outcome = store.rebuild_text_fts_index(item.name)
         except BaseException as e:  # noqa: BLE001
-            # BaseException: a pyo3 Rust panic is not an Exception, and a
-            # panicking rebuild must not be reported as a success.
+            # BaseException only here: a pyo3 Rust panic is not an Exception,
+            # and a panicking rebuild must not be reported as a success. The
+            # narrow catches elsewhere are deliberate -- they wrap reads that
+            # must still let Ctrl-C and SystemExit through untouched.
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             logger.error("%s: rebuild raised %s: %s", item.name, type(e).__name__, e)
