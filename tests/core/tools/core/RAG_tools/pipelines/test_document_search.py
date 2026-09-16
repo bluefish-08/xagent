@@ -531,6 +531,8 @@ def test_apply_rerank_dashscope_failure_keeps_fused_order(
 
     # Need rerank_model_id set for _resolve_unified_rerank to not short-circuit
     cfg = SearchConfig(embedding_model_id="test-embed", rerank_model_id="qwen3-rerank")
+    monkeypatch.delenv("DASHSCOPE_RERANK_ENABLED", raising=False)
+
     # Mock _resolve_unified_rerank to return our mock
     with patch(
         "xagent.core.tools.core.RAG_tools.pipelines.document_search._resolve_unified_rerank",
@@ -542,7 +544,7 @@ def test_apply_rerank_dashscope_failure_keeps_fused_order(
 
     assert used_rerank is False
     assert [r.text for r in reranked] == ["doc1", "doc2"]
-    assert any("rerank failed" in w and "keeping fused order" in w for w in warnings)
+    assert warnings == ["MagicMock rerank failed: DashScope API error"]
 
 
 def test_apply_rerank_no_rerank_config(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -171,8 +171,7 @@ def _try_unified_rerank(
         if not ordered_results:
             provider_name = type(rerank_model).__name__
             warnings.append(
-                f"{provider_name} rerank returned no recognizable documents; "
-                "keeping the fused order."
+                f"{provider_name} rerank returned no recognizable documents."
             )
             return None
 
@@ -190,8 +189,8 @@ def _try_unified_rerank(
         TypeError,
     ) as exc:
         provider_name = type(rerank_model).__name__
-        logger.warning("%s rerank failed: %s, keeping fused order", provider_name, exc)
-        warnings.append(f"{provider_name} rerank failed: {exc}, keeping fused order")
+        logger.warning("%s rerank failed: %s", provider_name, exc)
+        warnings.append(f"{provider_name} rerank failed: {exc}")
         return None
 
 
@@ -414,9 +413,7 @@ def _try_dashscope_rerank(
         ordered_results = _map_reranked_pairs_to_results(reranked_pairs, results)
 
         if not ordered_results:
-            warnings.append(
-                "DashScope rerank returned no recognizable documents; keeping the fused order."
-            )
+            warnings.append("DashScope rerank returned no recognizable documents.")
             return None
 
         # After rerank we always truncate to the user-requested top_k. The
@@ -432,8 +429,8 @@ def _try_dashscope_rerank(
         ValueError,
         TypeError,
     ) as exc:
-        logger.warning("DashScope rerank failed: %s, keeping fused order", exc)
-        warnings.append(f"DashScope rerank failed: {exc}, keeping fused order")
+        logger.warning("DashScope rerank failed: %s", exc)
+        warnings.append(f"DashScope rerank failed: {exc}")
         return None
 
 
