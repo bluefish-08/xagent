@@ -21,7 +21,7 @@ from ...context.enrichment import (
 )
 from ...context.execution import tool_evidence_state
 from ...frame import ExecutionFrame, ExecutionSnapshot, ExecutionStatus
-from ...grounding import evidence_facts, grounding_rule
+from ...grounding import evidence_facts, grounding_rule, step_intent_not_fact_rule
 from ...language import (
     OUTPUT_LANGUAGE_METADATA_KEY,
     effective_output_language,
@@ -1806,34 +1806,7 @@ class DAGPattern(AgentPattern):
             "step. Do not inspect, verify, revise, optimize, regenerate, or perform "
             "downstream work unless the termination condition explicitly requires "
             "that work.\n\n"
-            "STEP INTENT IS NOT A SOURCE OF FACTS\n"
-            "The step title, description, termination condition, and completion "
-            "evidence declare the work to perform and the shape of the result to "
-            "report. They are not a source of facts about that result's content. "
-            "Where they read as if some fact, "
-            "finding, conclusion, recommendation, or workaround were already known, "
-            "that is an expectation of what this step may establish, not something "
-            "it has established.\n"
-            "If they presuppose a fact, conclusion, or solution that this step's "
-            "tool results and dependency results do not support, or that those "
-            "results contradict, the tool results and dependency results decide and "
-            "the presupposed content must not reach your answer. This applies only "
-            "to facts that were supposed to come from tool results or dependency "
-            "results. Facts the user gave in their own messages, including ones the "
-            "plan copied out of a user message, remain usable exactly as given, and "
-            "this rule does not restrict how you word them. It restricts the facts "
-            "asserted inside content this step asks you to compose, not your choice "
-            "of wording for that content.\n"
-            "When the information this step needs turns out to be unavailable, or a "
-            "dependency result does not support this step's premise, report that gap "
-            "the way your own agent instructions tell you to report it, and treat "
-            "that report as satisfying this termination condition: it is a complete "
-            "and correct result for this step. Do not restate the presupposed "
-            "content to fill the gap, and do not retry or stall trying to make the "
-            "presupposition true. Do not answer emptily or evasively either: a "
-            "description that lays out conditional branches is still valid "
-            "instruction, so follow the branch the actual results support and report "
-            "every part of this step those results do support.\n\n"
+            f"{step_intent_not_fact_rule()}\n\n"
             f"{dependency_note}\n\n"
             "Execute only the current DAG step. The current step title and "
             "description plus the termination condition define the entire "

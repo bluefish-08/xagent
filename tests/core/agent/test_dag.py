@@ -28,6 +28,7 @@ from xagent.core.agent.clarification import (
 )
 from xagent.core.agent.context import execution as execution_module
 from xagent.core.agent.context.enrichment import MEMORY_CONTEXT_METADATA_KEY
+from xagent.core.agent.grounding import step_intent_not_fact_rule
 from xagent.core.agent.language import (
     OUTPUT_LANGUAGE_METADATA_KEY,
     OUTPUT_LANGUAGE_SOURCE_METADATA_KEY,
@@ -38,6 +39,7 @@ from xagent.core.agent.pattern.dag import dag as dag_module
 from xagent.core.agent.pattern.dag.dag import _DAGStepRuntime
 from xagent.core.agent.pattern.dag.plan_generator import (
     PLAN_GENERATION_REQUIRED_TOOL_MESSAGE,
+    PRESUPPOSED_ANSWER_CLAUSE,
     PlanLanguageMismatchError,
 )
 from xagent.core.memory.core import MemoryNote as StoredMemoryNote
@@ -2306,23 +2308,11 @@ async def test_dag_step_appends_current_step_boundary_after_parent_context() -> 
     )
     assert "your next action must be final_answer" in messages[-1]["content"]
     instruction = messages[-1]["content"]
-    assert instruction.index(
-        "STEP INTENT IS NOT A SOURCE OF FACTS"
-    ) > instruction.index("TERMINATION CONDITION - AUTHORITATIVE STOP RULE")
-    assert (
-        "The step title, description, termination condition, and completion "
-        "evidence declare the work to perform and the shape of the result to "
-        "report." in instruction
-    )
-    assert "the tool results and dependency results decide" in instruction
-    assert "remain usable exactly as given" in instruction
-    assert (
-        "It restricts the facts asserted inside content this step asks you to "
-        "compose, not your choice of wording for that content." in instruction
-    )
-    assert "does not restrict text you are asked to compose" not in instruction
-    assert "treat that report as satisfying this termination condition" in instruction
-    assert "conditional branches is still valid instruction" in instruction
+    intent_rule = step_intent_not_fact_rule()
+    stop_heading = "TERMINATION CONDITION - AUTHORITATIVE STOP RULE"
+    assert intent_rule in instruction
+    assert stop_heading in instruction
+    assert instruction.index(intent_rule) > instruction.index(stop_heading)
     assert "Execute only the current DAG step" in messages[-1]["content"]
     assert (
         "Do not infer extra work from the overall user goal" in messages[-1]["content"]
@@ -4467,6 +4457,9 @@ async def test_plan_generator_bars_presupposed_answers_from_step_fields() -> Non
         "branch" in system_prompt
     )
     assert "counts as that step completing normally" in system_prompt
+    assert PRESUPPOSED_ANSWER_CLAUSE in system_prompt
+    for kind in ("fact", "finding", "conclusion", "recommendation", "workaround"):
+        assert kind in PRESUPPOSED_ANSWER_CLAUSE
 
     properties = generator._plan_tool_schema()["function"]["parameters"]["properties"][
         "steps"
@@ -4478,7 +4471,80 @@ async def test_plan_generator_bars_presupposed_answers_from_step_fields() -> Non
     assert (
         "Do not encode the answer" in properties["termination_condition"]["description"]
     )
-    assert "must not state or pre-write a fact" in properties["task"]["description"]
+    assert "must not state or pre-write" in properties["task"]["description"]
+    for field in ("task", "description", "termination_condition"):
+        assert PRESUPPOSED_ANSWER_CLAUSE in properties[field]["description"]
+
+
+@pytest.mark.asyncio
+async def test_replan_prompt_qualifies_previous_plan_as_intent_not_fact() -> None:
+    """previous_plan is the plan a completion assessment just rejected, and its
+    prose still reaches the replanner for id and continuity reuse."""
+    generator = LLMPlanGenerator()
+    context = ExecutionContext(execution_id="dag-replan-intent")
+    context.add_user_message("how do I get a printout of an incident?")
+    previous_plan = build_plan(
+        PlanStep(
+            id="summarize",
+            task="Summarize printing instructions",
+            description="If nothing is found, advise using Ctrl+P.",
+            termination_condition="The answer names a browser printing workaround.",
+            completion_evidence="The answer names the printing path.",
+            status="completed",
+        )
+    )
+    llm = PlanLLM(
+        plan_tool_response(
+            [
+                {
+                    "id": "summarize",
+                    "task": "Summarize whatever the lookup returned",
+                    "dependencies": [],
+                    "termination_condition": "Stop after reporting the lookup result.",
+                    "completion_evidence": "The lookup result was reported.",
+                    "tool_names": [],
+                }
+            ]
+        )
+    )
+
+    await generator.generate_plan(
+        request=PlanGenerationRequest(
+            context=context,
+            execution_id="dag-replan-intent",
+            replan=True,
+            previous_plan=previous_plan,
+            available_tool_names=[],
+        ),
+        llm=llm,
+    )
+
+    system_prompt = llm.calls[0]["messages"][0]["content"]
+    assert (
+        "The previous_plan field is the prior version's declared execution "
+        "intent, not established fact" in system_prompt
+    )
+    assert "Reuse it for step ids, ordering, and continuity only" in system_prompt
+    assert (
+        "do not carry a conclusion, recommendation, or workaround stated in that "
+        "text into the new plan or into the final answer unless "
+        "completed_step_results supports it." in system_prompt
+    )
+    assert "Ctrl+P" in llm.calls[0]["messages"][1]["content"]
+
+
+def test_step_intent_rule_forms_state_the_same_rule() -> None:
+    full = step_intent_not_fact_rule()
+    compact = step_intent_not_fact_rule(compact=True)
+    assert full.startswith("STEP INTENT IS NOT A SOURCE OF FACTS\n")
+    for form in (full, compact):
+        assert "termination condition" in form
+        assert "completion evidence" in form
+        assert "declare the work to perform" in form
+        assert "presuppose a fact" in form
+        assert "must not reach your answer" in form
+        assert "report" in form and "gap" in form
+        assert "Facts the user gave in their own messages" in form
 
 
 @pytest.mark.asyncio
@@ -6777,9 +6843,7 @@ async def test_restored_dag_step_instruction_drops_stale_language_policy(
     assert instruction != stale_instruction
     assert "Output language: Simplified Chinese" not in instruction
     # A restored step must not run without the fact-source rule.
-    assert "STEP INTENT IS NOT A SOURCE OF FACTS" in instruction
-    assert "the tool results and dependency results decide" in instruction
-    assert "treat that report as satisfying this termination condition" in instruction
+    assert step_intent_not_fact_rule() in instruction
 
 
 _FILE_REFERENCE_BLOCK = (

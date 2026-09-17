@@ -38,6 +38,12 @@ PLAN_GENERATION_REQUIRED_TOOL_MESSAGE = (
     "Plan generation failed because the model did not return the required "
     "planning tool call. Please retry."
 )
+# Shared by the planner system prompt and the task/description/
+# termination_condition schema descriptions so their coverage cannot drift apart.
+PRESUPPOSED_ANSWER_CLAUSE = (
+    "a fact, finding, conclusion, recommendation, or workaround that only "
+    "this step's own tool results can establish"
+)
 
 
 class PlanValidationError(ValueError):
@@ -295,9 +301,8 @@ class LLMPlanGenerator(PlanGenerator):
                     "and the shape of the result, never about the substance of "
                     "information the step has not obtained yet: description and "
                     "termination_condition are declarations of execution intent, so "
-                    "they must not state, assume, or pre-write any fact, finding, "
-                    "conclusion, recommendation, or workaround that only this step's "
-                    "own tool results can establish. Facts the user already supplied "
+                    "they must not state, assume, or pre-write "
+                    f"{PRESUPPOSED_ANSWER_CLAUSE}. Facts the user already supplied "
                     "in their messages may be carried into a step as given. When a "
                     "step's outcome depends on what it finds, write only the "
                     "decision the executor must make, not the answer for each "
@@ -359,7 +364,15 @@ class LLMPlanGenerator(PlanGenerator):
                     "self-contained execution plan, not a delta: every "
                     "dependency id must also appear in the returned steps. "
                     "Include completed steps that new work depends on so their "
-                    "results can be reused."
+                    "results can be reused. The previous_plan field is the prior "
+                    "version's declared execution intent, not established fact: its "
+                    "task, description, termination_condition, and "
+                    "completion_evidence state what that plan meant to do, and a "
+                    "step in it was just judged incomplete. Reuse it for step ids, "
+                    "ordering, and continuity only; do not carry a conclusion, "
+                    "recommendation, or workaround stated in that text into the new "
+                    "plan or into the final answer unless completed_step_results "
+                    "supports it."
                     + (
                         " pending_responses are the user's authoritative "
                         "answers to questions steps asked, newest last: if "
@@ -538,10 +551,7 @@ class LLMPlanGenerator(PlanGenerator):
                                             "Short title naming the work this step "
                                             "performs. It reaches the step executor "
                                             "as instruction, so it must not state or "
-                                            "pre-write a fact, finding, conclusion, "
-                                            "recommendation, or workaround that only "
-                                            "this step's own tool results can "
-                                            "establish."
+                                            f"pre-write {PRESUPPOSED_ANSWER_CLAUSE}."
                                         ),
                                     },
                                     "dependencies": {
@@ -556,10 +566,8 @@ class LLMPlanGenerator(PlanGenerator):
                                             "perform and the shape of the result, "
                                             "not the substance of information this "
                                             "step has not obtained yet. Do not state "
-                                            "or pre-write a fact, finding, "
-                                            "conclusion, recommendation, or "
-                                            "workaround that only this step's own "
-                                            "tool results can establish; facts the "
+                                            f"or pre-write {PRESUPPOSED_ANSWER_CLAUSE}"
+                                            "; facts the "
                                             "user already supplied may be restated. "
                                             "When the outcome depends on what the "
                                             "step finds, write the decision to make, "
@@ -575,9 +583,8 @@ class LLMPlanGenerator(PlanGenerator):
                                             "final_answer should report. Avoid vague "
                                             "conditions such as 'when complete'. Do "
                                             "not encode the answer: it must not "
-                                            "assert or presuppose a fact, conclusion, "
-                                            "or workaround that only this step's own "
-                                            "tool results can establish. If the "
+                                            "assert or presuppose "
+                                            f"{PRESUPPOSED_ANSWER_CLAUSE}. If the "
                                             "needed information may be unavailable, "
                                             "or a prior result may not support this "
                                             "step's premise, treat reporting that gap "
