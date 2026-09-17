@@ -532,7 +532,18 @@ class LLMPlanGenerator(PlanGenerator):
                                 "type": "object",
                                 "properties": {
                                     "id": {"type": "string"},
-                                    "task": {"type": "string"},
+                                    "task": {
+                                        "type": "string",
+                                        "description": (
+                                            "Short title naming the work this step "
+                                            "performs. It reaches the step executor "
+                                            "as instruction, so it must not state or "
+                                            "pre-write a fact, finding, conclusion, "
+                                            "recommendation, or workaround that only "
+                                            "this step's own tool results can "
+                                            "establish."
+                                        ),
+                                    },
                                     "dependencies": {
                                         "type": "array",
                                         "items": {"type": "string"},

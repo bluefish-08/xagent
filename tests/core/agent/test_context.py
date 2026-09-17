@@ -818,11 +818,12 @@ def test_get_messages_for_llm_uses_compact_dag_output_language_policy() -> None:
     assert "Create two posters." not in system_content
     assert "Only execute the current DAG step" in system_content
     assert (
-        "The step description above declares the work to perform, not facts about "
-        "the result." in system_content
+        "The step title and description above, and this step's termination "
+        "condition and completion evidence, declare the work to perform, not facts "
+        "about the result." in system_content
     )
     assert (
-        "presupposes a fact, conclusion, or solution that this step's tool results "
+        "presuppose a fact, conclusion, or solution that this step's tool results "
         "and dependency results do not support" in system_content
     )
     assert "treat that report as this step done" in system_content

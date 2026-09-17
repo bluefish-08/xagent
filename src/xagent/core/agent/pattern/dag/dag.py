@@ -1566,16 +1566,14 @@ class DAGPattern(AgentPattern):
             ),
             "authoritative_user_requests": authoritative_user_requests,
             "messages": latest_messages,
-            # Execution-intent fields (description, termination_condition,
-            # completion_evidence, tool_names) are withheld here: this call
-            # writes the user-facing answer, so it must not source facts from
-            # what the planner intended before any tool ran.
+            # This call writes the user-facing answer, so it gets structure
+            # only: planner prose is never a fact source here, and `status`
+            # is always "completed" -- its sole entry requires that.
             "plan": (
                 {
                     "steps": [
                         {
                             "id": step.id,
-                            "task": step.task,
                             "dependencies": list(step.dependencies),
                             "status": step.status,
                         }
@@ -1809,9 +1807,10 @@ class DAGPattern(AgentPattern):
             "downstream work unless the termination condition explicitly requires "
             "that work.\n\n"
             "STEP INTENT IS NOT A SOURCE OF FACTS\n"
-            "The step description and termination condition declare the work to "
-            "perform and the shape of the result to report. They are not a source "
-            "of facts about that result's content. Where they read as if some fact, "
+            "The step title, description, termination condition, and completion "
+            "evidence declare the work to perform and the shape of the result to "
+            "report. They are not a source of facts about that result's content. "
+            "Where they read as if some fact, "
             "finding, conclusion, recommendation, or workaround were already known, "
             "that is an expectation of what this step may establish, not something "
             "it has established.\n"
@@ -1822,7 +1821,9 @@ class DAGPattern(AgentPattern):
             "to facts that were supposed to come from tool results or dependency "
             "results. Facts the user gave in their own messages, including ones the "
             "plan copied out of a user message, remain usable exactly as given, and "
-            "this rule does not restrict text you are asked to compose.\n"
+            "this rule does not restrict how you word them. It restricts the facts "
+            "asserted inside content this step asks you to compose, not your choice "
+            "of wording for that content.\n"
             "When the information this step needs turns out to be unavailable, or a "
             "dependency result does not support this step's premise, report that gap "
             "the way your own agent instructions tell you to report it, and treat "

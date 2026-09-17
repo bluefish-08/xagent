@@ -413,6 +413,7 @@ def test_completion_assessment_plan_withholds_execution_intent_fields() -> None:
     Step 2 of the production incident carried a Ctrl+P workaround in its
     description and termination_condition before any lookup ran; handing those
     to this call lets it answer from planner intent instead of tool results.
+    The title is withheld for the same reason: it is planner prose too.
     """
     step = PlanStep(
         id="step_2",
@@ -430,8 +431,9 @@ def test_completion_assessment_plan_withholds_execution_intent_fields() -> None:
         tool_names=["search_knowledge_base"],
         status="completed",
     )
-    pattern = DAGPattern(lambda **_: build_plan(step))
-    pattern.plan = build_plan(step)
+    plan = build_plan(step)
+    pattern = DAGPattern(lambda **_: plan)
+    pattern.plan = plan
     context = ExecutionContext(execution_id="dag-assessment-plan-projection")
     context.add_user_message("how do I get a printout of an incident?")
 
@@ -441,7 +443,6 @@ def test_completion_assessment_plan_withholds_execution_intent_fields() -> None:
         "steps": [
             {
                 "id": "step_2",
-                "task": "Summarize printing instructions",
                 "dependencies": ["step_1"],
                 "status": "completed",
             }
@@ -449,10 +450,20 @@ def test_completion_assessment_plan_withholds_execution_intent_fields() -> None:
     }
     serialized = json.dumps(payload, ensure_ascii=False)
     assert "Ctrl+P" not in serialized
-    assert "description" not in payload["plan"]["steps"][0]
-    assert "termination_condition" not in payload["plan"]["steps"][0]
+    assert "Summarize printing instructions" not in serialized
     # to_dict() still carries them for checkpoint persistence.
-    assert step.to_dict()["termination_condition"] is not None
+    assert set(step.to_dict()) == {
+        "id",
+        "task",
+        "dependencies",
+        "description",
+        "termination_condition",
+        "completion_evidence",
+        "tool_names",
+        "status",
+        "result",
+        "error",
+    }
 
 
 def test_dag_completion_assessment_prompt_includes_grounding_rule() -> None:
@@ -2299,11 +2310,17 @@ async def test_dag_step_appends_current_step_boundary_after_parent_context() -> 
         "STEP INTENT IS NOT A SOURCE OF FACTS"
     ) > instruction.index("TERMINATION CONDITION - AUTHORITATIVE STOP RULE")
     assert (
-        "declare the work to perform and the shape of the result to report"
-        in instruction
+        "The step title, description, termination condition, and completion "
+        "evidence declare the work to perform and the shape of the result to "
+        "report." in instruction
     )
     assert "the tool results and dependency results decide" in instruction
     assert "remain usable exactly as given" in instruction
+    assert (
+        "It restricts the facts asserted inside content this step asks you to "
+        "compose, not your choice of wording for that content." in instruction
+    )
+    assert "does not restrict text you are asked to compose" not in instruction
     assert "treat that report as satisfying this termination condition" in instruction
     assert "conditional branches is still valid instruction" in instruction
     assert "Execute only the current DAG step" in messages[-1]["content"]
@@ -4461,6 +4478,7 @@ async def test_plan_generator_bars_presupposed_answers_from_step_fields() -> Non
     assert (
         "Do not encode the answer" in properties["termination_condition"]["description"]
     )
+    assert "must not state or pre-write a fact" in properties["task"]["description"]
 
 
 @pytest.mark.asyncio
