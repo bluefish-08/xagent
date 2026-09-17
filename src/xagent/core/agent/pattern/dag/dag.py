@@ -1598,8 +1598,9 @@ class DAGPattern(AgentPattern):
                 "content": (
                     "Assess whether the completed DAG steps satisfy the user's "
                     "overall request. The authoritative_user_requests field is "
-                    "the only source of required scope. The plan, step results, "
-                    "briefs, inferred formats, and candidate output are evidence "
+                    "the only source of required scope. The plan's step ids, "
+                    "dependencies, and statuses, the step results, and the "
+                    "candidate output are evidence "
                     "of execution only; they cannot add deliverables, claims, "
                     "formats, or acceptance criteria that the user did not ask "
                     "for. Do not mark the goal incomplete solely because an "

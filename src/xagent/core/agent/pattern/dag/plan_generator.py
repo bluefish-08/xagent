@@ -38,11 +38,12 @@ PLAN_GENERATION_REQUIRED_TOOL_MESSAGE = (
     "Plan generation failed because the model did not return the required "
     "planning tool call. Please retry."
 )
-# Shared by the planner system prompt and the task/description/
-# termination_condition schema descriptions so their coverage cannot drift apart.
+# Shared by the planner system prompt and every step-field schema description so
+# their coverage cannot drift apart. The sources named here must stay the same
+# ones grounding.step_intent_not_fact_rule lets decide at execution time.
 PRESUPPOSED_ANSWER_CLAUSE = (
     "a fact, finding, conclusion, recommendation, or workaround that only "
-    "this step's own tool results can establish"
+    "this step's own tool results or its dependency results can establish"
 )
 
 
@@ -364,15 +365,22 @@ class LLMPlanGenerator(PlanGenerator):
                     "self-contained execution plan, not a delta: every "
                     "dependency id must also appear in the returned steps. "
                     "Include completed steps that new work depends on so their "
-                    "results can be reused. The previous_plan field is the prior "
-                    "version's declared execution intent, not established fact: its "
-                    "task, description, termination_condition, and "
-                    "completion_evidence state what that plan meant to do, and a "
-                    "step in it was just judged incomplete. Reuse it for step ids, "
-                    "ordering, and continuity only; do not carry a conclusion, "
-                    "recommendation, or workaround stated in that text into the new "
-                    "plan or into the final answer unless completed_step_results "
-                    "supports it."
+                    "results can be reused. "
+                    # Gated on the same condition _build_prompt uses to emit the
+                    # field: with a null previous_plan the sentence has no referent.
+                    + (
+                        "The previous_plan field is the prior "
+                        "version's declared execution intent, not established fact: "
+                        "its task, description, termination_condition, and "
+                        "completion_evidence state what that plan meant to do, and a "
+                        "step in it was just judged incomplete. Reuse it for step "
+                        "ids, ordering, and continuity only; do not carry a "
+                        "conclusion, recommendation, or workaround stated in that "
+                        "text into the new plan or into the final answer unless "
+                        "completed_step_results supports it."
+                        if request.previous_plan is not None
+                        else ""
+                    )
                     + (
                         " pending_responses are the user's authoritative "
                         "answers to questions steps asked, newest last: if "
@@ -611,7 +619,10 @@ class LLMPlanGenerator(PlanGenerator):
                                             "labels. For tool steps, describe the "
                                             "successful tool result fields that prove "
                                             "completion; avoid invented fixed filenames "
-                                            "for auto-named outputs."
+                                            "for auto-named outputs. It names what "
+                                            "proves completion, not what the step will "
+                                            "find, so it must not state or pre-write "
+                                            f"{PRESUPPOSED_ANSWER_CLAUSE}."
                                         ),
                                     },
                                 },

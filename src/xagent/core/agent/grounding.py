@@ -189,15 +189,18 @@ def step_intent_not_fact_rule(*, compact: bool = False) -> str:
     """Return the rule that a DAG step's declared intent is not a fact source.
 
     Args:
-        compact: ``True`` for the one-bullet form rendered inside the step's
+        compact: ``True`` for the form rendered at the end of the step's
             system-context scope block, ``False`` for the standalone section of
-            the step instruction message. Both forms must carry the same rule;
-            only the surrounding prompt shape differs.
+            the step instruction message. Both forms must carry the same rule
+            over the same four fields; only the surrounding prompt shape differs.
+            The compact form names the instruction message explicitly because
+            that block renders only the title and description itself.
     """
     if compact:
         return (
-            "The step title and description above, and this step's termination "
-            "condition and completion evidence, declare the work to perform, not "
+            "The step title and description above, and the termination condition "
+            "and completion evidence in the DAG step instruction message, declare "
+            "the work to perform, not "
             "facts about the result. If they presuppose a fact, conclusion, or "
             "solution that this step's tool results and dependency results do not "
             "support, those results decide and the presupposed content must not "

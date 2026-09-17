@@ -898,10 +898,10 @@ class ExecutionContext:
                 f"- Current step description: "
                 f"{dag_step_description or dag_step_name or dag_step_id}\n"
                 f"- Current step dependencies: {dag_dependencies}\n"
-                f"- {step_intent_not_fact_rule(compact=True)}\n"
                 f"- Suggested tools for this step: {suggested_tools}\n\n"
                 "Only execute the current DAG step. Detailed step boundary rules are "
-                "provided in the latest DAG step instruction message.\n\n"
+                "provided in the latest DAG step instruction message.\n"
+                f"{step_intent_not_fact_rule(compact=True)}\n\n"
                 f"{language_harness}"
             )
         memory_context = self.metadata.get(MEMORY_CONTEXT_METADATA_KEY)

@@ -439,7 +439,14 @@ def test_completion_assessment_plan_withholds_execution_intent_fields() -> None:
     context = ExecutionContext(execution_id="dag-assessment-plan-projection")
     context.add_user_message("how do I get a printout of an incident?")
 
-    payload = json.loads(pattern._completion_assessment_messages(context)[1]["content"])
+    messages = pattern._completion_assessment_messages(context)
+    payload = json.loads(messages[1]["content"])
+
+    # The prompt names what the projection actually leaves in the payload.
+    assert (
+        "The plan's step ids, dependencies, and statuses, the step results, and "
+        "the candidate output are evidence of execution only" in messages[0]["content"]
+    )
 
     assert payload["plan"] == {
         "steps": [
@@ -4458,8 +4465,11 @@ async def test_plan_generator_bars_presupposed_answers_from_step_fields() -> Non
     )
     assert "counts as that step completing normally" in system_prompt
     assert PRESUPPOSED_ANSWER_CLAUSE in system_prompt
+    # Per word against the rendered prompt: the whole-clause assert above still
+    # passes when a kind is dropped from the shared constant.
     for kind in ("fact", "finding", "conclusion", "recommendation", "workaround"):
-        assert kind in PRESUPPOSED_ANSWER_CLAUSE
+        assert kind in system_prompt
+    assert "its dependency results can establish" in system_prompt
 
     properties = generator._plan_tool_schema()["function"]["parameters"]["properties"][
         "steps"
@@ -4472,7 +4482,16 @@ async def test_plan_generator_bars_presupposed_answers_from_step_fields() -> Non
         "Do not encode the answer" in properties["termination_condition"]["description"]
     )
     assert "must not state or pre-write" in properties["task"]["description"]
-    for field in ("task", "description", "termination_condition"):
+    assert (
+        "names what proves completion, not what the step will find"
+        in properties["completion_evidence"]["description"]
+    )
+    for field in (
+        "task",
+        "description",
+        "termination_condition",
+        "completion_evidence",
+    ):
         assert PRESUPPOSED_ANSWER_CLAUSE in properties[field]["description"]
 
 
@@ -4532,6 +4551,37 @@ async def test_replan_prompt_qualifies_previous_plan_as_intent_not_fact() -> Non
     )
     assert "Ctrl+P" in llm.calls[0]["messages"][1]["content"]
 
+    first_plan_llm = PlanLLM(
+        plan_tool_response(
+            [
+                {
+                    "id": "summarize",
+                    "task": "Summarize whatever the lookup returned",
+                    "dependencies": [],
+                    "termination_condition": "Stop after reporting the lookup result.",
+                    "completion_evidence": "The lookup result was reported.",
+                    "tool_names": [],
+                }
+            ]
+        )
+    )
+    await generator.generate_plan(
+        request=PlanGenerationRequest(
+            context=context,
+            execution_id="dag-replan-intent",
+            available_tool_names=[],
+        ),
+        llm=first_plan_llm,
+    )
+
+    first_plan_prompt = first_plan_llm.calls[0]["messages"][0]["content"]
+    assert '"previous_plan": null' in first_plan_llm.calls[0]["messages"][1]["content"]
+    assert "The previous_plan field is the prior version's" not in first_plan_prompt
+    assert "Reuse it for step ids, ordering, and continuity only" not in (
+        first_plan_prompt
+    )
+    assert "was just judged incomplete" not in first_plan_prompt
+
 
 def test_step_intent_rule_forms_state_the_same_rule() -> None:
     full = step_intent_not_fact_rule()
@@ -4543,7 +4593,7 @@ def test_step_intent_rule_forms_state_the_same_rule() -> None:
         assert "declare the work to perform" in form
         assert "presuppose a fact" in form
         assert "must not reach your answer" in form
-        assert "report" in form and "gap" in form
+        assert "gap the way your own agent instructions" in form
         assert "Facts the user gave in their own messages" in form
 
 
