@@ -1566,7 +1566,25 @@ class DAGPattern(AgentPattern):
             ),
             "authoritative_user_requests": authoritative_user_requests,
             "messages": latest_messages,
-            "plan": self.plan.to_dict() if self.plan is not None else None,
+            # Execution-intent fields (description, termination_condition,
+            # completion_evidence, tool_names) are withheld here: this call
+            # writes the user-facing answer, so it must not source facts from
+            # what the planner intended before any tool ran.
+            "plan": (
+                {
+                    "steps": [
+                        {
+                            "id": step.id,
+                            "task": step.task,
+                            "dependencies": list(step.dependencies),
+                            "status": step.status,
+                        }
+                        for step in self.plan.steps
+                    ]
+                }
+                if self.plan is not None
+                else None
+            ),
             "step_results": self.step_results,
             "candidate_output": self._final_output(),
             "previous_completion_feedback": self.completion_feedback,
@@ -1784,15 +1802,41 @@ class DAGPattern(AgentPattern):
             "TERMINATION CONDITION - AUTHORITATIVE STOP RULE\n"
             f"{termination_condition}\n"
             f"Completion evidence: {completion_evidence}\n"
-            "Treat this termination condition as authoritative for this step. "
+            "Treat this termination condition as authoritative for when this step "
+            "stops. "
             "Once it is satisfied, your next action must be final_answer for this "
             "step. Do not inspect, verify, revise, optimize, regenerate, or perform "
             "downstream work unless the termination condition explicitly requires "
             "that work.\n\n"
+            "STEP INTENT IS NOT A SOURCE OF FACTS\n"
+            "The step description and termination condition declare the work to "
+            "perform and the shape of the result to report. They are not a source "
+            "of facts about that result's content. Where they read as if some fact, "
+            "finding, conclusion, recommendation, or workaround were already known, "
+            "that is an expectation of what this step may establish, not something "
+            "it has established.\n"
+            "If they presuppose a fact, conclusion, or solution that this step's "
+            "tool results and dependency results do not support, or that those "
+            "results contradict, the tool results and dependency results decide and "
+            "the presupposed content must not reach your answer. This applies only "
+            "to facts that were supposed to come from tool results or dependency "
+            "results. Facts the user gave in their own messages, including ones the "
+            "plan copied out of a user message, remain usable exactly as given, and "
+            "this rule does not restrict text you are asked to compose.\n"
+            "When the information this step needs turns out to be unavailable, or a "
+            "dependency result does not support this step's premise, report that gap "
+            "the way your own agent instructions tell you to report it, and treat "
+            "that report as satisfying this termination condition: it is a complete "
+            "and correct result for this step. Do not restate the presupposed "
+            "content to fill the gap, and do not retry or stall trying to make the "
+            "presupposition true. Do not answer emptily or evasively either: a "
+            "description that lays out conditional branches is still valid "
+            "instruction, so follow the branch the actual results support and report "
+            "every part of this step those results do support.\n\n"
             f"{dependency_note}\n\n"
             "Execute only the current DAG step. The current step title and "
             "description plus the termination condition define the entire "
-            "actionable goal for this ReAct run. "
+            "actionable work for this ReAct run. "
             "Do not infer extra work from the overall user goal. Do not complete "
             "downstream, sibling, final synthesis, rendering, screenshots, visual "
             "inspection, export, or delivery work unless that work is explicitly "

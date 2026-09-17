@@ -817,6 +817,18 @@ def test_get_messages_for_llm_uses_compact_dag_output_language_policy() -> None:
     assert '"output_language": "English"' in system_content
     assert "Create two posters." not in system_content
     assert "Only execute the current DAG step" in system_content
+    assert (
+        "The step description above declares the work to perform, not facts about "
+        "the result." in system_content
+    )
+    assert (
+        "presupposes a fact, conclusion, or solution that this step's tool results "
+        "and dependency results do not support" in system_content
+    )
+    assert "treat that report as this step done" in system_content
+    assert "Facts the user gave in their own messages stay usable as given." in (
+        system_content
+    )
     assert [message["role"] for message in result].count("system") == 1
 
 
