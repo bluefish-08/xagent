@@ -67,7 +67,7 @@ def search_dense(
     # Input validation at the public boundary.
     _validate_dense_inputs(collection, model_tag, top_k, query_vector)
 
-    return _get_coordinator().search_dense(
+    return _get_coordinator().search_dense_sync(
         collection=collection,
         model_tag=model_tag,
         query_vector=query_vector,
@@ -105,7 +105,7 @@ async def search_dense_async(
     """
     # Input validation at the public boundary (shared with the sync path).
     _validate_dense_inputs(collection, model_tag, top_k, query_vector)
-    return await _get_coordinator().search_dense_async(
+    return await _get_coordinator().search_dense(
         collection=collection,
         model_tag=model_tag,
         query_vector=query_vector,

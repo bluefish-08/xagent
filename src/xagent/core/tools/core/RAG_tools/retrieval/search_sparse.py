@@ -34,7 +34,7 @@ def search_sparse(
     is_admin: bool = False,
 ) -> SparseSearchResponse:
     """Performs sparse (Full-Text Search) retrieval on the specified collection."""
-    return _get_coordinator().search_sparse(
+    return _get_coordinator().search_sparse_sync(
         collection=collection,
         model_tag=model_tag,
         query_text=query_text,
@@ -65,7 +65,7 @@ async def search_sparse_async(
     is_admin: bool = False,
 ) -> SparseSearchResponse:
     """Perform sparse retrieval using async vector store abstraction."""
-    return await _get_coordinator().search_sparse_async(
+    return await _get_coordinator().search_sparse(
         collection=collection,
         model_tag=model_tag,
         query_text=query_text,

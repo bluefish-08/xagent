@@ -495,7 +495,7 @@ class KBCoordinator:
             hide_missing=True,
         )
 
-    def search_dense(
+    async def search_dense(
         self,
         collection: str,
         model_tag: str,
@@ -509,37 +509,7 @@ class KBCoordinator:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> DenseSearchResponse:
-        """Resolve scope/access/backend, then run dense search on the handle."""
-        handle = self.open_collection_sync(
-            self._search_request(collection, user_id=user_id, is_admin=is_admin)
-        )
-        return handle.search_dense(
-            model_tag,
-            query_vector,
-            top_k=top_k,
-            filters=filters,
-            readonly=readonly,
-            nprobes=nprobes,
-            refine_factor=refine_factor,
-            user_id=user_id,
-            is_admin=is_admin,
-        )
-
-    async def search_dense_async(
-        self,
-        collection: str,
-        model_tag: str,
-        query_vector: List[float],
-        *,
-        top_k: int = 10,
-        filters: Optional[Dict[str, Any]] = None,
-        readonly: bool = False,
-        nprobes: Optional[int] = None,
-        refine_factor: Optional[int] = None,
-        user_id: Optional[int] = None,
-        is_admin: bool = False,
-    ) -> DenseSearchResponse:
-        """Async counterpart of :meth:`search_dense`."""
+        """Resolve the collection context, then run dense search on the handle."""
         handle = await self.open_collection(
             self._search_request(collection, user_id=user_id, is_admin=is_admin)
         )
@@ -555,27 +525,32 @@ class KBCoordinator:
             is_admin=is_admin,
         )
 
-    def search_sparse(
+    def search_dense_sync(
         self,
         collection: str,
         model_tag: str,
-        query_text: str,
+        query_vector: List[float],
         *,
-        top_k: int,
+        top_k: int = 10,
         filters: Optional[Dict[str, Any]] = None,
         readonly: bool = False,
         nprobes: Optional[int] = None,
         refine_factor: Optional[int] = None,
         user_id: Optional[int] = None,
         is_admin: bool = False,
-    ) -> SparseSearchResponse:
-        """Resolve scope/access/backend, then run sparse search on the handle."""
+    ) -> DenseSearchResponse:
+        """Blocking counterpart of :meth:`search_dense`.
+
+        Opens the handle synchronously rather than wrapping the async method:
+        the public ``retrieval.search_dense`` is sync and must stay off the
+        async handle-opening path.
+        """
         handle = self.open_collection_sync(
             self._search_request(collection, user_id=user_id, is_admin=is_admin)
         )
-        return handle.search_sparse(
+        return handle.search_dense(
             model_tag,
-            query_text,
+            query_vector,
             top_k=top_k,
             filters=filters,
             readonly=readonly,
@@ -585,7 +560,7 @@ class KBCoordinator:
             is_admin=is_admin,
         )
 
-    async def search_sparse_async(
+    async def search_sparse(
         self,
         collection: str,
         model_tag: str,
@@ -599,7 +574,7 @@ class KBCoordinator:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> SparseSearchResponse:
-        """Async counterpart of :meth:`search_sparse`."""
+        """Resolve the collection context, then run sparse search on the handle."""
         handle = await self.open_collection(
             self._search_request(collection, user_id=user_id, is_admin=is_admin)
         )
@@ -615,7 +590,37 @@ class KBCoordinator:
             is_admin=is_admin,
         )
 
-    def search_hybrid(
+    def search_sparse_sync(
+        self,
+        collection: str,
+        model_tag: str,
+        query_text: str,
+        *,
+        top_k: int,
+        filters: Optional[Dict[str, Any]] = None,
+        readonly: bool = False,
+        nprobes: Optional[int] = None,
+        refine_factor: Optional[int] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> SparseSearchResponse:
+        """Blocking counterpart of :meth:`search_sparse`."""
+        handle = self.open_collection_sync(
+            self._search_request(collection, user_id=user_id, is_admin=is_admin)
+        )
+        return handle.search_sparse(
+            model_tag,
+            query_text,
+            top_k=top_k,
+            filters=filters,
+            readonly=readonly,
+            nprobes=nprobes,
+            refine_factor=refine_factor,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+
+    async def search_hybrid(
         self,
         collection: str,
         model_tag: str,
@@ -631,7 +636,41 @@ class KBCoordinator:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> HybridSearchResponse:
-        """Resolve scope/access/backend, then run hybrid search on the handle."""
+        """Resolve the collection context, then run hybrid search on the handle."""
+        handle = await self.open_collection(
+            self._search_request(collection, user_id=user_id, is_admin=is_admin)
+        )
+        return await handle.search_hybrid_async(
+            model_tag,
+            query_text,
+            query_vector,
+            top_k=top_k,
+            filters=filters,
+            fusion_config=fusion_config,
+            readonly=readonly,
+            nprobes=nprobes,
+            refine_factor=refine_factor,
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+
+    def search_hybrid_sync(
+        self,
+        collection: str,
+        model_tag: str,
+        query_text: str,
+        query_vector: List[float],
+        *,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        fusion_config: Optional[FusionConfig] = None,
+        readonly: bool = False,
+        nprobes: Optional[int] = None,
+        refine_factor: Optional[int] = None,
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+    ) -> HybridSearchResponse:
+        """Blocking counterpart of :meth:`search_hybrid`."""
         handle = self.open_collection_sync(
             self._search_request(collection, user_id=user_id, is_admin=is_admin)
         )

@@ -567,7 +567,7 @@ class KBLegacyStepCompatibilityFacade:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> DenseSearchResponse:
-        return self._active_coordinator().search_dense(
+        return self._active_coordinator().search_dense_sync(
             collection,
             model_tag,
             query_vector,
@@ -594,7 +594,7 @@ class KBLegacyStepCompatibilityFacade:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> DenseSearchResponse:
-        return await self._active_coordinator().search_dense_async(
+        return await self._active_coordinator().search_dense(
             collection,
             model_tag,
             query_vector,
@@ -621,7 +621,7 @@ class KBLegacyStepCompatibilityFacade:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> SparseSearchResponse:
-        return self._active_coordinator().search_sparse(
+        return self._active_coordinator().search_sparse_sync(
             collection,
             model_tag,
             query_text,
@@ -648,7 +648,7 @@ class KBLegacyStepCompatibilityFacade:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> SparseSearchResponse:
-        return await self._active_coordinator().search_sparse_async(
+        return await self._active_coordinator().search_sparse(
             collection,
             model_tag,
             query_text,
@@ -677,7 +677,7 @@ class KBLegacyStepCompatibilityFacade:
         user_id: Optional[int] = None,
         is_admin: bool = False,
     ) -> HybridSearchResponse:
-        return self._active_coordinator().search_hybrid(
+        return self._active_coordinator().search_hybrid_sync(
             collection,
             model_tag,
             query_text,

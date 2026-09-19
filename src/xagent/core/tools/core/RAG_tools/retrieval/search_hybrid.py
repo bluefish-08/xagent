@@ -188,7 +188,7 @@ def search_hybrid(
     is_admin: bool = False,
 ) -> HybridSearchResponse:
     """Performs hybrid search, combining dense and sparse retrieval."""
-    return _get_coordinator().search_hybrid(
+    return _get_coordinator().search_hybrid_sync(
         collection=collection,
         model_tag=model_tag,
         query_text=query_text,
