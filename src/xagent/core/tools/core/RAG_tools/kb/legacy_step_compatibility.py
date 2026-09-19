@@ -174,24 +174,19 @@ class KBLegacyStepCompatibilityFacade:
         *,
         user_id: Optional[int],
         is_admin: bool,
-        access_mode: "KBAccessMode" = KBAccessMode.WRITE,
     ) -> "LanceDBCollectionHandle":
         """Open the collection handle that owns parse/chunk storage (#509).
 
         Routed through the active coordinator so an injected shim keeps
         parse/chunk storage bound to that shim (preserves the facade's
         injection boundary).
-
-        ``access_mode`` defaults to WRITE so existing parse/chunk callers
-        keep their behaviour without any call-site changes.  Search methods
-        pass ``KBAccessMode.READ``.
         """
         return self._active_coordinator().open_collection_sync(
             KBContextRequest(
                 collection=collection,
                 user_id=user_id,
                 is_admin=is_admin,
-                access_mode=access_mode,
+                access_mode=KBAccessMode.WRITE,
                 hide_missing=True,
             )
         )

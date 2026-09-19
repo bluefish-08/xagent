@@ -6,6 +6,7 @@ does for the other data-plane families; the legacy facade and the public
 """
 
 import asyncio
+import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -102,28 +103,49 @@ def test_legacy_facade_forwards_to_the_coordinator(method, args, kwargs):
     getattr(coordinator, method).assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "module_name, method",
-    [
-        ("search_dense", "search_dense"),
-        ("search_sparse", "search_sparse"),
-        ("search_hybrid", "search_hybrid"),
-    ],
-)
-def test_public_retrieval_functions_route_through_the_coordinator(module_name, method):
-    import importlib
+PUBLIC_CALLS = [
+    (
+        "search_dense",
+        "search_dense",
+        lambda m: m.search_dense("col", "model", [0.1], top_k=3),
+    ),
+    (
+        "search_sparse",
+        "search_sparse",
+        lambda m: m.search_sparse("col", "model", "q", top_k=3),
+    ),
+    (
+        "search_hybrid",
+        "search_hybrid",
+        lambda m: m.search_hybrid("col", "model", "q", [0.1], top_k=3),
+    ),
+    (
+        "search_dense",
+        "search_dense_async",
+        lambda m: asyncio.run(m.search_dense_async("col", "model", [0.1], top_k=3)),
+    ),
+    (
+        "search_sparse",
+        "search_sparse_async",
+        lambda m: asyncio.run(m.search_sparse_async("col", "model", "q", top_k=3)),
+    ),
+]
 
+
+@pytest.mark.parametrize("module_name, method, call", PUBLIC_CALLS)
+def test_public_retrieval_functions_route_through_the_coordinator(
+    module_name, method, call
+):
+    """A real coordinator here, not a mock: it also pins the keyword signatures."""
     module = importlib.import_module(
         f"xagent.core.tools.core.RAG_tools.retrieval.{module_name}"
     )
-    coordinator = MagicMock()
+    handle = MagicMock()
+    if method.endswith("_async"):
+        getattr(handle, method).side_effect = lambda *a, **k: _async_return(MagicMock())
+    coordinator = _coordinator_with_handle(handle)
 
     with patch.object(module, "_get_coordinator", return_value=coordinator):
-        if method == "search_dense":
-            module.search_dense("col", "model", [0.1], top_k=3)
-        elif method == "search_sparse":
-            module.search_sparse("col", "model", "q", top_k=3)
-        else:
-            module.search_hybrid("col", "model", "q", [0.1], top_k=3)
+        call(module)
 
-    getattr(coordinator, method).assert_called_once()
+    getattr(handle, method).assert_called_once()
