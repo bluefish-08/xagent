@@ -1,8 +1,11 @@
 """#796 - search resolves through the coordinator and never touches a backend.
 
-The coordinator owns scope/access/backend resolution for search exactly as it
+The coordinator owns collection-context resolution for search exactly as it
 does for the other data-plane families; the legacy facade and the public
 ``retrieval.search_*`` functions are thin adapters over it.
+
+Every case asserts the *full* keyword set, so a parameter silently dropped at
+any of the three hops fails here rather than degrading a search at runtime.
 """
 
 import asyncio
@@ -17,9 +20,93 @@ from xagent.core.tools.core.RAG_tools.kb.legacy_step_compatibility import (
 )
 from xagent.core.tools.core.RAG_tools.kb.models import KBAccessMode
 
+COMMON = {
+    "top_k": 4,
+    "filters": {"field": "value"},
+    "readonly": True,
+    "nprobes": 7,
+    "refine_factor": 3,
+    "user_id": 5,
+    "is_admin": True,
+}
+FUSION = object()
+
+# (coordinator method, handle method, facade method, retrieval module,
+#  public function, args after `collection`, kwargs, is_async)
+CASES = [
+    (
+        "search_dense_sync",
+        "search_dense",
+        "search_dense",
+        "search_dense",
+        "search_dense",
+        ("model-x", [0.1]),
+        COMMON,
+        False,
+    ),
+    (
+        "search_dense",
+        "search_dense_async",
+        "search_dense_async",
+        "search_dense",
+        "search_dense_async",
+        ("model-x", [0.1]),
+        COMMON,
+        True,
+    ),
+    (
+        "search_sparse_sync",
+        "search_sparse",
+        "search_sparse",
+        "search_sparse",
+        "search_sparse",
+        ("model-y", "query text"),
+        COMMON,
+        False,
+    ),
+    (
+        "search_sparse",
+        "search_sparse_async",
+        "search_sparse_async",
+        "search_sparse",
+        "search_sparse_async",
+        ("model-y", "query text"),
+        COMMON,
+        True,
+    ),
+    (
+        "search_hybrid_sync",
+        "search_hybrid",
+        "search_hybrid",
+        "search_hybrid",
+        "search_hybrid",
+        ("model-z", "query", [0.3, 0.4]),
+        {**COMMON, "fusion_config": FUSION},
+        False,
+    ),
+    (
+        "search_hybrid",
+        "search_hybrid_async",
+        None,
+        None,
+        None,
+        ("model-z", "query", [0.3, 0.4]),
+        {**COMMON, "fusion_config": FUSION},
+        True,
+    ),
+]
+IDS = [f"{c[0]}" for c in CASES]
+
 
 async def _async_return(value):
     return value
+
+
+def _handle_for(method: str, is_async: bool) -> MagicMock:
+    handle = MagicMock()
+    if is_async:
+        getattr(handle, method).side_effect = lambda *a, **k: _async_return(MagicMock())
+    return handle
 
 
 def _coordinator_with_handle(handle: MagicMock) -> KBCoordinator:
@@ -33,119 +120,91 @@ def _coordinator_with_handle(handle: MagicMock) -> KBCoordinator:
     return coordinator
 
 
-SYNC_CASES = [
-    ("search_dense", ("col1", "model-x", [0.1]), {"top_k": 4}),
-    ("search_sparse", ("col2", "model-y", "query text"), {"top_k": 5}),
-    ("search_hybrid", ("col3", "model-z", "query", [0.3, 0.4]), {"top_k": 6}),
-]
-
-ASYNC_CASES = [
-    ("search_dense_async", ("col1", "model-x", [0.1]), {"top_k": 8}),
-    ("search_sparse_async", ("col2", "model-y", "hello"), {"top_k": 9}),
-]
+def _run(bound, is_async, *args, **kwargs):
+    return asyncio.run(bound(*args, **kwargs)) if is_async else bound(*args, **kwargs)
 
 
-@pytest.mark.parametrize("method, args, kwargs", SYNC_CASES)
-def test_sync_search_opens_a_read_handle_and_delegates(method, args, kwargs):
-    handle = MagicMock()
+@pytest.mark.parametrize(
+    "coord_method, handle_method, _f, _m, _p, args, kwargs, is_async", CASES, ids=IDS
+)
+def test_coordinator_opens_a_read_handle_and_forwards_every_argument(
+    coord_method, handle_method, _f, _m, _p, args, kwargs, is_async
+):
+    handle = _handle_for(handle_method, is_async)
     coordinator = _coordinator_with_handle(handle)
 
-    getattr(coordinator, method)(*args, user_id=5, is_admin=True, **kwargs)
+    _run(getattr(coordinator, coord_method), is_async, "col", *args, **kwargs)
 
-    request = coordinator.open_collection_sync.call_args.args[0]
-    assert request.collection == args[0]
+    opener = (
+        coordinator.open_collection if is_async else coordinator.open_collection_sync
+    )
+    request = opener.call_args.args[0]
+    assert request.collection == "col"
     assert request.access_mode == KBAccessMode.READ
-    assert request.user_id == 5
-    assert request.is_admin is True
+    assert request.user_id == kwargs["user_id"]
+    assert request.is_admin == kwargs["is_admin"]
     assert request.hide_missing is True
 
-    delegate = getattr(handle, method)
-    delegate.assert_called_once()
-    assert delegate.call_args.kwargs["top_k"] == kwargs["top_k"]
+    getattr(handle, handle_method).assert_called_once_with(*args, **kwargs)
 
 
-@pytest.mark.parametrize("method, args, kwargs", ASYNC_CASES)
-def test_async_search_opens_a_read_handle_and_delegates(method, args, kwargs):
-    handle = MagicMock()
-    getattr(handle, method).side_effect = lambda *a, **k: _async_return(MagicMock())
-    coordinator = _coordinator_with_handle(handle)
-
-    asyncio.run(getattr(coordinator, method)(*args, **kwargs))
-
-    request = coordinator.open_collection.call_args.args[0]
-    assert request.access_mode == KBAccessMode.READ
-    assert request.hide_missing is True
-
-    delegate = getattr(handle, method)
-    delegate.assert_called_once()
-    assert delegate.call_args.kwargs["top_k"] == kwargs["top_k"]
-
-
-@pytest.mark.parametrize("method, args, kwargs", SYNC_CASES)
-def test_sync_search_stays_synchronous(method, args, kwargs):
+@pytest.mark.parametrize(
+    "coord_method, handle_method, _f, _m, _p, args, kwargs, is_async", CASES, ids=IDS
+)
+def test_sync_entry_points_never_take_the_async_handle_path(
+    coord_method, handle_method, _f, _m, _p, args, kwargs, is_async
+):
     """A sync caller must not be pushed onto the async handle-opening path."""
-    handle = MagicMock()
+    handle = _handle_for(handle_method, is_async)
     coordinator = _coordinator_with_handle(handle)
 
-    getattr(coordinator, method)(*args, **kwargs)
+    _run(getattr(coordinator, coord_method), is_async, "col", *args, **kwargs)
 
-    coordinator.open_collection.assert_not_called()
+    unused = (
+        coordinator.open_collection
+        if not is_async
+        else coordinator.open_collection_sync
+    )
+    unused.assert_not_called()
 
 
-@pytest.mark.parametrize("method, args, kwargs", SYNC_CASES)
-def test_legacy_facade_forwards_to_the_coordinator(method, args, kwargs):
+@pytest.mark.parametrize(
+    "coord_method, _h, facade_method, _m, _p, args, kwargs, is_async",
+    [c for c in CASES if c[2] is not None],
+    ids=[c[2] for c in CASES if c[2] is not None],
+)
+def test_legacy_facade_forwards_every_argument_to_the_coordinator(
+    coord_method, _h, facade_method, _m, _p, args, kwargs, is_async
+):
     facade = KBLegacyStepCompatibilityFacade()
     coordinator = MagicMock()
+    if is_async:
+        getattr(coordinator, coord_method).side_effect = lambda *a, **k: _async_return(
+            MagicMock()
+        )
 
     with patch.object(facade, "_active_coordinator", return_value=coordinator):
-        getattr(facade, method)(*args, **kwargs)
+        _run(getattr(facade, facade_method), is_async, "col", *args, **kwargs)
 
-    getattr(coordinator, method).assert_called_once()
-
-
-PUBLIC_CALLS = [
-    (
-        "search_dense",
-        "search_dense",
-        lambda m: m.search_dense("col", "model", [0.1], top_k=3),
-    ),
-    (
-        "search_sparse",
-        "search_sparse",
-        lambda m: m.search_sparse("col", "model", "q", top_k=3),
-    ),
-    (
-        "search_hybrid",
-        "search_hybrid",
-        lambda m: m.search_hybrid("col", "model", "q", [0.1], top_k=3),
-    ),
-    (
-        "search_dense",
-        "search_dense_async",
-        lambda m: asyncio.run(m.search_dense_async("col", "model", [0.1], top_k=3)),
-    ),
-    (
-        "search_sparse",
-        "search_sparse_async",
-        lambda m: asyncio.run(m.search_sparse_async("col", "model", "q", top_k=3)),
-    ),
-]
+    getattr(coordinator, coord_method).assert_called_once_with("col", *args, **kwargs)
 
 
-@pytest.mark.parametrize("module_name, method, call", PUBLIC_CALLS)
+@pytest.mark.parametrize(
+    "coord_method, handle_method, _f, module_name, public_name, args, kwargs, is_async",
+    [c for c in CASES if c[3] is not None],
+    ids=[c[4] for c in CASES if c[3] is not None],
+)
 def test_public_retrieval_functions_route_through_the_coordinator(
-    module_name, method, call
+    coord_method, handle_method, _f, module_name, public_name, args, kwargs, is_async
 ):
     """A real coordinator here, not a mock: it also pins the keyword signatures."""
     module = importlib.import_module(
         f"xagent.core.tools.core.RAG_tools.retrieval.{module_name}"
     )
-    handle = MagicMock()
-    if method.endswith("_async"):
-        getattr(handle, method).side_effect = lambda *a, **k: _async_return(MagicMock())
+    handle = _handle_for(handle_method, is_async)
     coordinator = _coordinator_with_handle(handle)
 
     with patch.object(module, "_get_coordinator", return_value=coordinator):
-        call(module)
+        _run(getattr(module, public_name), is_async, "col", *args, **kwargs)
 
-    getattr(handle, method).assert_called_once()
+    getattr(handle, handle_method).assert_called_once_with(*args, **kwargs)
