@@ -63,6 +63,36 @@ from xagent.web.services.uploaded_file_store import (
 )
 
 
+def run_web_file_rollback(
+    file_info,
+    ingestion_result=None,
+    *,
+    collection: str = "test_collection",
+    url: str = "https://example.com",
+):
+    """Drive the production per-boundary rollback path for a file_handler result.
+
+    Mirrors what ``web_ingestion`` does on a failed page: the four boundary
+    callbacks go to the coordinator, which owns ordering and error folding.
+    Returns ``first_error`` (None on success) instead of raising.
+    """
+    from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
+    from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
+        _run_per_boundary_compensation,
+    )
+
+    warnings: list[str] = []
+    return _run_per_boundary_compensation(
+        pipeline_facade=get_kb_coordinator().pipeline,
+        page_operation=None,
+        file_info=file_info,
+        collection=collection,
+        url=url,
+        warnings=warnings,
+        ingestion_result=ingestion_result,
+    )
+
+
 class TestNormalizeWebTitleForFilename:
     """Unit tests for web-title filename normalization."""
 
@@ -743,7 +773,6 @@ class TestWebIngestionUploadedFilePersistence:
 
         assert result is not None
         assert result["file_id"] == str(existing_record.file_id)
-        assert callable(result["rollback_on_failure"])
         assert existing_path.read_text(encoding="utf-8") == "old content"
         assert processed_urls == {}
 
@@ -1418,7 +1447,7 @@ class TestIngestWebHandleWebFile:
             assert expected_persistent.exists()
             assert get_unscoped_file_storage().exists(captured["storage_key"])
 
-            file_info["rollback_on_failure"](result)
+            assert run_web_file_rollback(file_info, result) is None
             return result
 
         with (
@@ -1494,7 +1523,6 @@ class TestIngestWebHandleWebFile:
             temp_md = tmp_path / "temp.md"
             temp_md.write_text("# Title\n\nBody", encoding="utf-8")
             file_info = file_handler(temp_md, title, collection, url)
-            assert callable(file_info["rollback_on_failure"])
 
             from xagent.core.tools.core.RAG_tools.core.schemas import (
                 IngestionResult,
@@ -1502,20 +1530,24 @@ class TestIngestWebHandleWebFile:
                 WebIngestionResult,
             )
 
-            file_info["rollback_on_failure"](
-                IngestionResult(
-                    status="partial",
-                    doc_id="doc-1",
-                    parse_hash="hash",
-                    completed_steps=[
-                        IngestionStepResult(
-                            name="register_document",
-                            metadata={"doc_id": "doc-1", "created": True},
-                        )
-                    ],
-                    failed_step="embed_chunks",
-                    message="embedding failed",
+            assert (
+                run_web_file_rollback(
+                    file_info,
+                    IngestionResult(
+                        status="partial",
+                        doc_id="doc-1",
+                        parse_hash="hash",
+                        completed_steps=[
+                            IngestionStepResult(
+                                name="register_document",
+                                metadata={"doc_id": "doc-1", "created": True},
+                            )
+                        ],
+                        failed_step="embed_chunks",
+                        message="embedding failed",
+                    ),
                 )
+                is None
             )
 
             return WebIngestionResult(
@@ -1628,11 +1660,10 @@ class TestIngestWebHandleWebFile:
             file_info = file_handler(temp_md, title, collection, url)
             assert file_info["file_id"] == existing_file_id
             assert persistent_file.read_text(encoding="utf-8") == "new content"
-            assert callable(file_info["rollback_on_failure"])
 
             from xagent.core.tools.core.RAG_tools.core.schemas import WebIngestionResult
 
-            file_info["rollback_on_failure"]()
+            assert run_web_file_rollback(file_info) is None
 
             return WebIngestionResult(
                 status="error",
@@ -1770,7 +1801,9 @@ class TestIngestWebHandleWebFile:
             assert file_info["file_id"] == existing_file_id
             assert persistent_file.read_text(encoding="utf-8") == "new content"
 
-            file_info["rollback_on_failure"]()
+            rollback_error = run_web_file_rollback(file_info)
+            assert rollback_error is not None
+            assert "rag restore failed" in rollback_error
 
         with (
             patch(
@@ -2318,7 +2351,7 @@ class TestWebFileRefreshHelpers:
                 processed_urls={},
                 context="unit-test",
             )
-            result["rollback_on_failure"](None)
+            assert run_web_file_rollback(result) is None
 
         mock_rollback_rag.assert_called_once_with(
             collection_name="test_collection",

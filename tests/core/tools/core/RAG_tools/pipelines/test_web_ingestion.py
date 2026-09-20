@@ -1497,3 +1497,46 @@ class TestCrawlStopReasonDrivesStatus:
         )
 
         assert result.status == "success"
+
+
+class TestLegacyPersistentFileCompensationGuard:
+    """The legacy persistent-file cleanup must not touch a file the
+    file_handler already manages through per-boundary compensation."""
+
+    @staticmethod
+    def _cleanup_registered(tmp_path: Path, file_info: Optional[dict]) -> bool:
+        from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
+            _run_legacy_persistent_file_compensation,
+        )
+
+        persistent = tmp_path / "page.md"
+        persistent.write_text("keep me", encoding="utf-8")
+        facade = MagicMock()
+        _run_legacy_persistent_file_compensation(
+            pipeline_facade=facade,
+            page_operation=None,
+            collection="col",
+            url="https://example.com/page",
+            copied_persistent_file=persistent,
+            file_info=file_info,  # type: ignore[arg-type]
+            warnings=[],
+        )
+        return facade.record_web_page_file_side_effect.called
+
+    def test_per_boundary_compensation_spares_the_persistent_file(self, tmp_path):
+        """A reused existing web file would otherwise be unlinked on rollback."""
+        assert not self._cleanup_registered(
+            tmp_path,
+            {
+                "file_path": "page.md",
+                "file_id": "file-1",
+                "document_compensation": lambda result=None: (lambda: None),
+                "status_compensation": lambda result=None: (lambda: None),
+            },
+        )
+
+    def test_unmanaged_persistent_file_is_still_cleaned_up(self, tmp_path):
+        """Counter-case: without any declared compensation the cleanup runs."""
+        assert self._cleanup_registered(
+            tmp_path, {"file_path": "page.md", "file_id": "file-1"}
+        )

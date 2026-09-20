@@ -389,8 +389,12 @@ def _run_legacy_persistent_file_compensation(
 ) -> Optional[str]:
     if not copied_persistent_file or not copied_persistent_file.exists():
         return None
+    # Any compensation the file_handler declared means it owns the persistent
+    # file's lifecycle; unlinking it here would destroy a reused existing file.
     if file_info and (
-        "rollback_on_failure" in file_info or "file_compensation" in file_info
+        _has_per_boundary_compensation(file_info)
+        or "rollback_on_failure" in file_info
+        or "file_compensation" in file_info
     ):
         return None
 

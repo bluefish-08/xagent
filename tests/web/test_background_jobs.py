@@ -1456,9 +1456,22 @@ def test_background_web_file_new_branch_returns_rollback_callback(
                 is_admin=False,
                 processed_urls={},
             )
-            assert callable(result["rollback_on_failure"])
+            from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
+            from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
+                _run_per_boundary_compensation,
+            )
 
-            result["rollback_on_failure"](None)
+            assert (
+                _run_per_boundary_compensation(
+                    pipeline_facade=get_kb_coordinator().pipeline,
+                    page_operation=None,
+                    file_info=result,
+                    collection="web-kb",
+                    url="https://example.com/page",
+                    warnings=[],
+                )
+                is None
+            )
 
         verify_db = SessionLocal()
         try:
