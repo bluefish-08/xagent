@@ -70,11 +70,13 @@ def run_web_file_rollback(
     collection: str = "test_collection",
     url: str = "https://example.com",
 ):
-    """Drive the production per-boundary rollback path for a file_handler result.
+    """Drive the per-boundary rollback path for a file_handler result.
 
-    Mirrors what ``web_ingestion`` does on a failed page: the four boundary
-    callbacks go to the coordinator, which owns ordering and error folding.
-    Returns ``first_error`` (None on success) instead of raising.
+    Same call ``web_ingestion`` makes on a failed page, with ``page_operation``
+    None -- the callback-only branch the coordinator takes when no operation is
+    active (``web_page_operation`` yields None). Boundary ordering and error
+    folding are the coordinator's; this returns ``first_error`` (None on
+    success) instead of raising.
     """
     from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
     from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
@@ -773,6 +775,7 @@ class TestWebIngestionUploadedFilePersistence:
 
         assert result is not None
         assert result["file_id"] == str(existing_record.file_id)
+        assert callable(result["document_compensation"])
         assert existing_path.read_text(encoding="utf-8") == "old content"
         assert processed_urls == {}
 
@@ -2301,7 +2304,7 @@ class TestWebFileRefreshHelpers:
         mock_snapshot_runs.assert_called_once_with(file_id)
         mock_mark.assert_not_called()
 
-    def test_unchanged_existing_file_result_has_rollback_callback(
+    def test_unchanged_existing_file_result_rolls_back_cleanly(
         self,
         db_session: Session,
         test_user: User,
