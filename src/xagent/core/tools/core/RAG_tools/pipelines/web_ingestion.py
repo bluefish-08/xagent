@@ -389,8 +389,9 @@ def _run_legacy_persistent_file_compensation(
 ) -> Optional[str]:
     if not copied_persistent_file or not copied_persistent_file.exists():
         return None
-    # Any compensation the file_handler declared means it owns the persistent
-    # file's lifecycle; unlinking it here would destroy a reused existing file.
+    # A handler that declared boundary compensation restores the file itself.
+    # The reuse handler declares only document/status, and its file_path points
+    # at a pre-existing file, so unlinking it here would destroy user data.
     if file_info and (
         _has_per_boundary_compensation(file_info)
         or "rollback_on_failure" in file_info

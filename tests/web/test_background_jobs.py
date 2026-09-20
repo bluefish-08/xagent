@@ -1406,9 +1406,7 @@ def test_kb_web_job_zero_pages_without_failures_fails(tmp_path, monkeypatch):
         db.close()
 
 
-def test_background_web_file_new_branch_returns_rollback_callback(
-    tmp_path, monkeypatch
-):
+def test_background_web_file_new_branch_compensates_on_failure(tmp_path, monkeypatch):
     from xagent.core.file_storage.factory import get_unscoped_file_storage
     from xagent.web.jobs.kb_tasks import _handle_web_file
 

@@ -1500,8 +1500,8 @@ class TestCrawlStopReasonDrivesStatus:
 
 
 class TestLegacyPersistentFileCompensationGuard:
-    """The legacy persistent-file cleanup must not touch a file the
-    file_handler already manages through per-boundary compensation."""
+    """The legacy persistent-file cleanup must not touch a file that the
+    file_handler restores itself through boundary compensation."""
 
     @staticmethod
     def _cleanup_registered(tmp_path: Path, file_info: Optional[dict]) -> bool:
@@ -1535,8 +1535,8 @@ class TestLegacyPersistentFileCompensationGuard:
             },
         )
 
-    def test_unmanaged_persistent_file_is_still_cleaned_up(self, tmp_path):
-        """Counter-case: without any declared compensation the cleanup runs."""
+    def test_unmanaged_persistent_file_is_still_registered_for_cleanup(self, tmp_path):
+        """Counter-case: with no declared compensation the cleanup is registered."""
         assert self._cleanup_registered(
             tmp_path, {"file_path": "page.md", "file_id": "file-1"}
         )
