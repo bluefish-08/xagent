@@ -1618,7 +1618,7 @@ class TestIngestWebHandleWebFile:
 
         assert captured["rollback_error"] is None
         assert response.status_code == 500
-        assert captured.get("upload_filename_ok", True) is True
+        assert captured["upload_filename_ok"] is True
         assert not expected_persistent.exists()
         mock_delete_document.assert_called_once_with(
             collection, "doc-1", user.id, False
@@ -1754,7 +1754,9 @@ class TestIngestWebHandleWebFile:
 
         assert captured["rollback_error"] is None
         assert response.status_code == 500
-        assert captured.get("upload_filename_ok", True) is True
+        # The refresh path never reaches get_upload_path; pin that, so a
+        # future routing change cannot quietly void this instrumentation.
+        assert "upload_filename_ok" not in captured
         assert captured["refresh_file_id_ok"] is True
         assert captured["refresh_content_ok"] is True
         assert persistent_file.read_text(encoding="utf-8") == "old content"
@@ -1905,7 +1907,9 @@ class TestIngestWebHandleWebFile:
 
         assert "rag restore failed" in captured["rollback_error"]
         assert response.status_code == 500
-        assert captured.get("upload_filename_ok", True) is True
+        # The refresh path never reaches get_upload_path; pin that, so a
+        # future routing change cannot quietly void this instrumentation.
+        assert "upload_filename_ok" not in captured
         assert captured["refresh_file_id_ok"] is True
         assert captured["refresh_content_ok"] is True
         assert persistent_file.read_text(encoding="utf-8") == "old content"
