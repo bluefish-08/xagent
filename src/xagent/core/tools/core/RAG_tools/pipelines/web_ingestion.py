@@ -393,9 +393,7 @@ def _run_legacy_persistent_file_compensation(
     # The reuse handler declares only document/status, and its file_path points
     # at a pre-existing file, so unlinking it here would destroy user data.
     if file_info and (
-        _has_per_boundary_compensation(file_info)
-        or "rollback_on_failure" in file_info
-        or "file_compensation" in file_info
+        _has_per_boundary_compensation(file_info) or "rollback_on_failure" in file_info
     ):
         return None
 
