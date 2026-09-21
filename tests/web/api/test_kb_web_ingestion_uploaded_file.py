@@ -1419,7 +1419,7 @@ class TestIngestWebHandleWebFile:
             collection: str,
             collection_is_sanitized: bool,
         ) -> Path:
-            assert collection_is_sanitized is True
+            captured["collection_sanitized"] = collection_is_sanitized
             return uploads_root / f"user_{user_id}" / collection / filename_arg
 
         captured: dict[str, object] = {}
@@ -1498,6 +1498,8 @@ class TestIngestWebHandleWebFile:
         assert captured["persistent_exists"] is True
         assert captured["storage_exists"] is True
         assert response.status_code == 500
+        assert captured["collection_sanitized"] is True
+        assert response.json()["status"] == "error"
         assert captured["file_id"]
         assert not expected_persistent.exists()
         assert not get_unscoped_file_storage().exists(captured["storage_key"])
@@ -1537,7 +1539,7 @@ class TestIngestWebHandleWebFile:
             collection: str,
             collection_is_sanitized: bool,
         ) -> Path:
-            assert filename_arg == filename
+            captured["upload_filename_ok"] = filename_arg == filename
             return uploads_root / f"user_{user_id}" / collection / filename_arg
 
         captured: dict[str, object] = {}
@@ -1616,6 +1618,7 @@ class TestIngestWebHandleWebFile:
 
         assert captured["rollback_error"] is None
         assert response.status_code == 500
+        assert captured.get("upload_filename_ok", True) is True
         assert not expected_persistent.exists()
         mock_delete_document.assert_called_once_with(
             collection, "doc-1", user.id, False
@@ -1672,7 +1675,7 @@ class TestIngestWebHandleWebFile:
             collection: str,
             collection_is_sanitized: bool,
         ) -> Path:
-            assert filename_arg == filename
+            captured["upload_filename_ok"] = filename_arg == filename
             return uploads_root / f"user_{user_id}" / collection / filename_arg
 
         captured: dict[str, object] = {}
@@ -1689,8 +1692,10 @@ class TestIngestWebHandleWebFile:
             temp_md = tmp_path / "temp.md"
             temp_md.write_text("new content", encoding="utf-8")
             file_info = file_handler(temp_md, title, collection, url)
-            assert file_info["file_id"] == existing_file_id
-            assert persistent_file.read_text(encoding="utf-8") == "new content"
+            captured["refresh_file_id_ok"] = file_info["file_id"] == existing_file_id
+            captured["refresh_content_ok"] = (
+                persistent_file.read_text(encoding="utf-8") == "new content"
+            )
 
             from xagent.core.tools.core.RAG_tools.core.schemas import WebIngestionResult
 
@@ -1749,6 +1754,9 @@ class TestIngestWebHandleWebFile:
 
         assert captured["rollback_error"] is None
         assert response.status_code == 500
+        assert captured.get("upload_filename_ok", True) is True
+        assert captured["refresh_file_id_ok"] is True
+        assert captured["refresh_content_ok"] is True
         assert persistent_file.read_text(encoding="utf-8") == "old content"
         mock_snapshot_runs.assert_called_once_with(existing_file_id)
         mock_snapshot_rag.assert_called_once_with(
@@ -1815,7 +1823,7 @@ class TestIngestWebHandleWebFile:
             collection: str,
             collection_is_sanitized: bool,
         ) -> Path:
-            assert filename_arg == filename
+            captured["upload_filename_ok"] = filename_arg == filename
             return uploads_root / f"user_{user_id}" / collection / filename_arg
 
         captured: dict[str, object] = {}
@@ -1832,8 +1840,10 @@ class TestIngestWebHandleWebFile:
             temp_md = tmp_path / "temp.md"
             temp_md.write_text("new content", encoding="utf-8")
             file_info = file_handler(temp_md, title, collection, url)
-            assert file_info["file_id"] == existing_file_id
-            assert persistent_file.read_text(encoding="utf-8") == "new content"
+            captured["refresh_file_id_ok"] = file_info["file_id"] == existing_file_id
+            captured["refresh_content_ok"] = (
+                persistent_file.read_text(encoding="utf-8") == "new content"
+            )
 
             captured["rollback_error"] = run_web_file_rollback(file_info)
 
@@ -1895,6 +1905,9 @@ class TestIngestWebHandleWebFile:
 
         assert "rag restore failed" in captured["rollback_error"]
         assert response.status_code == 500
+        assert captured.get("upload_filename_ok", True) is True
+        assert captured["refresh_file_id_ok"] is True
+        assert captured["refresh_content_ok"] is True
         assert persistent_file.read_text(encoding="utf-8") == "old content"
         mock_restore_runs.assert_called_once()
 
@@ -2465,5 +2478,6 @@ def test_reuse_handler_output_spares_the_persistent_file(tmp_path) -> None:
         warnings=[],
     )
 
+    # The facade is a mock, so the file is never actually unlinked here; the
+    # registration call is what says whether the guard let the cleanup through.
     facade.record_web_page_file_side_effect.assert_not_called()
-    assert persistent.exists()

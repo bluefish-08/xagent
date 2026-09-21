@@ -1500,8 +1500,8 @@ class TestCrawlStopReasonDrivesStatus:
 
 
 class TestLegacyPersistentFileCompensationGuard:
-    """The legacy persistent-file cleanup must not touch a file that the
-    file_handler restores itself through boundary compensation."""
+    """The legacy persistent-file cleanup must not touch a file whose fate the
+    file_handler already owns through boundary compensation."""
 
     @staticmethod
     def _run(tmp_path: Path, file_info: Optional[dict]) -> tuple[MagicMock, Path]:
