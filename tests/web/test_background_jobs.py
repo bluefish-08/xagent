@@ -1456,11 +1456,11 @@ def test_background_web_file_new_branch_compensates_on_failure(tmp_path, monkeyp
             )
             from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
             from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
-                _run_per_boundary_compensation,
+                _run_file_handler_compensation,
             )
 
             assert (
-                _run_per_boundary_compensation(
+                _run_file_handler_compensation(
                     pipeline_facade=get_kb_coordinator().pipeline,
                     page_operation=None,
                     file_info=result,
