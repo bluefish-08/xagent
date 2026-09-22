@@ -395,9 +395,12 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
                         const skills = Array.isArray(toolArgs.skills) ? toolArgs.skills : [toolArgs.skills];
                         configUpdates.selectedSkills = skills.map((skill: any) => typeof skill === 'string' ? skill : skill.name || skill.value).filter(Boolean);
                       }
-                      if (toolArgs.tool_categories) {
-                        const tcs = Array.isArray(toolArgs.tool_categories) ? toolArgs.tool_categories : [toolArgs.tool_categories];
-                        configUpdates.selectedToolCategories = tcs.map((tc: any) => typeof tc === 'string' ? tc : tc.name || tc.category || tc.value).filter(Boolean);
+                      // Only when the model touched this field, and only what
+                      // the server stored -- this form also feeds preview, so
+                      // the model's own arguments must never seed it. A null
+                      // means unconfigured; leave the selection alone.
+                      if (toolArgs.tool_categories !== undefined && Array.isArray(result.tool_categories)) {
+                        configUpdates.selectedToolCategories = result.tool_categories.filter((c: any) => typeof c === 'string' && !c.startsWith('mcp:'));
                       }
                       if (toolArgs.suggested_prompts) {
                         const sp = Array.isArray(toolArgs.suggested_prompts) ? toolArgs.suggested_prompts : [toolArgs.suggested_prompts];

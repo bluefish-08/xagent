@@ -21,6 +21,8 @@ from xagent.core.tools.adapters.vibe.agent_tool import (
     UpdateAgentTool,
     _coerce_db_task_id,
     _DelegatedAgentTaskEventTraceHandler,
+    _sanitize_llm_tool_categories,
+    _with_stored_connector_grants,
     build_published_agent_tools_from_records,
     gen_agent_tool_name,
     get_published_agents_tools,
@@ -177,8 +179,9 @@ class TestCreateAgentTool:
 
     @pytest.mark.asyncio
     async def test_assignable_tool_categories_hide_unassignable(self) -> None:
-        """Neither ``other`` (internal fallback) nor ``agent`` (Workforce-only
-        delegation, issue #802) is advertised as assignable."""
+        """``other`` (internal fallback), ``agent`` (Workforce-only delegation,
+        issue #802) and bare ``mcp`` (admits every connector at once) are all
+        kept out of what the model is offered."""
         categories = (await ListToolCategoriesTool().run_json_async({}))["categories"]
         create_description = CreateAgentTool(
             session_factory=None, user_id=1
@@ -202,11 +205,99 @@ class TestCreateAgentTool:
                 c.strip() for c in line.split("Available categories:")[1].split(",")
             ]
 
-        for hidden in ("other", "agent"):
+        for hidden in ("other", "agent", "mcp"):
             assert hidden not in categories
             assert hidden not in advertised(create_categories_line)
             assert hidden not in advertised(update_categories_line)
+        # Pinned by name, not derived from the implementation: "ssh" stays
+        # offered while "mcp" does not.
         assert "basic" in categories
+        assert "ssh" in categories
+
+    def test_sanitize_llm_tool_categories_drops_bare_mcp(self) -> None:
+        assert _sanitize_llm_tool_categories(["file", "mcp"]) == ["file"]
+
+    def test_sanitize_llm_tool_categories_drops_invented_names(self) -> None:
+        assert _sanitize_llm_tool_categories(["file", "email", "mcp_server"]) == [
+            "file"
+        ]
+
+    def test_sanitize_llm_tool_categories_keeps_server_scoped_mcp(self) -> None:
+        """A prompt-driven update must not drop connectors picked in the UI."""
+        assert _sanitize_llm_tool_categories(["mcp:github", "basic"]) == [
+            "mcp:github",
+            "basic",
+        ]
+
+    def test_sanitize_llm_tool_categories_returns_none_when_nothing_survives(
+        self,
+    ) -> None:
+        """``None`` leaves the field alone; ``[]`` would mean zero tools."""
+        assert _sanitize_llm_tool_categories(["mcp"]) is None
+        assert _sanitize_llm_tool_categories(["nonsense"]) is None
+
+    def test_sanitize_llm_tool_categories_deduplicates(self) -> None:
+        """Duplicates would corrupt the form's "Selected: N" count."""
+        assert _sanitize_llm_tool_categories(["file", "file", "basic"]) == [
+            "file",
+            "basic",
+        ]
+
+    def test_sanitize_llm_tool_categories_trims_mcp_scope(self) -> None:
+        assert _sanitize_llm_tool_categories(["mcp:  github  "]) == ["mcp:github"]
+
+    def test_sanitize_llm_tool_categories_rejects_malformed_shapes(self) -> None:
+        """``ensure_list`` maps these to None; the create gate must not read
+        that as "no categories requested" and persist an all-tools agent.
+
+        The falsy ones matter most: a gate written as ``if requested`` instead
+        of ``is not None`` would wave them straight through.
+        """
+        for malformed in ({"a": 1}, True, 42, False, 0, ""):
+            assert _sanitize_llm_tool_categories(malformed) is None
+
+    def test_with_stored_connector_grants_carries_bare_mcp_over(self) -> None:
+        """Bare ``mcp`` is what loads the account's connectors at all, and the
+        model is never shown it either, so a prompt update must not drop it."""
+        assert _with_stored_connector_grants(["file"], ["basic", "mcp"]) == [
+            "file",
+            "mcp",
+        ]
+
+    def test_with_stored_connector_grants_matches_exactly(self) -> None:
+        """Prefix-matching ``mcp`` would sweep up unrelated names."""
+        assert _with_stored_connector_grants(["file"], ["mcpfoo"]) == ["file"]
+
+    def test_with_stored_connector_grants_leaves_zero_tools_alone(self) -> None:
+        """An explicit ``[]`` is a zero-tool agent (#944); topping it up with
+        connectors would make that unreachable."""
+        assert _with_stored_connector_grants([], ["mcp", "mcp:github"]) == []
+
+    def test_with_stored_connector_grants_carries_connectors_over(self) -> None:
+        """The model is never shown ``mcp:<server>``, so a full-replace update
+        would otherwise unbind every connector picked in the UI."""
+        assert _with_stored_connector_grants(["file"], ["mcp:github", "basic"]) == [
+            "file",
+            "mcp:github",
+        ]
+
+    def test_with_stored_mcp_scopes_does_not_duplicate(self) -> None:
+        assert _with_stored_connector_grants(["mcp:github"], ["mcp:github"]) == [
+            "mcp:github"
+        ]
+
+    def test_with_stored_mcp_scopes_handles_unconfigured(self) -> None:
+        assert _with_stored_connector_grants(["file"], None) == ["file"]
+
+    def test_sanitize_llm_tool_categories_preserves_none(self) -> None:
+        assert _sanitize_llm_tool_categories(None) is None
+
+    def test_sanitize_llm_tool_categories_drops_empty_mcp_scope(self) -> None:
+        assert _sanitize_llm_tool_categories(["mcp:", "mcp:   "]) is None
+
+    def test_sanitize_llm_tool_categories_preserves_explicit_empty(self) -> None:
+        """An explicit ``[]`` is a zero-tool agent, not "no selection" (#944)."""
+        assert _sanitize_llm_tool_categories([]) == []
 
     def test_coerce_db_task_id_accepts_only_db_task_formats(self) -> None:
         assert _coerce_db_task_id(12) == 12
@@ -1311,6 +1402,115 @@ class TestCreateAgentTool:
                 pass
 
     @pytest.mark.asyncio
+    async def test_create_agent_result_reports_what_was_stored(self) -> None:
+        """The result carries the stored list, which is what the builder form
+        and therefore preview run with."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(username="testuser_res_cats", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            user_id = user.id
+            db.close()
+
+            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
+            result = await tool.run_json_async(
+                {
+                    "name": "stored_cats_agent",
+                    "description": "Agent whose stored categories are reported",
+                    "instructions": "Do things",
+                    "tool_categories": ["file", "mcp", "basic"],
+                }
+            )
+
+            assert result["status"] == "success"
+            assert result["tool_categories"] == ["file", "basic"]
+        finally:
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_create_agent_result_reports_null_for_unconfigured(self) -> None:
+        """Unconfigured must not be reported as ``[]``: the form would read
+        that as zero tools while the agent actually has every default one."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(username="testuser_res_null", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            user_id = user.id
+            db.close()
+
+            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
+            result = await tool.run_json_async(
+                {
+                    "name": "unconfigured_cats_agent",
+                    "description": "Agent without explicit tool selection",
+                    "instructions": "Do things",
+                }
+            )
+
+            assert result["status"] == "success"
+            assert result["tool_categories"] is None
+        finally:
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_create_agent_refuses_when_no_category_survives(self) -> None:
+        """Persisting ``None`` here would build an all-default-tools agent, so
+        the model is asked to pick again instead."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(username="testuser_res_err", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            user_id = user.id
+            db.close()
+
+            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
+            result = await tool.run_json_async(
+                {
+                    "name": "all_dropped_agent",
+                    "description": "Agent whose categories are all unassignable",
+                    "instructions": "Do things",
+                    "tool_categories": ["mcp"],
+                }
+            )
+
+            assert result["status"] == "error"
+            assert "mcp" in result["message"]
+
+            verify_db = SessionLocal()
+            try:
+                assert (
+                    verify_db.query(Agent)
+                    .filter(Agent.name == "all_dropped_agent")
+                    .first()
+                    is None
+                )
+            finally:
+                verify_db.close()
+        finally:
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
     async def test_create_agent_omitted_tool_categories_persists_none(self) -> None:
         """Omitted ``tool_categories`` persists NULL, not ``[]`` (#944).
 
@@ -1744,6 +1944,128 @@ class TestUpdateAgentTool:
             assert existing_agent.description == "Updated description"
             assert existing_agent.instructions == "Updated instructions"
 
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_create_agent_refuses_malformed_tool_categories(self) -> None:
+        """A dict maps to None through ``ensure_list``; treating that as "not
+        requested" would persist an unconfigured (all-tools) agent."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(
+                username="testuser_malformed", password_hash="x", is_admin=False
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            user_id = user.id
+            db.close()
+
+            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
+            # The falsy shapes are the ones a truthy gate would wave through.
+            for index, malformed in enumerate(({"a": 1}, "", False)):
+                name = f"malformed_cats_agent_{index}"
+                result = await tool.run_json_async(
+                    {
+                        "name": name,
+                        "description": "Agent with a malformed category payload",
+                        "instructions": "Do things",
+                        "tool_categories": malformed,
+                    }
+                )
+
+                assert result["status"] == "error", malformed
+                verify_db = SessionLocal()
+                try:
+                    assert (
+                        verify_db.query(Agent).filter(Agent.name == name).first()
+                        is None
+                    ), malformed
+                finally:
+                    verify_db.close()
+        finally:
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_refuses_when_no_category_survives(self) -> None:
+        """Must not fall through to the no-op branch and report "no changes"
+        success while silently discarding what was asked for."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(username="testuser_upd_err", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            agent = Agent(
+                user_id=user.id,
+                name="upd_err_agent",
+                status=AgentStatus.DRAFT,
+                tool_categories=["file"],
+            )
+            db.add(agent)
+            db.commit()
+            db.refresh(agent)
+            agent_id = agent.id
+
+            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
+            result = await tool.run_json_async(
+                {"agent_id": agent_id, "tool_categories": ["mcp"]}
+            )
+
+            assert result["status"] == "error"
+            db.refresh(agent)
+            assert agent.tool_categories == ["file"]
+        finally:
+            db.close()
+            try:
+                import os
+
+                os.remove(db_path)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_update_agent_keeps_ui_picked_connectors(self) -> None:
+        """``update_agent_fields`` replaces the whole column and the model is
+        never shown ``mcp:<server>``, so the scopes must be carried over."""
+        db, db_path, SessionLocal = _create_session()
+        try:
+            user = User(username="testuser_keep_mcp", password_hash="x", is_admin=False)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            agent = Agent(
+                user_id=user.id,
+                name="keep_mcp_agent",
+                status=AgentStatus.DRAFT,
+                tool_categories=["basic", "mcp:github"],
+            )
+            db.add(agent)
+            db.commit()
+            db.refresh(agent)
+            agent_id = agent.id
+
+            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
+            result = await tool.run_json_async(
+                {"agent_id": agent_id, "tool_categories": ["file"]}
+            )
+
+            assert result["status"] == "success"
+            db.refresh(agent)
+            assert agent.tool_categories == ["file", "mcp:github"]
+            assert result["tool_categories"] == ["file", "mcp:github"]
         finally:
             db.close()
             try:

@@ -42,11 +42,118 @@ MAX_AGENT_NAME_LENGTH = 200
 
 
 def _assignable_tool_categories() -> list[str]:
+    """Categories the builder may offer the model.
+
+    Bare ``"mcp"`` is excluded on top of the never-assignable set: it admits
+    every connector at once, and the UI picks connectors per server. The model
+    is never told either form exists.
+    """
     return [
         cat.value
         for cat in ToolCategory
         if cat.value not in AGENT_CONFIG_UNASSIGNABLE_CATEGORIES
+        and cat is not ToolCategory.MCP
     ]
+
+
+_MCP_SCOPE_PREFIX = "mcp:"
+
+_STORED_TOOL_CATEGORIES_FIELD = Field(
+    default=None,
+    description=(
+        "Tool categories actually stored, after unassignable ones were "
+        "dropped. ``null`` means unconfigured (every default tool), which "
+        "is not the same as an empty list (zero tools)."
+    ),
+)
+
+
+def _canonical_llm_tool_category(category: str, allowed: set[str]) -> str | None:
+    """Storable form of one model-supplied category, or ``None`` if not offered.
+
+    A scope is stored trimmed so the row matches what the picker writes;
+    ``ToolSelectionSpec`` normalizes again at read time, but an untrimmed row
+    still reaches the form and a save round-trip verbatim.
+    """
+    if category in allowed:
+        return category
+    if category.startswith(_MCP_SCOPE_PREFIX):
+        scope = category[len(_MCP_SCOPE_PREFIX) :].strip()
+        if scope:
+            return f"{_MCP_SCOPE_PREFIX}{scope}"
+    return None
+
+
+def _unassignable_categories_message(requested: Any) -> str:
+    return (
+        f"Error: none of the requested tool categories are assignable: {requested!r}. "
+        f"Choose from: {', '.join(_assignable_tool_categories())}."
+    )
+
+
+def _sanitize_llm_tool_categories(raw: Any) -> list[str] | None:
+    """Keep what the model was offered, deduplicated, plus ``mcp:<server>``.
+
+    Connector scopes are never advertised to the model, but a caller that
+    supplies one is taken at its word. Carrying over the grants a prompt-driven
+    update would otherwise drop is :func:`_with_stored_connector_grants`, not
+    this function.
+
+    ``None`` means "nothing usable survived"; each caller decides what that
+    means, because the two disagree -- persisting ``None`` on create would
+    build an unconfigured (all-default-tools) agent, not a restricted one. A
+    caller's own ``[]`` is returned unchanged, so a caller can still ask for
+    the explicit zero-tool agent (#944).
+    """
+    parsed = ensure_list(raw)
+    if parsed is None:
+        return None
+    allowed = set(_assignable_tool_categories())
+    kept: list[str] = []
+    seen: set[str] = set()
+    for category in parsed:
+        canonical = _canonical_llm_tool_category(category, allowed)
+        if canonical is not None and canonical not in seen:
+            seen.add(canonical)
+            kept.append(canonical)
+    if parsed and not kept:
+        logger.warning(
+            "Dropped every tool category the model proposed: %s", sorted(set(parsed))
+        )
+        return None
+    return kept
+
+
+def _is_connector_grant(category: str) -> bool:
+    """Bare ``mcp`` counts: it is what makes a task load the account's
+    connectors at all, and rows written by other products still rely on it."""
+    return category == ToolCategory.MCP.value or category.startswith(_MCP_SCOPE_PREFIX)
+
+
+def _with_stored_connector_grants(selected: list[str], stored: Any) -> list[str]:
+    """Re-attach connector grants the model was never shown.
+
+    ``update_agent_fields`` replaces the whole column, so without this any
+    update that carries categories at all silently unbinds every connector
+    on the agent.
+
+    An explicit ``[]`` is passed through untouched: that is the caller asking
+    for a zero-tool agent (#944), and topping it up with connectors would make
+    that unreachable through this tool.
+    """
+    if not selected:
+        return selected
+    existing = [
+        c for c in (stored or []) if isinstance(c, str) and _is_connector_grant(c)
+    ]
+    return selected + [c for c in existing if c not in selected]
+
+
+def _stored_tool_categories(agent: Any) -> list[str] | None:
+    """Report ``null`` for unconfigured rather than collapsing it to ``[]``."""
+    if agent.tool_categories is None:
+        return None
+    return list(agent.tool_categories)
 
 
 class _DelegatedAgentDatabaseTraceHandler:
@@ -439,6 +546,7 @@ class CreateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Creation status")
     message: str = Field(description="Detailed message about the created agent")
+    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
 
 
 class UpdateAgentToolArgs(BaseModel):
@@ -496,6 +604,7 @@ class UpdateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Update status")
     message: str = Field(description="Detailed message about the updated agent")
+    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
 
 
 class ListAgentsToolArgs(BaseModel):
@@ -972,6 +1081,23 @@ class CreateAgentTool(AbstractBaseTool):
                         ),
                     ).model_dump()
 
+                # Gate on the raw argument: ``ensure_list`` maps a malformed
+                # shape (dict, bool) to None, and treating that as "nothing
+                # requested" would persist None -- every default tool.
+                requested_categories = args.get("tool_categories")
+                tool_categories = _sanitize_llm_tool_categories(requested_categories)
+                if requested_categories is not None and tool_categories is None:
+                    return CreateAgentToolResult(
+                        agent_id=0,
+                        agent_name="",
+                        tool_name="",
+                        markdown_link="",
+                        status="error",
+                        message=(
+                            _unassignable_categories_message(requested_categories)
+                        ),
+                    ).model_dump()
+
                 agent = AgentStore(db).create_agent(
                     user_id=self._user_id,
                     name=agent_name,
@@ -981,7 +1107,7 @@ class CreateAgentTool(AbstractBaseTool):
                     models=models_config if models_config else None,
                     knowledge_bases=knowledge_bases,
                     skills=ensure_list(args.get("skills")),
-                    tool_categories=ensure_list(args.get("tool_categories")),
+                    tool_categories=tool_categories,
                     status=AgentStatus.DRAFT,  # Create as DRAFT, not PUBLISHED
                     suggested_prompts=[],
                 )
@@ -1007,6 +1133,7 @@ class CreateAgentTool(AbstractBaseTool):
                     tool_name=tool_name,
                     markdown_link=markdown_link,
                     status="success",
+                    tool_categories=_stored_tool_categories(agent),
                     message=(
                         f"✅ Agent created successfully\n\n"
                         f"{rename_note}"
@@ -1241,11 +1368,30 @@ class UpdateAgentTool(AbstractBaseTool):
                     updates["instructions"] = new_instructions
                     changes.append("instructions updated")
 
-                # Update tool_categories if provided
-                new_tool_categories = ensure_list(args.get("tool_categories"))
+                # Update tool_categories if provided. Same gate as create: a
+                # request whose every entry was rejected must not read as
+                # "field absent" and report an untouched agent as success.
+                requested_categories = args.get("tool_categories")
+                new_tool_categories = _sanitize_llm_tool_categories(
+                    requested_categories
+                )
+                if requested_categories is not None and new_tool_categories is None:
+                    return UpdateAgentToolResult(
+                        agent_id=0,
+                        agent_name="",
+                        tool_name="",
+                        markdown_link="",
+                        status="error",
+                        message=(
+                            _unassignable_categories_message(requested_categories)
+                        ),
+                    ).model_dump()
                 if new_tool_categories is not None:
-                    updates["tool_categories"] = new_tool_categories
-                    changes.append(f"tool_categories → {new_tool_categories}")
+                    merged = _with_stored_connector_grants(
+                        new_tool_categories, agent.tool_categories
+                    )
+                    updates["tool_categories"] = merged
+                    changes.append(f"tool_categories → {merged}")
 
                 # Update knowledge_bases if provided
                 new_knowledge_bases = ensure_list(args.get("knowledge_bases"))
@@ -1288,6 +1434,7 @@ class UpdateAgentTool(AbstractBaseTool):
                         tool_name=gen_agent_tool_name(agent.id, agent.name),
                         markdown_link=f"[{agent.name}](agent://{agent.id})",
                         status="success",
+                        tool_categories=_stored_tool_categories(agent),
                         message=f"ℹ️ No updates were made to agent '{agent.name}' (ID: {agent_id}). "
                         f"Status: {agent.status.value.upper()}. "
                         f"All fields were the same or no values were provided.",
@@ -1313,6 +1460,7 @@ class UpdateAgentTool(AbstractBaseTool):
                     tool_name=tool_name,
                     markdown_link=markdown_link,
                     status="success",
+                    tool_categories=_stored_tool_categories(agent),
                     message=(
                         f"✅ Agent updated successfully\n\n"
                         f"**Agent Details:**\n"
