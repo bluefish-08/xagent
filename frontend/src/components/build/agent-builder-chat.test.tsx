@@ -388,55 +388,11 @@ describe("AgentBuilderChat", () => {
     expect(apiRequestMock).not.toHaveBeenCalled()
   })
 
-  it("seeds tool categories from what the server stored, not from the model's arguments", async () => {
-    const onUpdateConfig = vi.fn()
-    render(
-      <AgentBuilderChat agentConfig={agentConfig} onUpdateConfig={onUpdateConfig} />
-    )
-
-    fireEvent.click(screen.getByText("send-chat-input"))
-    const ws = MockWebSocket.instances[0]
-    ws.open()
-    await waitFor(() => {
-      expect(ws.sentMessages).toHaveLength(1)
-    })
-
-    ws.onmessage?.({
-      data: JSON.stringify({
-        type: "trace_event",
-        event_id: "tool-end",
-        event_type: "tool_execution_end",
-        step_id: "react-1",
-        timestamp: 3,
-        data: {
-          tool_name: "create_agent",
-          // The two sources must disagree, or this test cannot tell them
-          // apart: the model also invented "email", which the server dropped,
-          // and the server stored "basic" on top.
-          tool_params: { tool_categories: ["file", "mcp", "email"] },
-          result: {
-            status: "success",
-            agent_id: 7,
-            tool_categories: ["file", "basic", "mcp:github"],
-          },
-        },
-      }),
-    })
-
-    await waitFor(() => {
-      expect(onUpdateConfig).toHaveBeenCalled()
-    })
-    const update = onUpdateConfig.mock.calls
-      .map((call) => call[0])
-      .find((arg) => arg?.selectedToolCategories !== undefined)
-    // "basic" proves the server won; "email" would prove the model did.
-    // mcp:<server> stays out of this field (agent-builder keeps connectors
-    // in selectedMcpServers).
-    expect(update?.selectedToolCategories).toEqual(["file", "basic"])
-  })
-
-  it("leaves the selection alone when the model did not touch categories", async () => {
-    const onUpdateConfig = vi.fn()
+  const emitAgentToolEnd = async (
+    onUpdateConfig: ReturnType<typeof vi.fn>,
+    toolParams: Record<string, unknown>,
+    storedCategories: string[] | null,
+  ) => {
     render(
       <AgentBuilderChat agentConfig={agentConfig} onUpdateConfig={onUpdateConfig} />
     )
@@ -457,11 +413,8 @@ describe("AgentBuilderChat", () => {
         timestamp: 3,
         data: {
           tool_name: "update_agent",
-          // Renaming only. The server still reports the agent's stored
-          // categories; overwriting the form with them would wipe picks the
-          // user has made but not saved yet.
-          tool_params: { agent_id: 7, name: "Renamed" },
-          result: { status: "success", agent_id: 7, tool_categories: ["file"] },
+          tool_params: { agent_id: 7, ...toolParams },
+          result: { status: "success", agent_id: 7, tool_categories: storedCategories },
         },
       }),
     })
@@ -469,10 +422,29 @@ describe("AgentBuilderChat", () => {
     await waitFor(() => {
       expect(onUpdateConfig).toHaveBeenCalled()
     })
-    const touched = onUpdateConfig.mock.calls
-      .map((call) => call[0])
-      .some((arg) => arg?.selectedToolCategories !== undefined)
-    expect(touched).toBe(false)
+    return onUpdateConfig.mock.calls.map((call) => call[0])
+  }
+
+  it.each([
+    // The server kept the connector the model did not pass; forwarding the
+    // model's own list would drop it from the form.
+    ["the stored list, not the model's", { tool_categories: ["file"] }, ["file", "mcp:github"]],
+    ["an explicit empty list", { tool_categories: [] }, []],
+  ])("forwards %s to the parent unfiltered", async (_label, toolParams, stored) => {
+    const updates = await emitAgentToolEnd(vi.fn(), toolParams, stored)
+    const update = updates.find((arg) => arg?.storedToolCategories !== undefined)
+    expect(update?.storedToolCategories).toEqual(stored)
+  })
+
+  it.each([
+    // A rename-only call still reports the stored categories; applying them
+    // would wipe picks the user has made but not saved yet.
+    ["an omitted argument", { name: "Renamed" }, ["file"]],
+    ["an explicit null argument", { name: "Renamed", tool_categories: null }, ["file"]],
+    ["a null stored result", { tool_categories: ["file"] }, null],
+  ])("leaves the unsaved selection alone on %s", async (_label, toolParams, stored) => {
+    const updates = await emitAgentToolEnd(vi.fn(), toolParams, stored)
+    expect(updates.some((arg) => arg?.storedToolCategories !== undefined)).toBe(false)
   })
 
   it("passes failed task completion status into the process renderer", async () => {

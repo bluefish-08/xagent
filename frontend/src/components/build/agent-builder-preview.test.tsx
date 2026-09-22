@@ -1,6 +1,7 @@
 import React from "react"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { AgentConfig } from "./agent-builder-chat"
 
 const apiRequestMock = vi.hoisted(() => vi.fn())
 const setTaskIdMock = vi.hoisted(() => vi.fn())
@@ -8,6 +9,7 @@ const sendMessageMock = vi.hoisted(() => vi.fn())
 const dispatchMock = vi.hoisted(() => vi.fn())
 const taskConversationPanelMock = vi.hoisted(() => vi.fn())
 const closeFilePreviewMock = vi.hoisted(() => vi.fn())
+const agentBuilderChatMock = vi.hoisted(() => vi.fn())
 
 vi.mock("@/lib/api-wrapper", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api-wrapper")>(
@@ -86,8 +88,9 @@ vi.mock("next/navigation", () => ({
 }))
 
 vi.mock("@/components/layout/resizable-three-column-layout", () => ({
-  ResizableThreeColumnLayout: ({ middlePanel, rightPanel }: { middlePanel: React.ReactNode; rightPanel: React.ReactNode }) => (
+  ResizableThreeColumnLayout: ({ leftPanel, middlePanel, rightPanel }: { leftPanel: React.ReactNode; middlePanel: React.ReactNode; rightPanel: React.ReactNode }) => (
     <div>
+      {leftPanel}
       <div data-testid="middle-panel">{middlePanel}</div>
       <div data-testid="right-panel">{rightPanel}</div>
     </div>
@@ -106,7 +109,10 @@ vi.mock("@/components/task/task-conversation-panel", () => ({
 }))
 
 vi.mock("@/components/build/agent-builder-chat", () => ({
-  AgentBuilderChat: () => null,
+  AgentBuilderChat: (props: unknown) => {
+    agentBuilderChatMock(props)
+    return null
+  },
 }))
 
 vi.mock("@/components/kb/knowledge-base-creation-dialog", () => ({
@@ -146,10 +152,16 @@ vi.mock("@/components/build/build-file-preview-sheet", () => ({
 
 import { AgentBuilder } from "./agent-builder"
 
+let storedToolCategories: string[] = ["ssh"]
+let putBody: { tool_categories?: string[] } | undefined
+
 describe("AgentBuilder preview", () => {
   const originalWebSocket = globalThis.WebSocket
 
   beforeEach(() => {
+    storedToolCategories = ["ssh"]
+    putBody = undefined
+    agentBuilderChatMock.mockReset()
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
     sendMessageMock.mockReset()
@@ -158,7 +170,7 @@ describe("AgentBuilder preview", () => {
     sendMessageMock.mockResolvedValue(undefined)
     globalThis.WebSocket = vi.fn() as any
 
-    apiRequestMock.mockImplementation((url: string) => {
+    apiRequestMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url.endsWith("/api/kb/collections")) {
         return Promise.resolve(new Response(JSON.stringify({ collections: [] }), { status: 200 }))
       }
@@ -179,10 +191,18 @@ describe("AgentBuilder preview", () => {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
       }
       if (url.endsWith("/api/mcp/servers")) {
-        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+        return Promise.resolve(new Response(JSON.stringify([{ id: 1, name: "github" }]), { status: 200 }))
       }
       if (url.endsWith("/api/agents/42/triggers")) {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
+      }
+      if (url.endsWith("/api/agents/42") && init?.method === "PUT") {
+        putBody = JSON.parse(init.body as string)
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: 42, tool_categories: putBody?.tool_categories, logo_url: null }), {
+            status: 200,
+          })
+        )
       }
       if (url.endsWith("/api/agents/42")) {
         return Promise.resolve(
@@ -199,7 +219,7 @@ describe("AgentBuilder preview", () => {
               team_id: null,
               knowledge_bases: [],
               skills: [],
-              tool_categories: ["ssh"],
+              tool_categories: storedToolCategories,
               logo_url: null,
               models: {
                 general: 7,
@@ -300,6 +320,58 @@ describe("AgentBuilder preview", () => {
       preview_agent_id: 42,
       is_preview: true,
       tool_categories: ["ssh"],
+    })
+  })
+
+  describe("with a builder-chat category result", () => {
+    const applyChatUpdate = (updates: Partial<AgentConfig>) =>
+      act(() => {
+        agentBuilderChatMock.mock.lastCall?.[0].onUpdateConfig(updates)
+      })
+
+    const previewCategories = async () => {
+      fireEvent.click(screen.getByText("send-preview-message"))
+      await waitFor(() => {
+        expect(apiRequestMock).toHaveBeenCalledWith(
+          "http://api.local/api/chat/task/create",
+          expect.objectContaining({ method: "POST" }),
+        )
+      })
+      const createCall = apiRequestMock.mock.calls.find(([url]) =>
+        String(url).endsWith("/api/chat/task/create"),
+      )
+      return JSON.parse(createCall?.[1]?.body as string).agent_config.tool_categories
+    }
+
+    const saveCategories = async () => {
+      const updateButton = screen.getByRole("button", { name: "builds.editor.header.update" })
+      await waitFor(() => expect(updateButton).not.toBeDisabled())
+      fireEvent.click(updateButton)
+      await waitFor(() => expect(putBody).toBeDefined())
+      return putBody?.tool_categories
+    }
+
+    it("carries its stored connectors into preview and save", async () => {
+      storedToolCategories = ["file"]
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByDisplayValue("Existing SSH agent")
+
+      // Bare mcp follows page-load handling: kept, not stripped.
+      applyChatUpdate({ storedToolCategories: ["file", "mcp", "mcp:github"] })
+
+      expect(await previewCategories()).toEqual(["file", "mcp", "mcp:github"])
+      expect(await saveCategories()).toEqual(["file", "mcp", "mcp:github"])
+    })
+
+    it("clears previously selected connectors when it is empty", async () => {
+      storedToolCategories = ["basic", "mcp:github"]
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByDisplayValue("Existing SSH agent")
+
+      applyChatUpdate({ storedToolCategories: [] })
+
+      expect(await previewCategories()).toEqual([])
+      expect(await saveCategories()).toEqual([])
     })
   })
 

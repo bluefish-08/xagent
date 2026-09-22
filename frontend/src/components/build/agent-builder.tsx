@@ -160,6 +160,15 @@ function mcpServerNamesFromToolCategories(categories: string[]): string[] {
     .map((c) => c.replace('mcp:', ''))
 }
 
+// Page load and a builder-chat result must hydrate both selections from one
+// stored array, or preview/save rebuild it from a half-updated pair.
+function splitStoredToolCategories(categories: string[]) {
+  return {
+    toolCategories: categories.filter((c) => !c.startsWith('mcp:') && isAssignableToolCategory(c)),
+    mcpServers: mcpServerNamesFromToolCategories(categories),
+  }
+}
+
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null
 }
@@ -909,8 +918,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           // Legacy agents may still have an unassignable category saved —
           // never show or round-trip it.
           const rawToolCategories = agent.tool_categories || []
-          setSelectedToolCategories(rawToolCategories.filter((c: string) => !c.startsWith('mcp:') && isAssignableToolCategory(c)))
-          setSelectedMcpServers(mcpServerNamesFromToolCategories(rawToolCategories))
+          const stored = splitStoredToolCategories(rawToolCategories)
+          setSelectedToolCategories(stored.toolCategories)
+          setSelectedMcpServers(stored.mcpServers)
           // Seed the SSH auto-category from the saved config so a failed
           // bindings-load (which never fires onCount) can't leave "ssh" unset
           // at save time. A successful load overwrites this with the live count.
@@ -985,9 +995,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
           // Separate regular tools from MCP servers
           const allCategories = template.agent_config?.tool_categories || []
-          setSelectedToolCategories(allCategories.filter((c: string) => !c.startsWith('mcp:') && isAssignableToolCategory(c)))
+          const stored = splitStoredToolCategories(allCategories)
+          setSelectedToolCategories(stored.toolCategories)
 
-          const explicitlyConfiguredMcps = mcpServerNamesFromToolCategories(allCategories)
+          const explicitlyConfiguredMcps = stored.mcpServers
 
           // _enrich_template merges connections into tool_categories as mcp: entries, so
           // iterating both explicitlyConfiguredMcps and connections would add each
@@ -2994,7 +3005,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               if (updates.modelConfig !== undefined) setModelConfig(updates.modelConfig);
               if (updates.selectedKbs !== undefined) setSelectedKbs(updates.selectedKbs);
               if (updates.selectedSkills !== undefined) setSelectedSkills(updates.selectedSkills);
-              if (updates.selectedToolCategories !== undefined) setSelectedToolCategories(updates.selectedToolCategories);
+              if (updates.storedToolCategories !== undefined) {
+                const stored = splitStoredToolCategories(updates.storedToolCategories)
+                setSelectedToolCategories(stored.toolCategories)
+                setSelectedMcpServers(stored.mcpServers)
+              }
             }}
             availableOptions={{
               models: (Array.isArray(models) ? models : []).map(m => ({ id: m.id, name: m.model_name || m.model_id })),
