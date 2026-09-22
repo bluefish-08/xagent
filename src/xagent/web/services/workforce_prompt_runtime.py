@@ -19,6 +19,7 @@ from ...core.model.chat.basic.base import BaseLLM
 from ...core.tools.adapters.vibe.agent_tool import (
     ListAvailableSkillsTool,
     ListToolCategoriesTool,
+    _resolve_llm_tool_categories,
 )
 from ...core.tools.adapters.vibe.base import (
     AbstractBaseTool,
@@ -165,6 +166,16 @@ class WorkforcePromptBuilderState:
                 "message": ("execution_mode must be flash, balanced, think, or auto."),
             }
 
+        requested_categories = args.get("tool_categories")
+        try:
+            tool_categories = (
+                []
+                if requested_categories is None
+                else _resolve_llm_tool_categories(requested_categories, None)
+            )
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
         ref = f"new:{self._next_agent_number}"
         self._next_agent_number += 1
         spec = StagedAgentSpec(
@@ -172,7 +183,7 @@ class WorkforcePromptBuilderState:
             name=name,
             description=description,
             instructions=instructions,
-            tool_categories=ensure_list(args.get("tool_categories")) or [],
+            tool_categories=tool_categories,
             skills=ensure_list(args.get("skills")),
             execution_mode=execution_mode,
         )
