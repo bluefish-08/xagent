@@ -261,6 +261,7 @@ async def test_unavailable_mcp_failure_keeps_content_and_reason() -> None:
 
     assert result["failure_code"] == "oauth_token_required"
     assert result["reason"] == "oauth_token_required"
+    assert result["unavailable_server"] == "github"
     assert isinstance(result["content"], list) and result["content"]
     assert "MCP server credentials are unavailable" in result["content"][0]["text"]
 

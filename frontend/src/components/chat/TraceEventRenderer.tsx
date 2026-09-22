@@ -159,6 +159,7 @@ interface StepAction {
     sandboxed?: boolean;
     inline?: boolean;
     workforceSummary?: boolean;
+    statusLine?: boolean;
   };
 }
 
@@ -830,6 +831,24 @@ export function processTraceEvents(
             findRunningToolByCallId(step, errorData.tool_call_id as string | undefined) ||
             findLastRunningAction(step, 'tool');
           if (lastTool) runningAction = lastTool;
+          const connector = (errorData.result as { unavailable_server?: unknown } | null | undefined)
+            ?.unavailable_server;
+          if (typeof connector === 'string' && connector.trim()) {
+            const statusLine: StepAction = {
+              id: lastTool?.id ?? eventId,
+              type: 'info',
+              title: t('traceEventRenderer.connectorUnavailable', { connector: connector.trim() }),
+              status: 'completed',
+              timestamp: lastTool?.timestamp ?? timestamp,
+              data: { statusLine: true },
+            };
+            if (lastTool) {
+              step.actions[step.actions.indexOf(lastTool)] = statusLine;
+            } else {
+              step.actions.push(statusLine);
+            }
+            return;
+          }
         } else if (event.event_type === 'llm_call_failed') {
           const lastLlm = findLastRunningAction(step, 'llm');
           if (lastLlm) runningAction = lastLlm;
@@ -1425,6 +1444,15 @@ function StepActionItem({
       resizeObserver.disconnect();
     };
   }, [updateToolSummaryVisibility]);
+
+  if (displayAction.data.statusLine) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground">
+        <Info className="w-3.5 h-3.5 flex-shrink-0" />
+        <span className="break-words [overflow-wrap:anywhere]">{displayAction.title}</span>
+      </div>
+    );
+  }
 
   if (displayAction.type === 'info' && displayAction.data.inline) {
     return (

@@ -258,6 +258,93 @@ describe("processTraceEvents tool_call_id attribution", () => {
   })
 })
 
+describe("processTraceEvents unavailable connector placeholder", () => {
+  const tc = (key: string, vars?: Record<string, string | number>) =>
+    vars?.connector ? `${key}:${vars.connector}` : t(key, vars)
+  const failedCall = (toolName: string, result: unknown) =>
+    [
+      stepStart,
+      ev("tool_execution_start", { tool_name: toolName, tool_call_id: "A" }),
+      ev("tool_execution_failed", {
+        tool_name: toolName,
+        tool_call_id: "A",
+        error: "MCP server tools could not be loaded.",
+        result,
+      }),
+    ].map((event, index) => ({ ...event, timestamp: index + 1 }))
+  const failedToolAction = (toolName: string, title: string) => ({
+    id: "event-1",
+    type: "tool",
+    title: `traceEventRenderer.executeTool:${title}`,
+    status: "failed",
+    timestamp: 2000,
+    data: {
+      tool: toolName,
+      args: undefined,
+      code: "",
+      tool_call_id: "A",
+      sandboxed: false,
+      error: "MCP server tools could not be loaded.",
+    },
+  })
+
+  it("renders a call carrying unavailable_server as a connector status line", () => {
+    const steps = processTraceEvents(
+      failedCall("mcp_google_drive_42_unavailable", {
+        success: false,
+        is_error: true,
+        unavailable_server: "Google Drive",
+      }) as never,
+      tc,
+    )
+
+    expect(steps[0].actions).toEqual([
+      {
+        id: "event-1",
+        type: "info",
+        title: "traceEventRenderer.connectorUnavailable:Google Drive",
+        status: "completed",
+        timestamp: 2000,
+        data: { statusLine: true },
+      },
+    ])
+  })
+
+  it("keeps an ordinary MCP tool failure as a failed tool call", () => {
+    const steps = processTraceEvents(
+      failedCall("mcp_notion_search", {
+        success: false,
+        is_error: true,
+        content: [{ text: "boom" }],
+      }) as never,
+      tc,
+    )
+
+    expect(steps[0].actions).toEqual([
+      failedToolAction("mcp_notion_search", "Mcp Notion Search"),
+    ])
+  })
+
+  it.each([
+    ["missing", { success: false, is_error: true }],
+    ["empty", { success: false, is_error: true, unavailable_server: " " }],
+    ["non-string", { success: false, is_error: true, unavailable_server: 42 }],
+    ["non-object result", "MCP server tools could not be loaded."],
+  ])("falls back to the tool failure when unavailable_server is %s", (_, result) => {
+    const steps = processTraceEvents(
+      failedCall("mcp_google_drive_42_unavailable", result) as never,
+      tc,
+    )
+
+    expect(steps[0].actions).toEqual([
+      failedToolAction(
+        "mcp_google_drive_42_unavailable",
+        "Mcp Google Drive 42 Unavailable",
+      ),
+    ])
+  })
+})
+
 describe("getFriendlyToolName", () => {
   it("prettifies an unmapped snake_case tool name", () => {
     expect(getFriendlyToolName("some_future_tool")).toBe("Some Future Tool")

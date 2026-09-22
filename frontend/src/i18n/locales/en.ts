@@ -3667,6 +3667,7 @@ Build when you need.`,
     workerFailed: "Worker failed",
     unknownWorker: "Unknown Worker",
     viewAgentExecution: "View Agent details",
+    connectorUnavailable: "Connector {connector} is unavailable right now",
     toolNames: {
       web_search: "Searching the web",
       tavily_web_search: "Searching the web",
