@@ -97,6 +97,7 @@ interface Tool {
   type: string
   category: string
   enabled: boolean
+  always_available?: boolean
   [key: string]: any
 }
 
@@ -369,6 +370,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
   const [tools, setTools] = useState<Tool[]>([])
+  const [skillLoaderTool, setSkillLoaderTool] = useState<string | null>(null)
   const [mcpServers, setMcpServers] = useState<any[]>([])
   const [isConnectMcpOpen, setIsConnectMcpOpen] = useState(false)
   const [isInitialDataLoaded, setIsInitialDataLoaded] = useState(false)
@@ -771,6 +773,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           const toolsData = await toolsRes.json()
           // Filter only enabled tools
           setTools((toolsData.tools || []).filter((t: Tool) => t.enabled))
+          setSkillLoaderTool(readNonEmptyString(toolsData.skill_loader_tool))
         }
 
         if (mcpRes.ok && !ownerScopedMcpRef.current) {
@@ -1090,6 +1093,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       description: (categoryDesc ? `**${categoryDesc}**\n\n` : '') + `${toolsInCategory.map(t => t.name).join(', ')}`
     }
   })
+
+  const alwaysAvailableToolNames = [
+    ...tools.filter(t => t.always_available === true).map(t => t.name),
+    ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : []),
+  ]
 
   // Helper function for category descriptions
   function getCategoryDescription(category: string): string {
@@ -2558,6 +2566,13 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               {t("builds.configForm.tools.selectedCount", {
                 count: selectedToolCategories.length,
                 tools: tools.filter(t => selectedToolCategories.includes(t.category)).length
+              })}
+            </div>
+          )}
+          {alwaysAvailableToolNames.length > 0 && (
+            <div className="text-xs text-muted-foreground">
+              {t("builds.configForm.tools.alwaysAvailable", {
+                tools: alwaysAvailableToolNames.join(", "),
               })}
             </div>
           )}

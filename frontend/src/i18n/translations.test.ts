@@ -67,6 +67,13 @@ describe("translations", () => {
     assertTranslationTreeParity(translations.en, translations.zh)
   })
 
+  it("does not describe the basic tool category as providing date/time", () => {
+    const en = translations.en.builds.configForm.tools.categoryDescriptions.basic
+    const zh = translations.zh.builds.configForm.tools.categoryDescriptions.basic
+    expect(en).not.toMatch(/date|time/i)
+    expect(zh).not.toMatch(/日期|时间/)
+  })
+
   it("describes the admin account label and searchable identities", () => {
     expect(translations.en.userManagement.list).toEqual(
       expect.objectContaining({
