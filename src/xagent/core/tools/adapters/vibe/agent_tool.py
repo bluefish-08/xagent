@@ -44,9 +44,8 @@ MAX_AGENT_NAME_LENGTH = 200
 def _assignable_tool_categories() -> list[str]:
     """Categories the builder may offer the model.
 
-    Bare ``"mcp"`` is excluded on top of the never-assignable set: it admits
-    every connector at once, and the UI picks connectors per server. The model
-    is never told either form exists.
+    Connector grants (bare ``mcp`` and ``mcp:<server>``) are left out: they
+    are managed in the UI's connector picker, not through the model.
     """
     return [
         cat.value
@@ -61,92 +60,73 @@ _MCP_SCOPE_PREFIX = "mcp:"
 _STORED_TOOL_CATEGORIES_FIELD = Field(
     default=None,
     description=(
-        "Tool categories actually stored, after unassignable ones were "
-        "dropped. ``null`` means unconfigured (every default tool), which "
+        "Tool categories actually stored; only meaningful when status is "
+        "``success``. ``null`` means unconfigured (every default tool), which "
         "is not the same as an empty list (zero tools)."
     ),
 )
 
 
-def _canonical_llm_tool_category(category: str, allowed: set[str]) -> str | None:
-    """Storable form of one model-supplied category, or ``None`` if not offered.
-
-    A scope is stored trimmed so the row matches what the picker writes;
-    ``ToolSelectionSpec`` normalizes again at read time, but an untrimmed row
-    still reaches the form and a save round-trip verbatim.
-    """
-    if category in allowed:
-        return category
-    if category.startswith(_MCP_SCOPE_PREFIX):
-        scope = category[len(_MCP_SCOPE_PREFIX) :].strip()
-        if scope:
-            return f"{_MCP_SCOPE_PREFIX}{scope}"
+def _connector_grant(category: str) -> str | None:
+    """Trimmed bare ``mcp`` or ``mcp:<server>``; ``None`` for anything else."""
+    name = category.strip()
+    if name == ToolCategory.MCP.value:
+        return name
+    if name.startswith(_MCP_SCOPE_PREFIX):
+        return _MCP_SCOPE_PREFIX + name[len(_MCP_SCOPE_PREFIX) :].strip()
     return None
 
 
-def _unassignable_categories_message(requested: Any) -> str:
-    return (
-        f"Error: none of the requested tool categories are assignable: {requested!r}. "
-        f"Choose from: {', '.join(_assignable_tool_categories())}."
-    )
+def _resolve_llm_tool_categories(raw: Any, stored: Any) -> list[str]:
+    """Column value for a model-supplied, non-``None`` ``tool_categories``.
 
-
-def _sanitize_llm_tool_categories(raw: Any) -> list[str] | None:
-    """Keep what the model was offered, deduplicated, plus ``mcp:<server>``.
-
-    Connector scopes are never advertised to the model, but a caller that
-    supplies one is taken at its word. Carrying over the grants a prompt-driven
-    update would otherwise drop is :func:`_with_stored_connector_grants`, not
-    this function.
-
-    ``None`` means "nothing usable survived"; each caller decides what that
-    means, because the two disagree -- persisting ``None`` on create would
-    build an unconfigured (all-default-tools) agent, not a restricted one. A
-    caller's own ``[]`` is returned unchanged, so a caller can still ask for
-    the explicit zero-tool agent (#944).
+    The model's non-connector categories replace the stored ones; the stored
+    connector grants are always kept, and the model may only echo them back.
+    Raises ``ValueError`` (message for the model) instead of dropping entries.
     """
+    choices = _assignable_tool_categories()
     parsed = ensure_list(raw)
     if parsed is None:
-        return None
-    allowed = set(_assignable_tool_categories())
-    kept: list[str] = []
-    seen: set[str] = set()
-    for category in parsed:
-        canonical = _canonical_llm_tool_category(category, allowed)
-        if canonical is not None and canonical not in seen:
-            seen.add(canonical)
-            kept.append(canonical)
-    if parsed and not kept:
-        logger.warning(
-            "Dropped every tool category the model proposed: %s", sorted(set(parsed))
+        raise ValueError(
+            f"tool_categories must be a list of category names, got {raw!r}. "
+            f"Choose from: {', '.join(choices)}."
         )
-        return None
-    return kept
-
-
-def _is_connector_grant(category: str) -> bool:
-    """Bare ``mcp`` counts: it is what makes a task load the account's
-    connectors at all, and rows written by other products still rely on it."""
-    return category == ToolCategory.MCP.value or category.startswith(_MCP_SCOPE_PREFIX)
-
-
-def _with_stored_connector_grants(selected: list[str], stored: Any) -> list[str]:
-    """Re-attach connector grants the model was never shown.
-
-    ``update_agent_fields`` replaces the whole column, so without this any
-    update that carries categories at all silently unbinds every connector
-    on the agent.
-
-    An explicit ``[]`` is passed through untouched: that is the caller asking
-    for a zero-tool agent (#944), and topping it up with connectors would make
-    that unreachable through this tool.
-    """
-    if not selected:
-        return selected
-    existing = [
-        c for c in (stored or []) if isinstance(c, str) and _is_connector_grant(c)
-    ]
-    return selected + [c for c in existing if c not in selected]
+    grants: list[str] = []
+    for stored_category in stored or []:
+        grant = (
+            _connector_grant(stored_category)
+            if isinstance(stored_category, str)
+            else None
+        )
+        if grant is not None and grant not in grants:
+            grants.append(grant)
+    selected: list[str] = []
+    invalid: list[str] = []
+    new_grants: list[str] = []
+    for category in parsed:
+        grant = _connector_grant(category)
+        name = category.strip()
+        if grant is not None:
+            if grant not in grants:
+                new_grants.append(category)
+        elif name not in choices:
+            invalid.append(category)
+        elif name not in selected:
+            selected.append(name)
+    problems: list[str] = []
+    if invalid:
+        problems.append(
+            f"tool_categories {invalid!r} are not assignable. "
+            f"Choose from: {', '.join(choices)}."
+        )
+    if new_grants:
+        problems.append(
+            f"{new_grants!r} are connectors, which can only be added or removed "
+            "in the UI's connector picker, not through this tool."
+        )
+    if problems:
+        raise ValueError(" ".join(problems) + " Nothing was saved.")
+    return selected + grants
 
 
 def _stored_tool_categories(agent: Any) -> list[str] | None:
@@ -862,6 +842,8 @@ class CreateAgentTool(AbstractBaseTool):
             "- description: IMPORTANT - Clear description of when to use this agent (e.g., 'Use this agent for data analysis tasks involving CSV files'). This helps users understand the agent's purpose. Write this in the same natural language as the current output language policy unless the user explicitly asks for another language.\n"
             f"- tool_categories (optional): Available categories: {categories_list}\n"
             f"  Example: ['file', 'knowledge', 'basic']\n"
+            "  Any other value rejects the whole call. Connectors ('mcp', 'mcp:<server>') "
+            "are added only in the UI's connector picker; do not pass them.\n"
             f"- knowledge_bases (optional): List of knowledge base names or IDs to link to this agent.\n"
             "  Only pass knowledge bases that already exist and are visible. "
             "If the requested knowledge base is missing, ask the user for a URL, "
@@ -876,7 +858,9 @@ class CreateAgentTool(AbstractBaseTool):
             "- tool_name: Tool name that can be used to call this agent\n"
             "- markdown_link: Markdown link in format [Agent Name](agent://agent_id) - USE THIS FORMAT in your response\n"
             "- status: 'success' or 'error'\n"
-            "- message: Detailed information about the created agent\n\n"
+            "- message: Detailed information about the created agent\n"
+            "- tool_categories: On success, the categories actually stored "
+            "(null = unconfigured, every default tool; [] = zero tools)\n\n"
             "IMPORTANT: Always include the markdown_link in your response when creating an agent successfully. "
             "Use the format: [Agent Name](agent://agent_id). Use plain link syntax only — "
             "NEVER image syntax like ![name](agent://id); agent:// cannot render as an image."
@@ -1081,22 +1065,24 @@ class CreateAgentTool(AbstractBaseTool):
                         ),
                     ).model_dump()
 
-                # Gate on the raw argument: ``ensure_list`` maps a malformed
-                # shape (dict, bool) to None, and treating that as "nothing
-                # requested" would persist None -- every default tool.
+                # ``is not None``, not truthiness: ``[]`` is the zero-tool agent, and
+                # a falsy malformed value must be refused, not persisted as NULL.
                 requested_categories = args.get("tool_categories")
-                tool_categories = _sanitize_llm_tool_categories(requested_categories)
-                if requested_categories is not None and tool_categories is None:
-                    return CreateAgentToolResult(
-                        agent_id=0,
-                        agent_name="",
-                        tool_name="",
-                        markdown_link="",
-                        status="error",
-                        message=(
-                            _unassignable_categories_message(requested_categories)
-                        ),
-                    ).model_dump()
+                tool_categories: list[str] | None = None
+                if requested_categories is not None:
+                    try:
+                        tool_categories = _resolve_llm_tool_categories(
+                            requested_categories, None
+                        )
+                    except ValueError as exc:
+                        return CreateAgentToolResult(
+                            agent_id=0,
+                            agent_name="",
+                            tool_name="",
+                            markdown_link="",
+                            status="error",
+                            message=f"Error: {exc}",
+                        ).model_dump()
 
                 agent = AgentStore(db).create_agent(
                     user_id=self._user_id,
@@ -1231,6 +1217,9 @@ class UpdateAgentTool(AbstractBaseTool):
             "- description (optional): New description of when to use this agent\n"
             f"- tool_categories (optional): Available categories: {categories_list}\n"
             f"  Example: ['file', 'knowledge', 'basic']\n"
+            "  Replaces the agent's non-connector categories; any other value rejects the whole call. "
+            "Connectors ('mcp', 'mcp:<server>') are managed only in the UI's connector picker: "
+            "the agent's connectors are always kept, and you may only repeat ones it already has.\n"
             f"- knowledge_bases (optional): New list of knowledge base names or IDs to link to this agent.\n"
             "  Only pass knowledge bases that already exist and are visible. "
             "If the requested knowledge base is missing, ask the user for a URL, "
@@ -1245,7 +1234,9 @@ class UpdateAgentTool(AbstractBaseTool):
             "- tool_name: Tool name that can be used to call this agent\n"
             "- markdown_link: Markdown link in format [Agent Name](agent://agent_id)\n"
             "- status: 'success' or 'error'\n"
-            "- message: Detailed information about the updated agent\n\n"
+            "- message: Detailed information about the updated agent\n"
+            "- tool_categories: On success, the categories actually stored, connectors included "
+            "(null = unconfigured, every default tool; [] = zero tools)\n\n"
             "IMPORTANT: Updating a PUBLISHED agent does not unpublish it. "
             "It remains PUBLISHED with the updated configuration."
         )
@@ -1368,30 +1359,24 @@ class UpdateAgentTool(AbstractBaseTool):
                     updates["instructions"] = new_instructions
                     changes.append("instructions updated")
 
-                # Update tool_categories if provided. Same gate as create: a
-                # request whose every entry was rejected must not read as
-                # "field absent" and report an untouched agent as success.
+                # Update tool_categories if provided (``is not None``: see create).
                 requested_categories = args.get("tool_categories")
-                new_tool_categories = _sanitize_llm_tool_categories(
-                    requested_categories
-                )
-                if requested_categories is not None and new_tool_categories is None:
-                    return UpdateAgentToolResult(
-                        agent_id=0,
-                        agent_name="",
-                        tool_name="",
-                        markdown_link="",
-                        status="error",
-                        message=(
-                            _unassignable_categories_message(requested_categories)
-                        ),
-                    ).model_dump()
-                if new_tool_categories is not None:
-                    merged = _with_stored_connector_grants(
-                        new_tool_categories, agent.tool_categories
-                    )
-                    updates["tool_categories"] = merged
-                    changes.append(f"tool_categories → {merged}")
+                if requested_categories is not None:
+                    try:
+                        new_tool_categories = _resolve_llm_tool_categories(
+                            requested_categories, agent.tool_categories
+                        )
+                    except ValueError as exc:
+                        return UpdateAgentToolResult(
+                            agent_id=0,
+                            agent_name="",
+                            tool_name="",
+                            markdown_link="",
+                            status="error",
+                            message=f"Error: {exc}",
+                        ).model_dump()
+                    updates["tool_categories"] = new_tool_categories
+                    changes.append(f"tool_categories → {new_tool_categories}")
 
                 # Update knowledge_bases if provided
                 new_knowledge_bases = ensure_list(args.get("knowledge_bases"))
