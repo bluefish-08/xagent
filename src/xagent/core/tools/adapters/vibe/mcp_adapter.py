@@ -2190,9 +2190,9 @@ class UnavailableMCPTool(AbstractBaseTool):
     a ``reason`` and a ``failure_code``. ``failure_code`` is normalized against
     the public failure allowlist here and dropped when it is not on it;
     ``reason`` is stored as given, so an allowlisted value is a guarantee
-    callers make, enforced where the unavailable config is built. The server
-    name it is built from is already exposed in the tool listing, so there is
-    nothing here to withhold from a caller.
+    callers make, enforced where the unavailable config is built.
+    ``unavailable_server`` is the raw configured name, shown to anyone who can
+    see the trace, including anonymous share viewers (#1041).
     """
 
     read_only = True
