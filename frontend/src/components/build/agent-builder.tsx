@@ -97,7 +97,7 @@ interface Tool {
   type: string
   category: string
   enabled: boolean
-  always_available?: boolean
+  always_available: boolean
   [key: string]: any
 }
 
@@ -370,6 +370,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
   const [tools, setTools] = useState<Tool[]>([])
+  const [intrinsicToolNames, setIntrinsicToolNames] = useState<string[]>([])
   const [skillLoaderTool, setSkillLoaderTool] = useState<string | null>(null)
   const [mcpServers, setMcpServers] = useState<any[]>([])
   const [isConnectMcpOpen, setIsConnectMcpOpen] = useState(false)
@@ -773,6 +774,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           const toolsData = await toolsRes.json()
           // Filter only enabled tools
           setTools((toolsData.tools || []).filter((t: Tool) => t.enabled))
+          // Unfiltered: the runtime injects these without reading ToolConfig.enabled.
+          setIntrinsicToolNames((toolsData.tools || []).filter((t: Tool) => t.always_available).map((t: Tool) => t.name))
           setSkillLoaderTool(readNonEmptyString(toolsData.skill_loader_tool))
         }
 
@@ -1094,10 +1097,31 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     }
   })
 
-  const alwaysAvailableToolNames = [
-    ...tools.filter(t => t.always_available === true).map(t => t.name),
-    ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : []),
-  ]
+  function buildToolCategories(): string[] {
+    const categories = [...selectedToolCategories]
+    if (selectedKbs.length > 0 && !categories.includes("knowledge")) {
+      categories.push("knowledge")
+    }
+    if (hasSshBindings && !categories.includes("ssh")) {
+      categories.push("ssh")
+    }
+
+    // Add selected MCP servers back into tool_categories, resolved to the
+    // real connected MCPServer row's name -- see resolveMcpToolSelector for
+    // why a hard-coded id/name fallback can't work for every app. Deduped:
+    // two distinct selectedMcpServers entries can resolve to the same real
+    // row, and the backend persists tool_categories verbatim (agents.py),
+    // so an unresolved duplicate here lands in the DB and stays there.
+    const resolvedMcpSelectors = new Set(
+      selectedMcpServers.map(server => resolveMcpToolSelector(server, mcpServers, officialApps))
+    )
+    resolvedMcpSelectors.forEach(selector => categories.push(`mcp:${selector}`))
+    return categories
+  }
+
+  const alwaysAvailableToolNames = buildToolCategories().length > 0
+    ? [...intrinsicToolNames, ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : [])]
+    : []
 
   // Helper function for category descriptions
   function getCategoryDescription(category: string): string {
@@ -1171,28 +1195,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         backendMessage = `Uploaded files: ${processedFiles.map(f => f.name).join(', ')}`
       }
 
-      const finalToolCategories = [...selectedToolCategories]
-      // Match handleCreate below: a preview session with a knowledge base
-      // selected must include "knowledge" too, or it runs with different
-      // categories than the agent it's a preview of.
-      if (selectedKbs.length > 0 && !finalToolCategories.includes("knowledge")) {
-        finalToolCategories.push("knowledge")
-      }
-      // Resolve each selection to the real, connected MCPServer row's name
-      // (see resolveMcpToolSelector for why a name/id fallback alone isn't
-      // enough -- the backend uses either convention depending on app
-      // type). Depends on mcpServers/officialApps having loaded; if a
-      // preview message is sent before they do, this falls back to the raw
-      // selector for every MCP tool (matching pre-existing behavior for
-      // this call site, not just this connector). Deduped: two distinct
-      // selectedMcpServers entries can resolve to the same real row.
-      const resolvedMcpSelectors = new Set(
-        selectedMcpServers.map(server => resolveMcpToolSelector(server, mcpServers, officialApps))
-      )
-      resolvedMcpSelectors.forEach(selector => finalToolCategories.push(`mcp:${selector}`))
-      if (hasSshBindings && !finalToolCategories.includes("ssh")) {
-        finalToolCategories.push("ssh")
-      }
+      const finalToolCategories = buildToolCategories()
 
       if (!previewTaskId) {
         const response = await apiRequest(`${getApiUrl()}/api/chat/task/create`, {
@@ -1517,24 +1520,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       return
     }
 
-    let finalToolCategories = [...selectedToolCategories]
-    if (selectedKbs.length > 0 && !finalToolCategories.includes("knowledge")) {
-      finalToolCategories.push("knowledge")
-    }
-    if (hasSshBindings && !finalToolCategories.includes("ssh")) {
-      finalToolCategories.push("ssh")
-    }
-
-    // Add selected MCP servers back into tool_categories, resolved to the
-    // real connected MCPServer row's name -- see resolveMcpToolSelector for
-    // why a hard-coded id/name fallback can't work for every app. Deduped:
-    // two distinct selectedMcpServers entries can resolve to the same real
-    // row, and the backend persists tool_categories verbatim (agents.py),
-    // so an unresolved duplicate here lands in the DB and stays there.
-    const resolvedMcpSelectors = new Set(
-      selectedMcpServers.map(server => resolveMcpToolSelector(server, mcpServers, officialApps))
-    )
-    resolvedMcpSelectors.forEach(selector => finalToolCategories.push(`mcp:${selector}`))
+    const finalToolCategories = buildToolCategories()
 
     setIsCreating(true)
 
