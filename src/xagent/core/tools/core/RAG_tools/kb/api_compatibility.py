@@ -67,6 +67,10 @@ class KBApiFailedIngestCleanupDecision:
     successful_documents: int = 0
     side_effects_may_remain: bool = False
 
+    @property
+    def keeps_new_collection_metadata(self) -> bool:
+        return self.successful_documents > 0 or self.side_effects_may_remain
+
 
 @dataclass(frozen=True)
 class KBApiFailedIngestRollbackResult(Generic[T_Result]):

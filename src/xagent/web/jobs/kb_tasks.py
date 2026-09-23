@@ -16,6 +16,7 @@ from ...core.tools.core.RAG_tools.core.schemas import (
 )
 from ...core.tools.core.RAG_tools.kb import (
     KBApiCompatibilityFacade,
+    KBApiFailedIngestCleanupDecision,
     KBApiOperationResult,
     get_kb_coordinator,
 )
@@ -152,8 +153,10 @@ def _cleanup_failed_job_collection_metadata(
             collection_name=str(payload["collection"]),
             user=user,
             context=context,
-            successful_documents=successful_documents,
-            side_effects_may_remain=side_effects_may_remain,
+            decision=KBApiFailedIngestCleanupDecision(
+                successful_documents=successful_documents,
+                side_effects_may_remain=side_effects_may_remain,
+            ),
         )
     )
 
