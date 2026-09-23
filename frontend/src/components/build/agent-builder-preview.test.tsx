@@ -9,6 +9,7 @@ const dispatchMock = vi.hoisted(() => vi.fn())
 const taskConversationPanelMock = vi.hoisted(() => vi.fn())
 const closeFilePreviewMock = vi.hoisted(() => vi.fn())
 const connectMcpDialogMock = vi.hoisted(() => vi.fn())
+const multiSelectMock = vi.hoisted(() => vi.fn())
 
 vi.mock("@/lib/api-wrapper", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api-wrapper")>(
@@ -157,7 +158,10 @@ vi.mock("@/hooks/use-file-mention", () => ({
 }))
 
 vi.mock("@/components/ui/multi-select", () => ({
-  MultiSelect: () => null,
+  MultiSelect: (props: unknown) => {
+    multiSelectMock(props)
+    return null
+  },
 }))
 
 vi.mock("@/components/ui/select", () => ({
@@ -172,6 +176,7 @@ import { AgentBuilder } from "./agent-builder"
 
 let storedToolCategories: string[] = ["ssh"]
 let putBody: { tool_categories?: string[] } | undefined
+let availableTools: unknown[] = []
 
 describe("AgentBuilder preview", () => {
   const originalWebSocket = globalThis.WebSocket
@@ -179,6 +184,7 @@ describe("AgentBuilder preview", () => {
   beforeEach(() => {
     storedToolCategories = ["ssh"]
     putBody = undefined
+    availableTools = []
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
     sendMessageMock.mockReset()
@@ -195,7 +201,7 @@ describe("AgentBuilder preview", () => {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
       }
       if (url.endsWith("/api/tools/available")) {
-        return Promise.resolve(new Response(JSON.stringify({ tools: [] }), { status: 200 }))
+        return Promise.resolve(new Response(JSON.stringify({ tools: availableTools }), { status: 200 }))
       }
       if (url.endsWith("/api/models/?category=llm")) {
         return Promise.resolve(
@@ -342,7 +348,10 @@ describe("AgentBuilder preview", () => {
       globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
     })
 
-    const chatUpdatesCategories = async (categories: string[]) => {
+    const chatUpdatesCategories = async (
+      categories: string[],
+      toolParams: Record<string, unknown> = { tool_categories: categories },
+    ) => {
       fireEvent.click(screen.getByText("send-chat-input"))
       const ws = MockWebSocket.instances[0]
       act(() => ws.open())
@@ -357,7 +366,7 @@ describe("AgentBuilder preview", () => {
             timestamp: 3,
             data: {
               tool_name: "update_agent",
-              tool_params: { agent_id: 42, tool_categories: categories },
+              tool_params: { agent_id: 42, ...toolParams },
               result: { status: "success", agent_id: 42, tool_categories: categories },
             },
           }),
@@ -402,6 +411,25 @@ describe("AgentBuilder preview", () => {
 
       expect(await previewCategories()).toEqual(expected)
       expect(await saveCategories()).toEqual(expected)
+    })
+
+    it("keeps unsaved picks when the chat call leaves tool_categories null", async () => {
+      storedToolCategories = ["file"]
+      availableTools = ["basic", "file"].map((category) => ({ name: category, category, enabled: true }))
+      render(<AgentBuilder agentId="42" />)
+      await screen.findByDisplayValue("Existing SSH agent")
+      const toolPicker = () =>
+        multiSelectMock.mock.calls
+          .filter(([props]) => props.placeholder === "builds.configForm.tools.placeholder")
+          .pop()?.[0]
+      await waitFor(() => expect(toolPicker()?.values).toEqual(["file"]))
+      act(() => toolPicker().onValuesChange(["file", "basic"]))
+      act(() => connectMcpDialogMock.mock.lastCall?.[0].onConnectSelected(["github"]))
+
+      await chatUpdatesCategories(["file"], { name: "Renamed", tool_categories: null })
+
+      expect(await previewCategories()).toEqual(["file", "basic", "mcp:github"])
+      expect(await saveCategories()).toEqual(["file", "basic", "mcp:github"])
     })
   })
 
