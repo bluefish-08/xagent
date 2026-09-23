@@ -835,11 +835,14 @@ export function processTraceEvents(
             ?.unavailable_server;
           if (typeof connector === 'string' && connector.trim()) {
             const callId = errorData.tool_call_id;
-            const idMatches = step.actions.filter(
-              a => a.type === 'tool' && a.status === 'running' && !!callId && a.data.tool_call_id === callId
+            const failedTool = getRawToolName(event);
+            // Replace a card only when id and tool name single it out; otherwise append and touch no card.
+            const ownCards = step.actions.filter(
+              a => a.type === 'tool' && a.status === 'running'
+                && !!callId && a.data.tool_call_id === callId
+                && a.data.tool === failedTool
             );
-            // Only an unambiguous id match may replace a card; a fallback match could be a sibling tool.
-            const ownCard = idMatches.length === 1 ? idMatches[0] : null;
+            const ownCard = ownCards.length === 1 ? ownCards[0] : null;
             const statusLine: StepAction = {
               id: ownCard?.id ?? eventId,
               type: 'info',

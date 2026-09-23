@@ -360,44 +360,72 @@ describe("processTraceEvents unavailable connector placeholder", () => {
     data: { statusLine: true },
   })
 
+  const S = "web_search"
+  const P = "mcp_google_drive_42_unavailable"
+  const start = (tool: string, id?: string) =>
+    ev("tool_execution_start", { tool_name: tool, ...(id ? { tool_call_id: id } : {}) })
+  const endS = ev("tool_execution_end", {
+    tool_name: S,
+    tool_call_id: "A",
+    result: { output: "RESULT_S" },
+  })
+  const run = (...events: Array<ReturnType<typeof ev>>) =>
+    processTraceEvents(
+      [stepStart, ...events, ev("dag_step_end", {})].map((event, index) => ({
+        ...event,
+        timestamp: index + 1,
+      })) as never,
+      tc,
+    )[0].actions
+  const webSearchCards = (actions: ReturnType<typeof run>) =>
+    actions.filter((a) => a.data.tool === S)
+  const placeholderCards = (actions: ReturnType<typeof run>) =>
+    actions.filter((a) => a.data.tool === P)
+
+  it("replaces the placeholder card when a sibling reuses its id and ends later", () => {
+    const actions = run(start(S, "A"), start(P, "A"), placeholderFailure("A"), endS)
+
+    expect(actions).toHaveLength(2)
+    expect(webSearchCards(actions)).toEqual([
+      expect.objectContaining({ status: "completed", data: expect.objectContaining({ output: "RESULT_S" }) }),
+    ])
+    expect(placeholderCards(actions)).toEqual([])
+    expect(actions[1]).toEqual(statusLineAction("event-2", 3000))
+  })
+
+  it("keeps the web_search card when a sibling reusing the id ends first", () => {
+    const actions = run(start(S, "A"), start(P, "A"), endS, placeholderFailure("A"))
+
+    expect(actions).toHaveLength(3)
+    expect(webSearchCards(actions)).toHaveLength(1)
+    expect(actions[2]).toEqual(statusLineAction("event-4", 5000))
+  })
+
   it.each([
-    ["does not match any running card", "B", "C"],
+    ["does not match the placeholder card", "B", "C"],
     ["is missing", undefined, undefined],
-    ["is shared by two running cards", "A", "A"],
-  ])(
-    "pushes a status line and keeps every card when the failure id %s",
-    (_, placeholderStartId, failedId) => {
-      const events = [
-        stepStart,
-        ev("tool_execution_start", {
-          tool_name: "web_search",
-          tool_call_id: "A",
-          tool_args: { query: "a" },
-        }),
-        ev("tool_execution_start", {
-          tool_name: "mcp_google_drive_42_unavailable",
-          tool_call_id: placeholderStartId,
-        }),
-        placeholderFailure(failedId),
-      ].map((event, index) => ({ ...event, timestamp: index + 1 }))
+  ])("appends a status line and keeps every card when the failure id %s", (_, startId, failedId) => {
+    const actions = run(start(S, "A"), start(P, startId), placeholderFailure(failedId), endS)
 
-      const steps = processTraceEvents(events as never, tc)
+    expect(actions).toHaveLength(3)
+    expect(webSearchCards(actions)).toEqual([
+      expect.objectContaining({ status: "completed", data: expect.objectContaining({ output: "RESULT_S" }) }),
+    ])
+    expect(placeholderCards(actions)).toHaveLength(1)
+    expect(actions[2]).toEqual(statusLineAction("event-3", 4000))
+  })
 
-      expect(steps[0].actions).toHaveLength(3)
-      expect(steps[0].actions[0]).toMatchObject({
-        type: "tool",
-        status: "running",
-        data: { tool: "web_search", tool_call_id: "A" },
-      })
-      expect(steps[0].actions[0].data.error).toBeUndefined()
-      expect(steps[0].actions[1]).toMatchObject({
-        type: "tool",
-        status: "running",
-        data: { tool: "mcp_google_drive_42_unavailable" },
-      })
-      expect(steps[0].actions[2]).toEqual(statusLineAction("event-3", 4000))
-    },
-  )
+  it("replaces only the running placeholder card when a completed card shares its id", () => {
+    const actions = run(start(S, "A"), endS, start(P, "A"), placeholderFailure("A"))
+
+    expect(actions).toHaveLength(2)
+    expect(actions[0]).toMatchObject({
+      type: "tool",
+      status: "completed",
+      data: { tool: S, output: "RESULT_S" },
+    })
+    expect(actions[1]).toEqual(statusLineAction("event-3", 4000))
+  })
 
   it("renders a failure without a matching start as only a status line", () => {
     const events = [stepStart, placeholderFailure("A")].map((event, index) => ({
