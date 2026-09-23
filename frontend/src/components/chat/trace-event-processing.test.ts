@@ -416,15 +416,28 @@ describe("processTraceEvents unavailable connector placeholder", () => {
   })
 
   it("replaces only the running placeholder card when a completed card shares its id", () => {
-    const actions = run(start(S, "A"), endS, start(P, "A"), placeholderFailure("A"))
+    const endP = ev("tool_execution_end", {
+      tool_name: P,
+      tool_call_id: "A",
+      result: { output: "RESULT_P" },
+    })
+    const actions = run(start(P, "A"), endP, start(P, "A"), placeholderFailure("A"))
 
     expect(actions).toHaveLength(2)
     expect(actions[0]).toMatchObject({
       type: "tool",
       status: "completed",
-      data: { tool: S, output: "RESULT_S" },
+      data: { tool: P, output: "RESULT_P" },
     })
     expect(actions[1]).toEqual(statusLineAction("event-3", 4000))
+  })
+
+  it("appends a status line when two running cards share the id and tool name", () => {
+    const actions = run(start(P, "A"), start(P, "A"), placeholderFailure("A"))
+
+    expect(actions).toHaveLength(3)
+    expect(placeholderCards(actions)).toHaveLength(2)
+    expect(actions[2]).toEqual(statusLineAction("event-3", 4000))
   })
 
   it("renders a failure without a matching start as only a status line", () => {

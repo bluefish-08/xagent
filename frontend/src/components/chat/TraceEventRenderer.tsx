@@ -836,7 +836,7 @@ export function processTraceEvents(
           if (typeof connector === 'string' && connector.trim()) {
             const callId = errorData.tool_call_id;
             const failedTool = getRawToolName(event);
-            // Replace a card only when id and tool name single it out; otherwise append and touch no card.
+            // Sibling calls may reuse an id, so the tool name must also match.
             const ownCards = step.actions.filter(
               a => a.type === 'tool' && a.status === 'running'
                 && !!callId && a.data.tool_call_id === callId
