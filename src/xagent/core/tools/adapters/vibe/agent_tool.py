@@ -1838,6 +1838,16 @@ def _classify_delegated_child_failure(
             failure_code="unsupported_nested_interaction",
         )
 
+    # A delivered partial answer ends the child's run, not the delegated work.
+    # In particular, iteration-limit delivery must not unlock a parent step
+    # as though the child completed all of its requested actions.
+    if result.get("completion_outcome") in ("partial", "blocked"):
+        output = result.get("output")
+        message = "The delegated task did not complete."
+        if isinstance(output, str) and output.strip():
+            message = f"{message}\n\n{output}"
+        return _classified_failure(message)
+
     status_is_incomplete = isinstance(status, str) and status.lower() != "completed"
     if result.get("success") is False or status_is_incomplete:
         if _child_never_answered(result):
@@ -2148,14 +2158,18 @@ class AgentTool(AbstractBaseTool):
     def _resolve_delegated_output_path(self, workspace: Any, raw_path: str) -> Path:
         raw = raw_path.strip()
         path = Path(raw)
+        # A delegated output is about to be registered as one of the parent
+        # task's own files, so it resolves through the write-side entry: a
+        # path inside the engine-owned subtree is refused there and skipped
+        # by the caller like any other unresolvable path.
         if path.is_absolute():
-            return Path(workspace.resolve_path(raw))
+            return Path(workspace.resolve_write_path(raw))
 
         first_part = Path(raw).parts[0] if Path(raw).parts else ""
         default_dir = (
             "workspace" if first_part in {"input", "output", "temp"} else "output"
         )
-        return Path(workspace.resolve_path(raw, default_dir=default_dir))
+        return Path(workspace.resolve_write_path(raw, default_dir=default_dir))
 
     def _parent_owned_file_outputs(
         self, file_outputs: Any, workspace: Any, db: Any
@@ -2211,11 +2225,17 @@ class AgentTool(AbstractBaseTool):
 
             if file_record is None and workspace is not None:
                 for raw_path in raw_paths:
+                    # RuntimeError is what Path.resolve() raises for a
+                    # symlink loop on the interpreters this project supports;
+                    # OSError covers the OS-level failures resolve() can also
+                    # raise, such as a path too long for the filesystem; such
+                    # an output is skipped like any other that does not
+                    # resolve, as the file tool's write resolver does.
                     try:
                         resolved_path = self._resolve_delegated_output_path(
                             workspace, raw_path
                         )
-                    except (FileNotFoundError, ValueError):
+                    except (FileNotFoundError, ValueError, RuntimeError, OSError):
                         logger.debug(
                             "Failed to resolve delegated file output: %s",
                             raw_path,

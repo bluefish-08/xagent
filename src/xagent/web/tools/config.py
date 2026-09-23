@@ -533,7 +533,7 @@ def _oauth_token_provider_candidates(app_info: Mapping[str, Any]) -> list[str]:
     from ...web.mcp_apps import restrict_to_app_scoped_oauth_grant
 
     return restrict_to_app_scoped_oauth_grant(
-        app_info.get("id"), (app_info.get("provider"), app_info.get("id"))
+        app_info, (app_info.get("provider"), app_info.get("id"))
     )
 
 
@@ -760,7 +760,7 @@ class _OAuthRefreshPermanentlyInvalid(Exception):
     refresh token is dead -- revoked, expired, or the token/config it needs
     to refresh is simply missing -- as opposed to a transient failure
     (timeout, network error, provider 5xx) that may well succeed on a later
-    retry. Only this case should cost the user their stored connection.
+    retry. Only this case should invalidate the user's stored credentials.
     """
 
 
@@ -3871,7 +3871,7 @@ class WebToolConfig(BaseToolConfig):
         if permanently_invalid:
             logger.warning(
                 "OAUTH CONFIG: Token for '%s' is invalid and could not be refreshed. "
-                "Deleting OAuth record to prompt user for reconnection.",
+                "Clearing stored credentials to prompt user for reconnection.",
                 provider_name,
             )
             if resource_owner_key is None:
@@ -3886,7 +3886,32 @@ class WebToolConfig(BaseToolConfig):
                     resource_owner_key=None,
                 )
             if oauth_account is not None:
-                oauth_db.delete(oauth_account)
+                # Keep the account identity as a reconnect tombstone. Deleting
+                # the row makes a permanently invalid connection
+                # indistinguishable from one that was never authorized, while
+                # retaining either token would keep dead credentials at rest.
+                if (
+                    str(oauth_account.provider) == "gmail"
+                    and oauth_account.resource_owner_key is None
+                ):
+                    # mark_gmail_oauth_reconnect_required clears the tokens
+                    # itself, atomically with quiescing the dependent
+                    # watch/triggers under the account's mailbox transition
+                    # lock. Clearing them here first would let the lock's own
+                    # pre-acquisition commit persist the clear before the
+                    # watch update runs, splitting one transaction into two.
+                    from ..services.gmail_provisioning import (
+                        mark_gmail_oauth_reconnect_required,
+                    )
+
+                    mark_gmail_oauth_reconnect_required(
+                        oauth_db,
+                        oauth_account=oauth_account,
+                    )
+                else:
+                    oauth_account.access_token = ""
+                    oauth_account.refresh_token = None
+                    oauth_account.expires_at = None
                 oauth_db.commit()
             return _LegacyOAuthTokenResolution(
                 access_token=None,
@@ -4005,6 +4030,7 @@ class WebToolConfig(BaseToolConfig):
         *,
         provider_name: object,
         app_id: object,
+        app_info: Mapping[str, Any] | None = None,
         resource_owner_key: str | None = None,
     ) -> _LegacyOAuthTokenResolution:
         """Resolve and persist one exact OAuth owner in an isolated transaction."""
@@ -4032,7 +4058,8 @@ class WebToolConfig(BaseToolConfig):
                 # can't be trusted to carry a permission added after that flow
                 # already existed. See APPS_REQUIRING_APP_SCOPED_OAUTH_GRANT.
                 providers_to_check = restrict_to_app_scoped_oauth_grant(
-                    app_id, [provider_name, app_id]
+                    app_info if app_info is not None else app_id,
+                    [provider_name, app_id],
                 )
                 oauth_account = (
                     scoped_user_oauth_query(
@@ -4261,6 +4288,7 @@ class WebToolConfig(BaseToolConfig):
                 legacy_token = await self._resolve_legacy_oauth_access_token(
                     provider_name=provider_name,
                     app_id=app_id,
+                    app_info=app_info,
                     resource_owner_key=(
                         self._mcp_runtime_authorization_policy.resource_owner_key
                         if actor_builtin

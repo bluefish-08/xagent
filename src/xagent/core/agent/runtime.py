@@ -35,6 +35,7 @@ from ..tools.user_interaction import (
     WAITING_FOR_USER_STATUS,
     tool_result_waits_for_user,
 )
+from .checkpoint import CheckpointPersistenceError
 from .context.execution import (
     COMPACT_SUMMARY_FALLBACK_BUDGETS,
     COMPACT_THRESHOLD_SOURCE_DEFAULT,
@@ -376,6 +377,12 @@ class PatternRuntime:
             kwargs=kwargs,
             resolver=self.context_ref_resolver,
         )
+        # Setup may yield before a provider task exists for cancellation.
+        await self.should_interrupt()
+        if self._interrupt_requested:
+            raise LLMCallInterrupted(
+                self.interrupt_reason or "interrupted before LLM call"
+            )
         call = llm.chat(**kwargs)
         if not inspect.isawaitable(call):
             return call
@@ -938,6 +945,24 @@ class PatternRuntime:
 
         if self.outbound_message_handler is not None:
             await self._maybe_await(self.outbound_message_handler(payload))
+        elif expect_response or message_type == "question":
+            # A dropped question parks the run waiting for a reply that can
+            # never arrive, so this is worth a warning.
+            logger.warning(
+                "Dropping agent outbound message for execution %s: no outbound "
+                "message handler is installed (type=%r, expect_response=%s)",
+                self.execution_id,
+                message_type,
+                expect_response,
+            )
+        else:
+            logger.debug(
+                "Dropping agent outbound message for execution %s: no outbound "
+                "message handler is installed (type=%r, expect_response=%s)",
+                self.execution_id,
+                message_type,
+                expect_response,
+            )
 
         return payload
 
@@ -1804,6 +1829,28 @@ class PatternRuntime:
         if self.tracer is None:
             return
 
+        # Normalize here rather than only in ``TraceCheckpointStore``: that
+        # wrapper is applied in exactly one place (``xagent/service.py``), so
+        # the fallback ``PatternRuntime`` constructions in ``auto.py``,
+        # ``react.py`` and ``dag.py`` talk to a bare tracer and would otherwise
+        # surface a raw writer exception. DAG only treats
+        # ``CheckpointPersistenceError`` as a durability failure; anything else
+        # is swallowed by its generic handler into a permanent step failure.
+        #
+        # ``CheckpointPersistenceError`` is re-raised untouched so an error the
+        # store already normalized is not wrapped twice, and ``BaseException``
+        # is not caught at all so cancellation / ``SystemExit`` /
+        # ``KeyboardInterrupt`` keep their control-flow semantics.
+        try:
+            await self._write_checkpoint_to_tracer(payload)
+        except CheckpointPersistenceError:
+            raise
+        except Exception as exc:
+            raise CheckpointPersistenceError(
+                "Checkpoint writer failed before persistence was confirmed."
+            ) from exc
+
+    async def _write_checkpoint_to_tracer(self, payload: dict[str, Any]) -> None:
         checkpoint = getattr(self.tracer, "checkpoint", None)
         if callable(checkpoint):
             await self._maybe_await(checkpoint(**payload))

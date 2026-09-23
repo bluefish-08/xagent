@@ -128,9 +128,12 @@ async def test_old_processing_claim_does_not_block_new_owner(host):
         assert db.get(TaskExecutionCommand, cid).result == {"reconciled": True}
 
 
-async def test_replaced_owner_cannot_complete_command(host):
+async def test_replaced_owner_cannot_complete_command(host, monkeypatch):
     factory, tid, registry = host
     cid = enqueue(host)
+    # Exercise the settlement fence before heartbeat-driven cancellation can
+    # race it. Owner-loss cancellation is covered by the runtime tests.
+    monkeypatch.setattr(registry, "_run_heartbeats", AsyncMock())
 
     async def execute(command):
         with factory() as db:
@@ -262,10 +265,18 @@ async def test_shutdown_drains_command_while_registry_retains_lease(host):
     try:
         with factory() as db:
             before = db.get(Task, tid).last_heartbeat_at
-        await asyncio.sleep(0.09)
-        with factory() as db:
-            task = db.get(Task, tid)
-            assert task.runner_id == "worker" and task.last_heartbeat_at > before
+
+        async def wait_for_renewal():
+            while True:
+                with factory() as db:
+                    task = db.get(Task, tid)
+                    assert task.runner_id == "worker"
+                    if task.last_heartbeat_at > before:
+                        return
+                await asyncio.sleep(0.01)
+
+        # Wait for a committed renewal, not a fixed database/scheduler latency.
+        await asyncio.wait_for(wait_for_renewal(), 5)
         assert not closing.done()
     finally:
         release.set()

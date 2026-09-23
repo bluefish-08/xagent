@@ -733,6 +733,27 @@ def get_builtin_public_mcp_app_rows() -> list[dict[str, Any]]:
             },
         },
         {
+            "app_id": "planner",
+            "name": "Planner",
+            "description": "Connect a Microsoft 365 work or school account to manage basic Planner plans, buckets, and tasks, including checklists and assignments. Personal Microsoft accounts and Premium plans are not supported.",
+            "icon": "https://www.google.com/s2/favicons?domain=tasks.office.com&sz=128",
+            "transport": "oauth",
+            "provider_name": "microsoft",
+            "category": "Productivity",
+            "oauth_scopes": ["Tasks.ReadWrite"],
+            "is_visible_in_connector": True,
+            "launch_config": {
+                "command": "python",
+                "args": ["-m", "xagent.web.tools.mcp.planner"],
+                "env_mapping": {"AUTH_TOKEN": "access_token"},
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "planner",
+                    "version": 1,
+                },
+            },
+        },
+        {
             "app_id": "powerpoint",
             "name": "PowerPoint",
             "description": "Connect to PowerPoint to read, create, and edit presentations stored on OneDrive or SharePoint.",
@@ -780,6 +801,30 @@ def get_builtin_public_mcp_app_rows() -> list[dict[str, Any]]:
                 "builtin_provenance": {
                     "registry": "xagent",
                     "app_id": "sharepoint",
+                    "version": 1,
+                },
+            },
+        },
+        {
+            "app_id": "word",
+            "name": "Word",
+            "description": "Connect to Word to create documents and read or edit top-level main-body paragraphs stored on OneDrive or SharePoint. Tables, headers, footers, text boxes, notes, and tracked changes are excluded.",
+            "icon": "https://www.google.com/s2/favicons?domain=office.com&sz=128",
+            "transport": "oauth",
+            "provider_name": "microsoft",
+            "category": "Productivity",
+            "oauth_scopes": ["Files.ReadWrite.All"],
+            "is_visible_in_connector": True,
+            "launch_config": {
+                "command": "python",
+                "args": ["-m", "xagent.web.tools.mcp.word"],
+                "env_mapping": {"AUTH_TOKEN": "access_token"},
+                "static_env": {
+                    "XAGENT_TOOL_MAX_OUTPUT_LENGTH": "XAGENT_TOOL_MAX_OUTPUT_LENGTH"
+                },
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "word",
                     "version": 1,
                 },
             },
@@ -1016,6 +1061,159 @@ def get_builtin_public_mcp_app_rows() -> list[dict[str, Any]]:
             "launch_config": {
                 "url": "https://mcp.notion.com/mcp",
                 "auth": {"type": "mcp_oauth"},
+            },
+        },
+        {
+            "app_id": "atlassian",
+            "name": "Atlassian (Jira, Confluence, Bitbucket)",
+            "description": "Connect to Atlassian to search and work with Jira issues, Confluence pages and Bitbucket repositories through Atlassian's hosted MCP server.",
+            "icon": "https://www.google.com/s2/favicons?domain=atlassian.com&sz=128",
+            "transport": "streamable_http",
+            "provider_name": None,
+            "category": "Productivity",
+            "oauth_scopes": None,
+            "is_visible_in_connector": True,
+            # Remote MCP (mcp_oauth), same shape as Granola/Notion: Atlassian
+            # hosts the server (github.com/atlassian/atlassian-mcp-server) and
+            # exposes Jira, Confluence and Bitbucket Cloud tools; there is no
+            # local module to launch. Users connect via POST
+            # /api/mcp/apps/{id}/oauth/connect (per-user OAuth 2.1
+            # Authorization Code + PKCE); the authorization server advertises
+            # a registration_endpoint, so Dynamic Client Registration is used
+            # and no static client credentials are required. /v2/mcp is the
+            # vendor's current endpoint — the legacy /v1/sse endpoint is
+            # unsupported after 2026-06-30. This row sits alongside the
+            # separate "jira" row (our own local Jira tool launched behind
+            # Atlassian 3LO, transport "oauth"); both are visible in the
+            # connector picker because they expose different tool sets.
+            "launch_config": {
+                "url": "https://mcp.atlassian.com/v2/mcp",
+                "auth": {"type": "mcp_oauth"},
+                # Stable ownership marker used by the seed migration
+                # (whatsapp/shopify pattern): a pre-existing operator row
+                # under this app_id is neither adopted on upgrade nor
+                # deleted on downgrade. The connect path copies only
+                # url/auth onto the shared server row, so this key never
+                # reaches the runtime connection.
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "atlassian",
+                    "version": 1,
+                },
+            },
+        },
+        {
+            "app_id": "miro",
+            "name": "Miro",
+            "description": "Connect to Miro to find boards and read, create and update board content through Miro's hosted MCP server.",
+            "icon": "https://www.google.com/s2/favicons?domain=miro.com&sz=128",
+            "transport": "streamable_http",
+            "provider_name": None,
+            "category": "Productivity",
+            "oauth_scopes": None,
+            "is_visible_in_connector": True,
+            # Remote MCP (mcp_oauth), same shape as Granola/Notion: Miro hosts
+            # the server itself and exposes its own board tools; there is no
+            # local module to launch. The MCP endpoint is the host root — the
+            # protected-resource metadata names "https://mcp.miro.com/" as
+            # the resource and as its own authorization server. Users connect
+            # via POST /api/mcp/apps/{id}/oauth/connect (per-user OAuth 2.1
+            # Authorization Code + PKCE); Miro advertises a
+            # registration_endpoint, so Dynamic Client Registration is used
+            # and no static client credentials are required. Miro's
+            # oauth-authorization-server document advertises only
+            # client_secret_* token auth methods (its openid-configuration
+            # lists "none"), but a DCR request with
+            # token_endpoint_auth_method="none" was verified on 2026-09-20 to
+            # return 201 with a public client, which is the shape our
+            # register_mcp_oauth_public_client requires.
+            "launch_config": {
+                "url": "https://mcp.miro.com/",
+                "auth": {"type": "mcp_oauth"},
+                # Same ownership marker as the atlassian row above.
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "miro",
+                    "version": 1,
+                },
+            },
+        },
+        {
+            "app_id": "fireflies",
+            "name": "Fireflies",
+            "description": "Connect to Fireflies to search your meetings and read transcripts, summaries and action items through Fireflies' hosted MCP server.",
+            "icon": "https://www.google.com/s2/favicons?domain=fireflies.ai&sz=128",
+            "transport": "streamable_http",
+            "provider_name": None,
+            "category": "Productivity",
+            "oauth_scopes": None,
+            "is_visible_in_connector": True,
+            # Remote MCP (mcp_oauth), same shape as Granola/Notion/Atlassian/
+            # Miro: Fireflies hosts the server itself
+            # (docs.fireflies.ai/getting-started/mcp-configuration) and
+            # exposes its own meeting tools; there is no local module to
+            # launch. The protected-resource metadata names
+            # "https://api.fireflies.ai/mcp" as the resource and
+            # "https://api.fireflies.ai/" as the authorization server, whose
+            # metadata advertises a registration_endpoint, PKCE S256 and token
+            # auth method "none", so users connect via POST
+            # /api/mcp/apps/{id}/oauth/connect (per-user OAuth 2.1
+            # Authorization Code + PKCE with Dynamic Client Registration) and
+            # no static client credentials are required. The vendor docs also
+            # describe a static "Authorization: Bearer <api key>" header as a
+            # Claude Desktop alternative; the catalog deliberately models only
+            # the OAuth shape, so no secret ever lives in launch_config.
+            "launch_config": {
+                "url": "https://api.fireflies.ai/mcp",
+                "auth": {"type": "mcp_oauth"},
+                # Same ownership marker as the atlassian/miro rows above.
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "fireflies",
+                    "version": 1,
+                },
+            },
+        },
+        {
+            "app_id": "rocketlane",
+            "name": "Rocketlane",
+            "description": "Connect to Rocketlane to search projects, create and update delivery tasks and log time entries through Rocketlane's hosted MCP server.",
+            "icon": "https://www.google.com/s2/favicons?domain=rocketlane.com&sz=128",
+            "transport": "streamable_http",
+            "provider_name": None,
+            "category": "Productivity",
+            "oauth_scopes": None,
+            "is_visible_in_connector": True,
+            # Remote MCP (mcp_oauth), same shape as Granola/Notion: Rocketlane
+            # hosts the server itself and exposes its own project, task and
+            # time-entry tools; there is no local module to launch. Users
+            # connect via POST /api/mcp/apps/{id}/oauth/connect (per-user
+            # OAuth 2.1 Authorization Code + PKCE); the authorization server
+            # advertises a registration_endpoint and lists "none" among its
+            # token_endpoint_auth_methods_supported, so Dynamic Client
+            # Registration is used and no static client credentials are
+            # required.
+            #
+            # Discovery takes the path-suffixed candidate at both hops and
+            # needs no mcp_oauth.py change: the protected-resource document
+            # lives at /.well-known/oauth-protected-resource/mcp (the host
+            # root returns 404), which protected_resource_metadata_urls tries
+            # first for a path-bearing endpoint, and it names the
+            # path-bearing issuer
+            # https://rocketlane.scalekit.com/resources/res_121247790507492638,
+            # whose metadata authorization_server_metadata_urls likewise
+            # looks for under /.well-known/oauth-authorization-server<path>
+            # (the same shape as the atlassian row's
+            # auth.atlassian.com/<tenant> issuer).
+            "launch_config": {
+                "url": "https://rocket-mcp.rl-platforms.rocketlane.com/mcp",
+                "auth": {"type": "mcp_oauth"},
+                # Same ownership marker as the atlassian/miro rows above.
+                "builtin_provenance": {
+                    "registry": "xagent",
+                    "app_id": "rocketlane",
+                    "version": 1,
+                },
             },
         },
         {
@@ -1462,6 +1660,51 @@ def get_builtin_public_mcp_app_rows() -> list[dict[str, Any]]:
             },
         },
         {
+            "app_id": "freshdesk",
+            "name": "Freshdesk",
+            "description": "Connect your Freshdesk helpdesk (with your tenant subdomain and a per-user API key from Profile settings -> Your API Key) to look up, create and update tickets, read and post conversations, and search contacts and agents.",
+            "icon": "https://www.google.com/s2/favicons?domain=freshdesk.com&sz=128",
+            "transport": "stdio",
+            "provider_name": None,
+            "category": "Support",
+            "oauth_scopes": None,
+            # Hidden until manually verified against a live account, same as
+            # the zendesk and intercom rows above: nothing here has been run
+            # against a real tenant, and this connector can reply to tickets,
+            # which emails the requester. is_visible_in_connector is not
+            # builtin-protected, so flipping it needs no redeploy -- and a
+            # follow-up migration flips it once verification lands
+            # (xorbitsai/xagent-saas#1409).
+            "is_visible_in_connector": False,
+            # Key-based (non-oauth), like chartmogul/posthog/stripe: Freshdesk
+            # has no OAuth flow for its REST API, only a per-user API key from
+            # Profile settings -> Your API Key, sent as the HTTP Basic Auth
+            # username with an ignored password.
+            #
+            # Two required_env, not one: Freshdesk is multi-tenant by hostname
+            # (<subdomain>.freshdesk.com, with no custom-domain support for
+            # programmatic access), so the subdomain identifies the account and
+            # the key authenticates within it. Both are per-user values and ride
+            # the existing encrypted per-user env path. The subdomain IS
+            # user-supplied, so the connector validates it as a bare DNS label
+            # and then resolves the host it composes and rejects a private
+            # address -- a legitimate name can still be rebound by DNS at
+            # request time, which the label check alone does not cover. Same
+            # posture as the zendesk row above.
+            #
+            # This deliberately goes through Freshdesk's REST API rather than
+            # their own remote MCP endpoint: that endpoint is metered separately
+            # and sparsely (100 actions per account per month on Growth, against
+            # 100 REST calls per minute), and a remote row carrying a static
+            # per-tenant header has no per-user shape in this catalog. See
+            # xorbitsai/xagent-saas#1409.
+            "launch_config": {
+                "command": "python",
+                "args": ["-m", "xagent.web.tools.mcp.freshdesk"],
+                "required_env": ["FRESHDESK_SUBDOMAIN", "FRESHDESK_API_KEY"],
+            },
+        },
+        {
             "app_id": "chartmogul",
             "name": "ChartMogul",
             "description": "Connect your ChartMogul account (with a per-user API key from Profile -> API keys) to look up and manage customers, contacts, and sales opportunities.",
@@ -1729,6 +1972,20 @@ def is_builtin_public_mcp_app(app_id: str) -> bool:
     return get_builtin_public_mcp_app(app_id) is not None
 
 
+def is_reserved_builtin_public_mcp_app_id(app_id: str) -> bool:
+    """Whether an ID collides with a built-in after identity normalization.
+
+    Persisted lookups remain exact so an existing operator-owned row cannot be
+    silently reinterpreted. New rows use this stricter check to prevent a
+    case/whitespace alias from surviving a downgrade and blocking a later seed.
+    """
+    identity = canonicalize_builtin_identity(app_id)
+    return any(
+        canonicalize_builtin_identity(row["app_id"]) == identity
+        for row in get_builtin_public_mcp_app_rows()
+    )
+
+
 def get_builtin_execution_fields(app_id: str) -> dict[str, Any] | None:
     row = get_builtin_public_mcp_app(app_id)
     if row is None:
@@ -1963,6 +2220,10 @@ def seed_builtin_oauth_and_public_mcp_apps(bind: Connection) -> None:
         protected_server_identities = (
             ("shopify", "Shopify", "shopify"),
             ("excel", "Excel", "Excel"),
+            ("whatsapp", "WhatsApp Business", "WhatsApp Business"),
+            ("planner", "Planner", "Planner"),
+            ("sharepoint", "SharePoint", "SharePoint"),
+            ("powerpoint", "PowerPoint", "PowerPoint"),
         )
         builtin_app_ids = {row["app_id"] for row in builtin_app_rows}
         for app_id, display_name, official_server_name in protected_server_identities:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -626,6 +627,76 @@ class PatternWithState:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("during_materialization", [False, True])
+@pytest.mark.parametrize("via_checker", [False, True])
+async def test_runtime_does_not_start_llm_after_interrupt(
+    monkeypatch: pytest.MonkeyPatch, during_materialization: bool, via_checker: bool
+) -> None:
+    runtime = PatternRuntime()
+    checker_requested = False
+
+    async def checker() -> str | None:
+        return "stop before provider" if checker_requested else None
+
+    if via_checker:
+        runtime.interrupt_checker = checker
+
+    def stop() -> None:
+        nonlocal checker_requested
+        if via_checker:
+            checker_requested = True
+        else:
+            runtime.request_interrupt("stop before provider")
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def materialize(**kwargs: Any) -> dict[str, Any]:
+        if during_materialization:
+            started.set()
+            await release.wait()
+        return dict(kwargs["kwargs"])
+
+    monkeypatch.setattr(runtime_module, "materialize_llm_kwargs", materialize)
+    llm = type("LLM", (), {"chat": AsyncMock(return_value="must not call")})()
+    if not during_materialization:
+        stop()
+    task = asyncio.create_task(runtime.run_llm_call(llm))
+    if during_materialization:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        stop()
+        release.set()
+
+    with pytest.raises(LLMCallInterrupted, match="stop before provider"):
+        await task
+    llm.chat.assert_not_called()
+    assert not runtime._active_llm_tasks
+
+
+@pytest.mark.asyncio
+async def test_runtime_respects_explicit_stop_while_checker_returns_false() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def checker() -> bool:
+        started.set()
+        await release.wait()
+        return False
+
+    runtime = PatternRuntime(interrupt_checker=checker)
+    llm = type("LLM", (), {"chat": AsyncMock()})()
+    task = asyncio.create_task(runtime.run_llm_call(llm))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runtime.request_interrupt("stop during checker")
+    release.set()
+
+    with pytest.raises(LLMCallInterrupted, match="stop during checker"):
+        await task
+    llm.chat.assert_not_called()
+    assert not runtime._active_llm_tasks
+
+
+@pytest.mark.asyncio
 async def test_runtime_interrupt_converts_active_llm_cancel() -> None:
     runtime = PatternRuntime()
     llm = SlowLLM()
@@ -868,12 +939,16 @@ class RecordingLogger:
     def __init__(self) -> None:
         self.info_calls: list[tuple[str, tuple[Any, ...]]] = []
         self.warning_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.debug_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     def info(self, msg: str, *args: Any) -> None:
         self.info_calls.append((msg, args))
 
     def warning(self, msg: str, *args: Any) -> None:
         self.warning_calls.append((msg, args))
+
+    def debug(self, msg: str, *args: Any) -> None:
+        self.debug_calls.append((msg, args))
 
 
 _NEWLINE_AND_QUOTE_EXCEPTION_TEXT = (
@@ -2501,3 +2576,74 @@ async def test_dropping_messages_publishes_no_summary_to_replay() -> None:
     assert result.strategy == "truncate"
     assert COMPACT_SUMMARY_METADATA_KEY not in result.metadata
     assert COMPACT_WATERMARK_METADATA_KEY not in result.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_type", ["question", "confirmation"])
+async def test_runtime_send_message_warns_when_no_outbound_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    message_type: str,
+) -> None:
+    """#1328: an agent rebuilt from history (process restart, cache miss,
+    other worker) can end up with no outbound message handler installed.
+    Today ``send_message`` silently drops the payload in that case -- the
+    only trace is the payload sitting in ``outbound_messages``, with nothing
+    logged to say the delivery never happened. This pins that a warning is
+    logged instead, naming the execution and the message shape but never
+    the message text itself (message content can be arbitrary agent/user
+    output and must not be duplicated into logs). The warning must fire on
+    expect_response=True regardless of message_type, because react.py's
+    send_message tool handler reads the two arguments independently."""
+
+    recording_logger = RecordingLogger()
+    monkeypatch.setattr(runtime_module, "logger", recording_logger)
+    runtime = PatternRuntime(execution_id="task-123", outbound_message_handler=None)
+
+    payload = await runtime.send_message(
+        message="Question?",
+        message_type=message_type,
+        expect_response=True,
+    )
+
+    assert payload["message"] == "Question?"
+    assert runtime.outbound_messages == [payload]
+
+    assert len(recording_logger.warning_calls) == 1
+    msg, args = recording_logger.warning_calls[0]
+    logged = msg % args
+    assert "no outbound message handler" in logged
+    assert "task-123" in logged
+    assert "Question?" not in logged
+    assert recording_logger.debug_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_send_message_debug_logs_dropped_progress_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1328: a dropped progress update (not a question, no response
+    expected) does not park the run, so it should only be debug-logged --
+    the warning is reserved for the case that actually loses the agent's
+    turn. The payload must still be recorded and returned even though
+    nothing is installed to deliver it."""
+
+    recording_logger = RecordingLogger()
+    monkeypatch.setattr(runtime_module, "logger", recording_logger)
+    runtime = PatternRuntime(execution_id="task-123", outbound_message_handler=None)
+
+    payload = await runtime.send_message(
+        message="Still working",
+        message_type="progress",
+        expect_response=False,
+    )
+
+    assert payload["message"] == "Still working"
+    assert runtime.outbound_messages == [payload]
+
+    assert recording_logger.warning_calls == []
+    assert len(recording_logger.debug_calls) == 1
+    msg, args = recording_logger.debug_calls[0]
+    logged = msg % args
+    assert "no outbound message handler" in logged
+    assert "task-123" in logged
+    assert "Still working" not in logged

@@ -1,4 +1,4 @@
-"""Regression coverage for whatsapp's and sharepoint's membership in
+"""Regression coverage for connector-specific OAuth policy membership in
 APPS_REQUIRING_APP_SCOPED_OAUTH_GRANT.
 
 That set is hand-maintained (src/xagent/web/mcp_apps.py) with no mechanical
@@ -6,8 +6,9 @@ link to the builtin registry it protects: an app whose oauth_scopes need
 something the provider's own default_scopes don't grant, but that's missing
 from the set, fails silently -- a bare provider-level OAuth grant is treated
 as sufficient, the app reports "connected", and every scope-gated tool call
-then fails. This pins that whatsapp and sharepoint (each added in their own
-PR) are correctly listed, so a future edit can't silently drop either.
+then fails. This pins every connector currently documented by the policy,
+including whatsapp, Planner, SharePoint, PowerPoint, Excel, and Word, so a
+future edit cannot silently drop one.
 
 Deliberately narrow: a fully general "every builtin oauth app whose scopes
 exceed its provider's default_scopes must be listed here" test does not hold
@@ -15,7 +16,7 @@ across the registry today -- several existing google/microsoft/zoom-family
 apps (e.g. onedrive, outlook, teams) also request scopes beyond their
 provider's (identity-only) default_scopes without being listed, and
 asserting that gap closed is a separate, cross-connector investigation well
-beyond either of these connectors' own scope.
+beyond these connectors' own scope.
 """
 
 from xagent.web.builtin_mcp_registry import (
@@ -25,10 +26,21 @@ from xagent.web.builtin_mcp_registry import (
 from xagent.web.mcp_apps import requires_app_scoped_oauth_grant
 
 # Apps already known (from mcp_apps.py's own comment) to need this guard,
-# pinned here so a regression in any of them -- not just whatsapp/sharepoint
+# pinned here so a regression in any of them -- not just the newest connectors
 # -- is caught the same way.
 _EXPECTED_APP_SCOPED_APPS = frozenset(
-    {"excel", "facebook", "github", "myob", "meta-ads", "sharepoint", "whatsapp"}
+    {
+        "excel",
+        "facebook",
+        "github",
+        "myob",
+        "meta-ads",
+        "planner",
+        "powerpoint",
+        "sharepoint",
+        "whatsapp",
+        "word",
+    }
 )
 
 
@@ -67,11 +79,35 @@ def test_whatsapp_scopes_actually_exceed_the_meta_providers_default_scopes():
     )
 
 
+def test_planner_scopes_exceed_the_microsoft_providers_default_scopes():
+    assert _app_scopes_beyond_provider_defaults("planner") == {"Tasks.ReadWrite"}
+
+
 def test_sharepoint_scopes_actually_exceed_the_microsoft_providers_default_scopes():
     """Same premise check as whatsapp's, for sharepoint's Sites.ReadWrite.All
     against the microsoft provider's default_scopes (["User.Read"])."""
     assert _app_scopes_beyond_provider_defaults("sharepoint"), (
         "sharepoint's oauth_scopes are now fully covered by the microsoft "
+        "provider's default_scopes -- if that's genuinely true, it no "
+        "longer needs to be in APPS_REQUIRING_APP_SCOPED_OAUTH_GRANT and "
+        "this test (and the set) should be updated together, not left to "
+        "silently drift."
+    )
+
+
+def test_word_scopes_actually_exceed_the_microsoft_providers_default_scopes():
+    """Word requires Files.ReadWrite.All, which a bare User.Read grant lacks."""
+    word_app = next(
+        row for row in get_builtin_public_mcp_app_rows() if row["app_id"] == "word"
+    )
+    assert word_app["oauth_scopes"] == ["Files.ReadWrite.All"]
+    assert word_app["launch_config"]["static_env"] == {
+        "XAGENT_TOOL_MAX_OUTPUT_LENGTH": "XAGENT_TOOL_MAX_OUTPUT_LENGTH"
+    }
+    assert "top-level main-body paragraphs" in word_app["description"]
+    assert "Tables, headers, footers" in word_app["description"]
+    assert _app_scopes_beyond_provider_defaults("word"), (
+        "word's oauth_scopes are now fully covered by the microsoft "
         "provider's default_scopes -- if that's genuinely true, it no "
         "longer needs to be in APPS_REQUIRING_APP_SCOPED_OAUTH_GRANT and "
         "this test (and the set) should be updated together, not left to "
