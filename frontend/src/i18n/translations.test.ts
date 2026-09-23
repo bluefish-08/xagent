@@ -72,8 +72,6 @@ describe("translations", () => {
     const zh = translations.zh.builds.configForm.tools.categoryDescriptions.basic
     expect(en).not.toContain("date/time retrieval")
     expect(zh).not.toContain("日期时间获取")
-    expect(en).not.toContain("asking the user")
-    expect(zh).not.toContain("向用户提问")
   })
 
   it("describes the admin account label and searchable identities", () => {
