@@ -358,6 +358,33 @@ async def test_collection_existed_before_still_asks_the_decision(monkeypatch) ->
             id="physical-dir-without-detail",
         ),
         pytest.param(
+            {"may_delete": True, "raises": {"list:None": RuntimeError("list down")}},
+            {},
+            WHOLE[:5],
+            "list down",
+            id="remaining-records",
+        ),
+        pytest.param(
+            {
+                "may_delete": True,
+                "raises": {"del_coll_files": RuntimeError("uploads locked")},
+            },
+            {},
+            WHOLE[:6],
+            "uploads locked",
+            id="collection-uploads",
+        ),
+        pytest.param(
+            {
+                "may_delete": True,
+                "raises": {"store.delete:refreshed": RuntimeError("row locked")},
+            },
+            {},
+            WHOLE[:8],
+            "row locked",
+            id="refreshed-row-delete",
+        ),
+        pytest.param(
             {"may_delete": True, "raises": {"metadata": RuntimeError("meta down")}},
             {},
             WHOLE[:9],
@@ -571,6 +598,7 @@ def test_ingest_returns_collection_rollback_failure_verbatim(
 
 
 def test_ingest_setup_failure_clears_status_by_filename(test_env, temp_uploads) -> None:
+    """Pins a known pre-existing bug: the filename is used as doc_id. Not intended."""
     _, _, user, _ = test_env
     clear_status = MagicMock()
 
