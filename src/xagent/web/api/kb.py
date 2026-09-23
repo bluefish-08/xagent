@@ -79,7 +79,7 @@ from ...core.tools.core.RAG_tools.kb import (
 from ...core.tools.core.RAG_tools.kb.config_merge import (
     merge_collection_config_json,
 )
-from ...core.tools.core.RAG_tools.kb.models import RollbackFailedCloudIngestionRequest
+from ...core.tools.core.RAG_tools.kb.models import RollbackFailedUploadIngestionRequest
 from ...core.tools.core.RAG_tools.management.status import clear_ingestion_status
 from ...core.tools.core.RAG_tools.pipelines.web_ingestion import FileHandlerResult
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
@@ -1582,8 +1582,8 @@ async def _rollback_failed_cloud_ingestion(
             )
 
     try:
-        outcome = await get_kb_coordinator().rollback_failed_cloud_ingestion(
-            RollbackFailedCloudIngestionRequest(
+        outcome = await get_kb_coordinator().rollback_failed_upload_ingestion(
+            RollbackFailedUploadIngestionRequest(
                 document_compensation=_compensate_document,
                 file_compensation=_compensate_file,
                 collection_compensation=_compensate_collection,

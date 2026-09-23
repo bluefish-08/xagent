@@ -51,9 +51,9 @@ from .models import (
     KBStorageBackend,
     KBUserScope,
     KBVectorStorageCleanupResult,
-    RollbackFailedCloudIngestionRequest,
     RollbackFailedIngestionRequest,
     RollbackFailedIngestionResult,
+    RollbackFailedUploadIngestionRequest,
 )
 from .operation_compatibility import (
     KBOperationCompatibilityFacade,
@@ -2139,10 +2139,10 @@ class KBCoordinator:
         """Async twin (coordinator convention; first awaited in #795)."""
         return await asyncio.to_thread(self.rollback_failed_ingestion_sync, request)
 
-    async def rollback_failed_cloud_ingestion(
-        self, request: RollbackFailedCloudIngestionRequest
+    async def rollback_failed_upload_ingestion(
+        self, request: RollbackFailedUploadIngestionRequest
     ) -> RollbackFailedIngestionResult:
-        """Run cloud failed-ingest compensation DOCUMENT->FILE->COLLECTION.
+        """Run direct-upload failed-ingest compensation DOCUMENT->FILE->COLLECTION.
 
         Stops at the first failing callback and returns its exception in
         ``result.error``; never raises for a failing callback.
