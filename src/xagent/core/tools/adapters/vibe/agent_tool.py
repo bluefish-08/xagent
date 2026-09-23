@@ -11,7 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from .....config import get_agent_pattern_for_execution_mode, get_uploads_dir
-from .....web.services.agent_store import AgentStore
+from .....web.services.agent_store import AgentStore, UnsharedConnectorsError
 from .....web.services.model_service import (
     _get_visible_user_ids,
     _is_model_visible_to_user,
@@ -42,11 +42,7 @@ MAX_AGENT_NAME_LENGTH = 200
 
 
 def _assignable_tool_categories() -> list[str]:
-    """Categories the builder may offer the model.
-
-    Connector grants (bare ``mcp`` and ``mcp:<server>``) are left out: they
-    are managed in the UI's connector picker, not through the model.
-    """
+    """What the model may assign; connectors are never model-writable."""
     return [
         cat.value
         for cat in ToolCategory
@@ -55,35 +51,18 @@ def _assignable_tool_categories() -> list[str]:
     ]
 
 
-_MCP_SCOPE_PREFIX = "mcp:"
-
-_STORED_TOOL_CATEGORIES_FIELD = Field(
-    default=None,
-    description=(
-        "Tool categories actually stored; only meaningful when status is "
-        "``success``. ``null`` means unconfigured (every default tool), which "
-        "is not the same as an empty list (zero tools)."
-    ),
+_BUILDER_CONNECTOR_ERROR = (
+    "are connectors, which the user manages in the agent builder; do not pass them."
 )
 
 
-def _connector_grant(category: str) -> str | None:
-    """Trimmed bare ``mcp`` or ``mcp:<server>``; ``None`` for anything else."""
-    name = category.strip()
-    if name == ToolCategory.MCP.value:
-        return name
-    if name.startswith(_MCP_SCOPE_PREFIX):
-        return _MCP_SCOPE_PREFIX + name[len(_MCP_SCOPE_PREFIX) :].strip()
-    return None
+def _is_connector_category(category: str) -> bool:
+    # Untrimmed on purpose: ToolSelectionSpec.from_raw treats " mcp" as inert.
+    return category == ToolCategory.MCP.value or category.startswith("mcp:")
 
 
-def _resolve_llm_tool_categories(raw: Any, stored: Any) -> list[str]:
-    """Column value for a model-supplied, non-``None`` ``tool_categories``.
-
-    The model's non-connector categories replace the stored ones; the stored
-    connector grants are always kept, and the model may only echo them back.
-    Raises ``ValueError`` (message for the model) instead of dropping entries.
-    """
+def resolve_llm_tool_categories(raw: Any, connector_error: str) -> list[str]:
+    """Raises ``ValueError`` with a message for the model; never drops entries."""
     choices = _assignable_tool_categories()
     parsed = ensure_list(raw)
     if parsed is None:
@@ -91,24 +70,13 @@ def _resolve_llm_tool_categories(raw: Any, stored: Any) -> list[str]:
             f"tool_categories must be a list of category names, got {raw!r}. "
             f"Choose from: {', '.join(choices)}."
         )
-    grants: list[str] = []
-    for stored_category in stored or []:
-        grant = (
-            _connector_grant(stored_category)
-            if isinstance(stored_category, str)
-            else None
-        )
-        if grant is not None and grant not in grants:
-            grants.append(grant)
     selected: list[str] = []
     invalid: list[str] = []
-    new_grants: list[str] = []
+    connectors: list[str] = []
     for category in parsed:
-        grant = _connector_grant(category)
         name = category.strip()
-        if grant is not None:
-            if grant not in grants:
-                new_grants.append(category)
+        if _is_connector_category(name):
+            connectors.append(category)
         elif name not in choices:
             invalid.append(category)
         elif name not in selected:
@@ -119,21 +87,18 @@ def _resolve_llm_tool_categories(raw: Any, stored: Any) -> list[str]:
             f"tool_categories {invalid!r} are not assignable. "
             f"Choose from: {', '.join(choices)}."
         )
-    if new_grants:
-        problems.append(
-            f"{new_grants!r} are connectors, which can only be added or removed "
-            "in the UI's connector picker, not through this tool."
-        )
+    if connectors:
+        problems.append(f"{connectors!r} {connector_error}")
     if problems:
         raise ValueError(" ".join(problems) + " Nothing was saved.")
-    return selected + grants
+    return selected
 
 
-def _stored_tool_categories(agent: Any) -> list[str] | None:
-    """Report ``null`` for unconfigured rather than collapsing it to ``[]``."""
-    if agent.tool_categories is None:
+def without_connector_categories(categories: Any) -> list[str] | None:
+    parsed = ensure_list(categories)
+    if parsed is None:
         return None
-    return list(agent.tool_categories)
+    return [c for c in parsed if not _is_connector_category(c)]
 
 
 class _DelegatedAgentDatabaseTraceHandler:
@@ -526,7 +491,10 @@ class CreateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Creation status")
     message: str = Field(description="Detailed message about the created agent")
-    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
+    tool_categories: Optional[list[str]] = Field(
+        default=None,
+        description="Stored non-connector tool categories; null means unconfigured",
+    )
 
 
 class UpdateAgentToolArgs(BaseModel):
@@ -584,7 +552,10 @@ class UpdateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Update status")
     message: str = Field(description="Detailed message about the updated agent")
-    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
+    tool_categories: Optional[list[str]] = Field(
+        default=None,
+        description="Stored non-connector tool categories; null means unconfigured",
+    )
 
 
 class ListAgentsToolArgs(BaseModel):
@@ -842,8 +813,8 @@ class CreateAgentTool(AbstractBaseTool):
             "- description: IMPORTANT - Clear description of when to use this agent (e.g., 'Use this agent for data analysis tasks involving CSV files'). This helps users understand the agent's purpose. Write this in the same natural language as the current output language policy unless the user explicitly asks for another language.\n"
             f"- tool_categories (optional): Available categories: {categories_list}\n"
             f"  Example: ['file', 'knowledge', 'basic']\n"
-            "  Any other value rejects the whole call. Connectors ('mcp', 'mcp:<server>') "
-            "are added only in the UI's connector picker; do not pass them.\n"
+            "  Any other value, including a connector ('mcp' or 'mcp:<server>'), rejects "
+            "the whole call; the user manages connectors in the agent builder.\n"
             f"- knowledge_bases (optional): List of knowledge base names or IDs to link to this agent.\n"
             "  Only pass knowledge bases that already exist and are visible. "
             "If the requested knowledge base is missing, ask the user for a URL, "
@@ -859,7 +830,7 @@ class CreateAgentTool(AbstractBaseTool):
             "- markdown_link: Markdown link in format [Agent Name](agent://agent_id) - USE THIS FORMAT in your response\n"
             "- status: 'success' or 'error'\n"
             "- message: Detailed information about the created agent\n"
-            "- tool_categories: On success, the categories actually stored "
+            "- tool_categories: On success, the non-connector categories stored "
             "(null = unconfigured, every default tool; [] = zero tools)\n\n"
             "IMPORTANT: Always include the markdown_link in your response when creating an agent successfully. "
             "Use the format: [Agent Name](agent://agent_id). Use plain link syntax only — "
@@ -981,6 +952,25 @@ class CreateAgentTool(AbstractBaseTool):
                         message="Error: Agent instructions are required",
                     ).model_dump()
 
+                # ``is not None``, not truthiness: ``[]`` is the zero-tool agent, and
+                # a falsy malformed value must be refused, not persisted as NULL.
+                requested_categories = args.get("tool_categories")
+                tool_categories: list[str] | None = None
+                if requested_categories is not None:
+                    try:
+                        tool_categories = resolve_llm_tool_categories(
+                            requested_categories, _BUILDER_CONNECTOR_ERROR
+                        )
+                    except ValueError as exc:
+                        return CreateAgentToolResult(
+                            agent_id=0,
+                            agent_name="",
+                            tool_name="",
+                            markdown_link="",
+                            status="error",
+                            message=f"Error: {exc}",
+                        ).model_dump()
+
                 requested_agent_name = agent_name
                 agent_name, auto_renamed_from = self._resolve_available_agent_name(
                     requested_agent_name, db
@@ -1065,25 +1055,6 @@ class CreateAgentTool(AbstractBaseTool):
                         ),
                     ).model_dump()
 
-                # ``is not None``, not truthiness: ``[]`` is the zero-tool agent, and
-                # a falsy malformed value must be refused, not persisted as NULL.
-                requested_categories = args.get("tool_categories")
-                tool_categories: list[str] | None = None
-                if requested_categories is not None:
-                    try:
-                        tool_categories = _resolve_llm_tool_categories(
-                            requested_categories, None
-                        )
-                    except ValueError as exc:
-                        return CreateAgentToolResult(
-                            agent_id=0,
-                            agent_name="",
-                            tool_name="",
-                            markdown_link="",
-                            status="error",
-                            message=f"Error: {exc}",
-                        ).model_dump()
-
                 agent = AgentStore(db).create_agent(
                     user_id=self._user_id,
                     name=agent_name,
@@ -1119,7 +1090,7 @@ class CreateAgentTool(AbstractBaseTool):
                     tool_name=tool_name,
                     markdown_link=markdown_link,
                     status="success",
-                    tool_categories=_stored_tool_categories(agent),
+                    tool_categories=tool_categories,
                     message=(
                         f"✅ Agent created successfully\n\n"
                         f"{rename_note}"
@@ -1217,9 +1188,9 @@ class UpdateAgentTool(AbstractBaseTool):
             "- description (optional): New description of when to use this agent\n"
             f"- tool_categories (optional): Available categories: {categories_list}\n"
             f"  Example: ['file', 'knowledge', 'basic']\n"
-            "  Replaces the agent's non-connector categories; any other value rejects the whole call. "
-            "Connectors ('mcp', 'mcp:<server>') are managed only in the UI's connector picker: "
-            "the agent's connectors are always kept, and you may only repeat ones it already has.\n"
+            "  Replaces the agent's non-connector categories; any other value, including a "
+            "connector ('mcp' or 'mcp:<server>'), rejects the whole call. The user manages "
+            "connectors in the agent builder and they are kept automatically; do not pass them.\n"
             f"- knowledge_bases (optional): New list of knowledge base names or IDs to link to this agent.\n"
             "  Only pass knowledge bases that already exist and are visible. "
             "If the requested knowledge base is missing, ask the user for a URL, "
@@ -1235,8 +1206,8 @@ class UpdateAgentTool(AbstractBaseTool):
             "- markdown_link: Markdown link in format [Agent Name](agent://agent_id)\n"
             "- status: 'success' or 'error'\n"
             "- message: Detailed information about the updated agent\n"
-            "- tool_categories: On success, the categories actually stored, connectors included "
-            "(null = unconfigured, every default tool; [] = zero tools)\n\n"
+            "- tool_categories: On success, the non-connector categories stored "
+            "(null = unconfigured, every default tool)\n\n"
             "IMPORTANT: Updating a PUBLISHED agent does not unpublish it. "
             "It remains PUBLISHED with the updated configuration."
         )
@@ -1310,6 +1281,23 @@ class UpdateAgentTool(AbstractBaseTool):
                         ),
                     ).model_dump()
 
+                requested_categories = args.get("tool_categories")
+                model_categories: list[str] | None = None
+                if requested_categories is not None:
+                    try:
+                        model_categories = resolve_llm_tool_categories(
+                            requested_categories, _BUILDER_CONNECTOR_ERROR
+                        )
+                    except ValueError as exc:
+                        return UpdateAgentToolResult(
+                            agent_id=0,
+                            agent_name="",
+                            tool_name="",
+                            markdown_link="",
+                            status="error",
+                            message=f"Error: {exc}",
+                        ).model_dump()
+
                 # Track changes
                 changes = []
                 updates: dict[str, Any] = {}
@@ -1359,24 +1347,9 @@ class UpdateAgentTool(AbstractBaseTool):
                     updates["instructions"] = new_instructions
                     changes.append("instructions updated")
 
-                # Update tool_categories if provided (``is not None``: see create).
-                requested_categories = args.get("tool_categories")
-                if requested_categories is not None:
-                    try:
-                        new_tool_categories = _resolve_llm_tool_categories(
-                            requested_categories, agent.tool_categories
-                        )
-                    except ValueError as exc:
-                        return UpdateAgentToolResult(
-                            agent_id=0,
-                            agent_name="",
-                            tool_name="",
-                            markdown_link="",
-                            status="error",
-                            message=f"Error: {exc}",
-                        ).model_dump()
-                    updates["tool_categories"] = new_tool_categories
-                    changes.append(f"tool_categories → {new_tool_categories}")
+                # Update tool_categories if provided
+                if model_categories is not None:
+                    changes.append(f"tool_categories → {model_categories}")
 
                 # Update knowledge_bases if provided
                 new_knowledge_bases = ensure_list(args.get("knowledge_bases"))
@@ -1419,16 +1392,55 @@ class UpdateAgentTool(AbstractBaseTool):
                         tool_name=gen_agent_tool_name(agent.id, agent.name),
                         markdown_link=f"[{agent.name}](agent://{agent.id})",
                         status="success",
-                        tool_categories=_stored_tool_categories(agent),
+                        tool_categories=without_connector_categories(
+                            agent.tool_categories
+                        ),
                         message=f"ℹ️ No updates were made to agent '{agent.name}' (ID: {agent_id}). "
                         f"Status: {agent.status.value.upper()}. "
                         f"All fields were the same or no values were provided.",
                     ).model_dump()
 
-                agent = (
-                    AgentStore(db).update_agent_fields(self._user_id, agent_id, updates)
-                    or agent
-                )
+                connector_note = ""
+                if model_categories is not None:
+                    # Re-read after the awaits above: a builder save may have
+                    # changed the connectors meanwhile.
+                    db.refresh(agent)
+                    connectors = list(
+                        dict.fromkeys(
+                            c
+                            for c in ensure_list(agent.tool_categories) or []
+                            if _is_connector_category(c)
+                        )
+                    )
+                    updates["tool_categories"] = model_categories + connectors
+                    if connectors:
+                        connector_note = (
+                            "\n\nThe agent's connectors were left unchanged; "
+                            "the user manages them in the agent builder."
+                        )
+
+                try:
+                    agent = (
+                        AgentStore(db).update_agent_fields(
+                            self._user_id, agent_id, updates
+                        )
+                        or agent
+                    )
+                except UnsharedConnectorsError as exc:
+                    names = ", ".join(str(c["name"]) for c in exc.connectors)
+                    return UpdateAgentToolResult(
+                        agent_id=0,
+                        agent_name="",
+                        tool_name="",
+                        markdown_link="",
+                        status="error",
+                        message=(
+                            f"Error: this team agent's connectors ({names}) are not "
+                            "shared with the team. Nothing was saved. Ask the user "
+                            "to share or remove them in the agent builder; retry "
+                            "without tool_categories to save the other fields."
+                        ),
+                    ).model_dump()
 
                 # Generate the tool name and markdown link
                 agent_name = str(agent.name)
@@ -1445,7 +1457,7 @@ class UpdateAgentTool(AbstractBaseTool):
                     tool_name=tool_name,
                     markdown_link=markdown_link,
                     status="success",
-                    tool_categories=_stored_tool_categories(agent),
+                    tool_categories=without_connector_categories(agent.tool_categories),
                     message=(
                         f"✅ Agent updated successfully\n\n"
                         f"**Agent Details:**\n"
@@ -1455,6 +1467,7 @@ class UpdateAgentTool(AbstractBaseTool):
                         f"- Status: {agent.status.value.upper()}\n\n"
                         f"**Changes Applied:**\n"
                         + "\n".join(f"- {change}" for change in changes)
+                        + connector_note
                         + f"\n\n**How to use this agent:**\n"
                         f"Include this link in your response: {markdown_link}\n"
                         f"Or use the tool: {tool_name}\n\n"

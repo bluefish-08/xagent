@@ -19,13 +19,12 @@ from xagent.core.tools.adapters.vibe.agent_tool import (
     ListToolCategoriesTool,
     PublishedAgentToolRecord,
     UpdateAgentTool,
-    _assignable_tool_categories,
     _coerce_db_task_id,
     _DelegatedAgentTaskEventTraceHandler,
-    _resolve_llm_tool_categories,
     build_published_agent_tools_from_records,
     gen_agent_tool_name,
     get_published_agents_tools,
+    resolve_llm_tool_categories,
 )
 from xagent.core.tools.adapters.vibe.agent_tool_names import parse_agent_tool_id
 from xagent.core.tools.adapters.vibe.factory import ToolFactory
@@ -38,6 +37,8 @@ from xagent.web.models.model import Model
 from xagent.web.models.task import Task
 from xagent.web.models.uploaded_file import UploadedFile
 from xagent.web.models.user import User
+from xagent.web.services.agent_store import AgentStore
+from xagent.web.services.agent_team_scope import set_agent_team_hooks
 
 
 def _create_session() -> tuple[Session, str, Any]:
@@ -55,6 +56,37 @@ def _create_session() -> tuple[Session, str, Any]:
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return SessionLocal(), temp_db.name, SessionLocal
+
+
+@pytest.fixture
+def session_local(tmp_path: Path) -> Any:
+    engine = create_engine(f"sqlite:///{tmp_path / 'agents.db'}")
+    Base.metadata.create_all(bind=engine)
+    yield sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    engine.dispose()
+
+
+def _seed_agent(session_local: Any, tool_categories: Any, **fields: Any) -> tuple:
+    with session_local() as db:
+        user = User(username="tc_user", password_hash="x", is_admin=False)
+        db.add(user)
+        db.commit()
+        agent = Agent(
+            user_id=user.id,
+            name="tc_agent",
+            status=AgentStatus.DRAFT,
+            tool_categories=tool_categories,
+            **fields,
+        )
+        db.add(agent)
+        db.commit()
+        return user.id, agent.id
+
+
+def _stored(session_local: Any, agent_id: int) -> tuple:
+    with session_local() as db:
+        agent = db.get(Agent, agent_id)
+        return agent.name, agent.tool_categories
 
 
 @pytest.mark.asyncio
@@ -179,9 +211,7 @@ class TestCreateAgentTool:
 
     @pytest.mark.asyncio
     async def test_assignable_tool_categories_hide_unassignable(self) -> None:
-        """``other`` (internal fallback), ``agent`` (Workforce-only delegation,
-        issue #802) and bare ``mcp`` (admits every connector at once) are all
-        kept out of what the model is offered."""
+        """``other``, ``agent`` (#802) and connectors are never advertised."""
         categories = (await ListToolCategoriesTool().run_json_async({}))["categories"]
         create_description = CreateAgentTool(
             session_factory=None, user_id=1
@@ -209,73 +239,35 @@ class TestCreateAgentTool:
             assert hidden not in categories
             assert hidden not in advertised(create_categories_line)
             assert hidden not in advertised(update_categories_line)
-        # Pinned by name, not derived from the implementation: "ssh" stays
-        # offered while "mcp" does not.
         assert "basic" in categories
-        assert "ssh" in categories
 
     def test_resolve_llm_tool_categories_trims_and_deduplicates(self) -> None:
-        assert _resolve_llm_tool_categories([" file", "file", "basic "], None) == [
+        assert resolve_llm_tool_categories([" file", "file", "basic "], "x") == [
             "file",
             "basic",
         ]
+        assert resolve_llm_tool_categories([], "x") == []
 
-    def test_resolve_llm_tool_categories_rejects_any_unassignable_name(
-        self,
+    @pytest.mark.parametrize(
+        ("requested", "expected"),
+        [
+            (["file", "email", "File", "MCP:x"], "['email', 'File', 'MCP:x'] are not"),
+            ("", "[''] are not assignable"),
+            (["file", "mcp"], "['mcp'] <connector error>"),
+            (["file", " mcp:github"], "[' mcp:github'] <connector error>"),
+            ({"a": 1}, "must be a list"),
+            (True, "must be a list"),
+            (42, "must be a list"),
+            (False, "must be a list"),
+            (0, "must be a list"),
+        ],
+    )
+    def test_resolve_llm_tool_categories_refuses_the_whole_list(
+        self, requested: Any, expected: str
     ) -> None:
-        """One bad entry refuses the whole call, so nothing is silently dropped."""
         with pytest.raises(ValueError) as excinfo:
-            _resolve_llm_tool_categories(["file", "email", "mcp_server", "File"], None)
-        message = str(excinfo.value)
-        assert "['email', 'mcp_server', 'File']" in message
-        assert f"Choose from: {', '.join(_assignable_tool_categories())}." in message
-
-    def test_resolve_llm_tool_categories_rejects_malformed_shapes(self) -> None:
-        """``ensure_list`` maps the non-string shapes to None and ``""`` to
-        ``[""]``; neither may come back as a usable value."""
-        for malformed in ({"a": 1}, True, 42, False, 0, ""):
-            with pytest.raises(ValueError):
-                _resolve_llm_tool_categories(malformed, None)
-
-    def test_resolve_llm_tool_categories_rejects_connectors_not_stored(
-        self,
-    ) -> None:
-        for requested, stored in (
-            (["file", "mcp"], None),
-            (["file", "mcp:github"], None),
-            (["file", "mcp:slack"], ["mcp:github"]),
-            (["mcp"], ["mcp:github"]),
-        ):
-            with pytest.raises(ValueError, match="connector picker"):
-                _resolve_llm_tool_categories(requested, stored)
-
-    def test_resolve_llm_tool_categories_keeps_stored_connectors(self) -> None:
-        """Only non-connector entries are replaced; ``mcpfoo`` is not a
-        connector, so it is replaced like any other category."""
-        assert _resolve_llm_tool_categories(
-            ["file"], ["basic", "mcp", "mcpfoo", "mcp:github"]
-        ) == ["file", "mcp", "mcp:github"]
-
-    def test_resolve_llm_tool_categories_accepts_echoed_connectors(self) -> None:
-        assert _resolve_llm_tool_categories(
-            ["mcp: github", "file"], ["mcp:github", "basic"]
-        ) == ["file", "mcp:github"]
-
-    def test_resolve_llm_tool_categories_trims_and_deduplicates_stored_connectors(
-        self,
-    ) -> None:
-        assert _resolve_llm_tool_categories(
-            ["file"], [" mcp: github ", "mcp:github", "mcp"]
-        ) == ["file", "mcp:github", "mcp"]
-
-    def test_resolve_llm_tool_categories_explicit_empty_keeps_connectors(
-        self,
-    ) -> None:
-        """``[]`` clears the non-connector categories only (#944)."""
-        assert _resolve_llm_tool_categories([], None) == []
-        assert _resolve_llm_tool_categories([], ["basic", "mcp:github"]) == [
-            "mcp:github"
-        ]
+            resolve_llm_tool_categories(requested, "<connector error>")
+        assert expected in str(excinfo.value)
 
     def test_coerce_db_task_id_accepts_only_db_task_formats(self) -> None:
         assert _coerce_db_task_id(12) == 12
@@ -1296,6 +1288,7 @@ class TestCreateAgentTool:
                 )
 
                 assert result["status"] == "success"
+                assert result["tool_categories"] == ["file", "knowledge"]
 
                 # Verify filters were saved (use a fresh session)
                 verify_db = SessionLocal()
@@ -1379,164 +1372,36 @@ class TestCreateAgentTool:
                 pass
 
     @pytest.mark.asyncio
-    async def test_create_agent_result_reports_what_was_stored(self) -> None:
-        """The result carries the stored list, which is what the builder form
-        and therefore preview run with."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(username="testuser_res_cats", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            user_id = user.id
-            db.close()
-
-            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
-            result = await tool.run_json_async(
-                {
-                    "name": "stored_cats_agent",
-                    "description": "Agent whose stored categories are reported",
-                    "instructions": "Do things",
-                    "tool_categories": [" file", "basic", "file"],
-                }
-            )
-
-            assert result["status"] == "success"
-            assert result["tool_categories"] == ["file", "basic"]
-        finally:
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_create_agent_result_reports_null_for_unconfigured(self) -> None:
-        """Unconfigured must not be reported as ``[]``: the form would read
-        that as zero tools while the agent actually has every default one."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(username="testuser_res_null", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            user_id = user.id
-            db.close()
-
-            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
-            result = await tool.run_json_async(
-                {
-                    "name": "unconfigured_cats_agent",
-                    "description": "Agent without explicit tool selection",
-                    "instructions": "Do things",
-                }
-            )
-
-            assert result["status"] == "success"
-            assert result["tool_categories"] is None
-        finally:
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_create_agent_refuses_invalid_or_connector_categories(
-        self,
+    @pytest.mark.parametrize(
+        ("requested", "expected"),
+        [
+            (["file", "email"], "['email'] are not assignable"),
+            (["file", "mcp:github"], "do not pass them"),
+            (["mcp"], "do not pass them"),
+            ({"a": 1}, "must be a list"),
+            ("", "are not assignable"),
+            (False, "must be a list"),
+        ],
+    )
+    async def test_create_agent_refuses_invalid_tool_categories(
+        self, session_local: Any, requested: Any, expected: str
     ) -> None:
-        """No agent is created from a partially accepted selection, and a new
-        agent has no stored connectors the model could be echoing."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(username="testuser_res_err", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            user_id = user.id
-            db.close()
+        user_id, _ = _seed_agent(session_local, None)
+        result = await CreateAgentTool(
+            session_factory=session_local, user_id=user_id
+        ).run_json_async(
+            {
+                "name": "refused",
+                "description": "d",
+                "instructions": "i",
+                "tool_categories": requested,
+            }
+        )
 
-            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
-            for index, (requested, expected) in enumerate(
-                (
-                    (["file", "email"], "['email'] are not assignable"),
-                    (["file", "mcp:github"], "connector picker"),
-                    (["mcp"], "connector picker"),
-                )
-            ):
-                name = f"refused_cats_agent_{index}"
-                result = await tool.run_json_async(
-                    {
-                        "name": name,
-                        "description": "Agent with refused categories",
-                        "instructions": "Do things",
-                        "tool_categories": requested,
-                    }
-                )
-
-                assert result["status"] == "error", requested
-                assert expected in result["message"], requested
-                verify_db = SessionLocal()
-                try:
-                    assert (
-                        verify_db.query(Agent).filter(Agent.name == name).first()
-                        is None
-                    ), requested
-                finally:
-                    verify_db.close()
-        finally:
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_create_agent_refuses_malformed_tool_categories(self) -> None:
-        """A truthiness gate would read the falsy shapes as "not requested"
-        and persist an unconfigured (all-tools) agent."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(
-                username="testuser_malformed", password_hash="x", is_admin=False
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            user_id = user.id
-            db.close()
-
-            tool = CreateAgentTool(session_factory=SessionLocal, user_id=user_id)
-            for index, malformed in enumerate(({"a": 1}, "", False)):
-                name = f"malformed_cats_agent_{index}"
-                result = await tool.run_json_async(
-                    {
-                        "name": name,
-                        "description": "Agent with a malformed category payload",
-                        "instructions": "Do things",
-                        "tool_categories": malformed,
-                    }
-                )
-
-                assert result["status"] == "error", malformed
-                verify_db = SessionLocal()
-                try:
-                    assert (
-                        verify_db.query(Agent).filter(Agent.name == name).first()
-                        is None
-                    ), malformed
-                finally:
-                    verify_db.close()
-        finally:
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
+        assert result["status"] == "error"
+        assert expected in result["message"]
+        with session_local() as db:
+            assert db.query(Agent).filter(Agent.name == "refused").first() is None
 
     @pytest.mark.asyncio
     async def test_create_agent_omitted_tool_categories_persists_none(self) -> None:
@@ -1581,6 +1446,7 @@ class TestCreateAgentTool:
                 )
 
                 assert result["status"] == "success"
+                assert result["tool_categories"] is None
 
                 verify_db = SessionLocal()
                 try:
@@ -1645,6 +1511,7 @@ class TestCreateAgentTool:
                 )
 
                 assert result["status"] == "success"
+                assert result["tool_categories"] == []
 
                 verify_db = SessionLocal()
                 try:
@@ -1982,256 +1849,138 @@ class TestUpdateAgentTool:
                 pass
 
     @pytest.mark.asyncio
-    async def test_update_agent_refuses_unassignable_or_new_connector_categories(
-        self,
+    @pytest.mark.parametrize(
+        "requested",
+        [
+            ["file", "email"],
+            ["file", "mcp:github"],
+            ["file", "mcp:slack"],
+            ["file", "mcp"],
+            {"a": 1},
+            "",
+            False,
+        ],
+    )
+    async def test_update_agent_refuses_invalid_tool_categories(
+        self, session_local: Any, requested: Any
     ) -> None:
-        """One bad entry refuses the whole update; nothing is partially
-        written, and connectors can only be echoed, never added."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(username="testuser_upd_err", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_upd_err_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["basic", "mcp:github"],
-            )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
+        user_id, agent_id = _seed_agent(session_local, ["basic", "mcp:github"])
+        result = await UpdateAgentTool(
+            session_factory=session_local, user_id=user_id
+        ).run_json_async(
+            {"agent_id": agent_id, "name": "Renamed", "tool_categories": requested}
+        )
 
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            for requested, expected in (
-                (["file", "email"], "['email'] are not assignable"),
-                (["file", "mcp:slack"], "connector picker"),
-                (["file", "mcp"], "connector picker"),
-            ):
-                result = await tool.run_json_async(
-                    {"agent_id": agent_id, "tool_categories": requested}
+        assert result["status"] == "error"
+        assert _stored(session_local, agent_id) == (
+            "tc_agent",
+            ["basic", "mcp:github"],
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stored", "requested", "column"),
+        [
+            (["basic", "mcp:github"], ["file"], ["file", "mcp:github"]),
+            (["basic", "mcp:github"], [], ["mcp:github"]),
+            (None, ["file"], ["file"]),
+            ('["basic", "mcp:github"]', ["file"], ["file", "mcp:github"]),
+            # Runtime rule, untrimmed: " mcp" is inert (dropped), "mcp: x" is live.
+            (
+                ["mcpfoo", " mcp", " mcp:x", "mcp: x", "mcp", "mcp"],
+                ["file"],
+                ["file", "mcp: x", "mcp"],
+            ),
+        ],
+    )
+    async def test_update_agent_replaces_only_non_connector_categories(
+        self, session_local: Any, stored: Any, requested: list[str], column: list[str]
+    ) -> None:
+        user_id, agent_id = _seed_agent(session_local, stored)
+        result = await UpdateAgentTool(
+            session_factory=session_local, user_id=user_id
+        ).run_json_async({"agent_id": agent_id, "tool_categories": requested})
+
+        assert result["status"] == "success"
+        assert _stored(session_local, agent_id)[1] == column
+        assert result["tool_categories"] == requested
+        assert "mcp" not in result["message"]
+        assert ("connectors were left unchanged" in result["message"]) is (
+            column != requested
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "stored", "reported"),
+        [
+            ({"tool_categories": None}, ["file", "mcp:github"], ["file"]),
+            ({"name": "Renamed"}, [1, "file", "mcp:github"], ["1", "file"]),
+            ({"name": "Renamed"}, None, None),
+        ],
+    )
+    async def test_update_agent_without_categories_reports_non_connectors(
+        self, session_local: Any, args: dict, stored: Any, reported: Any
+    ) -> None:
+        user_id, agent_id = _seed_agent(session_local, stored)
+        result = await UpdateAgentTool(
+            session_factory=session_local, user_id=user_id
+        ).run_json_async({"agent_id": agent_id, **args})
+
+        assert result["status"] == "success"
+        assert result["tool_categories"] == reported
+        assert _stored(session_local, agent_id)[1] == stored
+
+    @pytest.mark.asyncio
+    async def test_update_agent_takes_connectors_from_the_row_after_awaits(
+        self, session_local: Any
+    ) -> None:
+        user_id, agent_id = _seed_agent(session_local, ["basic", "mcp:github"])
+
+        async def builder_saves_meanwhile(*_args: Any, **_kwargs: Any) -> list[str]:
+            with session_local() as db:
+                AgentStore(db).update_agent_fields(
+                    user_id, agent_id, {"tool_categories": ["basic", "mcp:slack"]}
                 )
+            return []
 
-                assert result["status"] == "error", requested
-                assert expected in result["message"], requested
-                db.refresh(agent)
-                assert agent.tool_categories == ["basic", "mcp:github"], requested
-        finally:
-            db.close()
-            try:
-                import os
+        with patch(
+            "xagent.core.tools.adapters.vibe.agent_tool.find_missing_knowledge_bases",
+            new=builder_saves_meanwhile,
+        ):
+            result = await UpdateAgentTool(
+                session_factory=session_local, user_id=user_id
+            ).run_json_async(
+                {
+                    "agent_id": agent_id,
+                    "tool_categories": ["file"],
+                    "knowledge_bases": ["kb"],
+                }
+            )
 
-                os.remove(db_path)
-            except OSError:
-                pass
+        assert result["status"] == "success"
+        assert _stored(session_local, agent_id)[1] == ["file", "mcp:slack"]
 
     @pytest.mark.asyncio
-    async def test_update_agent_refuses_malformed_tool_categories(self) -> None:
-        """A truthiness gate would read the falsy shapes as "not requested"
-        and report an untouched agent as a successful update."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(
-                username="testuser_upd_malformed", password_hash="x", is_admin=False
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_upd_malformed_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["file"],
-            )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
-
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            for malformed in ({"a": 1}, "", False):
-                result = await tool.run_json_async(
-                    {"agent_id": agent_id, "tool_categories": malformed}
-                )
-
-                assert result["status"] == "error", malformed
-                db.refresh(agent)
-                assert agent.tool_categories == ["file"], malformed
-        finally:
-            db.close()
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_update_agent_keeps_ui_picked_connectors(self) -> None:
-        """``update_agent_fields`` replaces the whole column, so the stored
-        connectors must be carried into it."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(username="testuser_keep_mcp", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_keep_mcp_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["basic", "mcp:github"],
-            )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
-
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            result = await tool.run_json_async(
-                {"agent_id": agent_id, "tool_categories": ["file"]}
-            )
-
-            assert result["status"] == "success"
-            db.refresh(agent)
-            assert agent.tool_categories == ["file", "mcp:github"]
-            assert result["tool_categories"] == ["file", "mcp:github"]
-        finally:
-            db.close()
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_update_agent_explicit_empty_keeps_connectors(self) -> None:
-        """``[]`` clears the non-connector categories only; it must reach the
-        resolver rather than be read as "not requested"."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(
-                username="testuser_upd_empty", password_hash="x", is_admin=False
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_upd_empty_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["basic", "mcp:github"],
-            )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
-
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            result = await tool.run_json_async(
-                {"agent_id": agent_id, "tool_categories": []}
-            )
-
-            assert result["status"] == "success"
-            db.refresh(agent)
-            assert agent.tool_categories == ["mcp:github"]
-            assert result["tool_categories"] == ["mcp:github"]
-        finally:
-            db.close()
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_update_agent_null_tool_categories_is_a_noop_that_reports_stored(
-        self,
+    async def test_update_agent_names_connectors_unshared_with_the_team(
+        self, session_local: Any
     ) -> None:
-        """The no-op branch reports the stored value too; the builder form
-        only applies it when the model passed a non-null list."""
-        db, db_path, SessionLocal = _create_session()
+        user_id, agent_id = _seed_agent(session_local, ["basic", "mcp"], team_id=7)
+        set_agent_team_hooks(
+            connector_validator=lambda *_: [{"type": "mcp", "id": 3, "name": "gmail"}]
+        )
         try:
-            user = User(username="testuser_upd_noop", password_hash="x", is_admin=False)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_upd_noop_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["file", "mcp:github"],
+            result = await UpdateAgentTool(
+                session_factory=session_local, user_id=user_id
+            ).run_json_async(
+                {"agent_id": agent_id, "name": "Renamed", "tool_categories": ["file"]}
             )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
-
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            result = await tool.run_json_async(
-                {"agent_id": agent_id, "tool_categories": None}
-            )
-
-            assert result["status"] == "success"
-            assert "No updates were made" in result["message"]
-            assert result["tool_categories"] == ["file", "mcp:github"]
-            db.refresh(agent)
-            assert agent.tool_categories == ["file", "mcp:github"]
         finally:
-            db.close()
-            try:
-                import os
+            set_agent_team_hooks()
 
-                os.remove(db_path)
-            except OSError:
-                pass
-
-    @pytest.mark.asyncio
-    async def test_update_agent_null_tool_categories_keeps_stored_on_rename(
-        self,
-    ) -> None:
-        """``null`` means keep, as the argument schema documents."""
-        db, db_path, SessionLocal = _create_session()
-        try:
-            user = User(
-                username="testuser_upd_rename", password_hash="x", is_admin=False
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            agent = Agent(
-                user_id=user.id,
-                name="testuser_upd_rename_agent",
-                status=AgentStatus.DRAFT,
-                tool_categories=["file", "mcp:github"],
-            )
-            db.add(agent)
-            db.commit()
-            db.refresh(agent)
-            agent_id = agent.id
-
-            tool = UpdateAgentTool(session_factory=SessionLocal, user_id=user.id)
-            result = await tool.run_json_async(
-                {"agent_id": agent_id, "name": "Renamed", "tool_categories": None}
-            )
-
-            assert result["status"] == "success"
-            assert result["agent_name"] == "Renamed"
-            assert result["tool_categories"] == ["file", "mcp:github"]
-            db.refresh(agent)
-            assert agent.tool_categories == ["file", "mcp:github"]
-        finally:
-            db.close()
-            try:
-                import os
-
-                os.remove(db_path)
-            except OSError:
-                pass
+        assert result["status"] == "error"
+        assert "(gmail) are not shared" in result["message"]
+        assert "retry without tool_categories" in result["message"]
+        assert _stored(session_local, agent_id) == ("tc_agent", ["basic", "mcp"])
 
     @pytest.mark.asyncio
     async def test_update_agent_partial_update(self) -> None:

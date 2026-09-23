@@ -19,7 +19,7 @@ from ...core.model.chat.basic.base import BaseLLM
 from ...core.tools.adapters.vibe.agent_tool import (
     ListAvailableSkillsTool,
     ListToolCategoriesTool,
-    _resolve_llm_tool_categories,
+    resolve_llm_tool_categories,
 )
 from ...core.tools.adapters.vibe.base import (
     AbstractBaseTool,
@@ -171,7 +171,12 @@ class WorkforcePromptBuilderState:
             tool_categories = (
                 []
                 if requested_categories is None
-                else _resolve_llm_tool_categories(requested_categories, None)
+                else resolve_llm_tool_categories(
+                    requested_categories,
+                    "are connectors, which a Workforce built from a prompt cannot "
+                    "grant; once it is created, the user can add connectors to its "
+                    "agents in the agent builder.",
+                )
             )
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
@@ -414,7 +419,10 @@ class StageAgentArgs(BaseModel):
     )
     tool_categories: list[str] = Field(
         default_factory=list,
-        description="Tool categories assigned to this agent.",
+        description=(
+            "Tool categories from list_tool_categories. Connectors ('mcp', "
+            "'mcp:<server>') cannot be set here. Omit for an agent with no tools."
+        ),
     )
     skills: list[str] | None = Field(
         default=None,

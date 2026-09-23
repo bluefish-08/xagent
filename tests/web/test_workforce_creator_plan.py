@@ -181,12 +181,11 @@ def test_builder_state_rejects_unused_or_failed_staged_agents() -> None:
 
 
 def test_builder_state_validates_tool_categories_like_create_agent() -> None:
-    """A staged agent is new, so it has no connectors the model could echo."""
     state = WorkforcePromptBuilderState.from_agents([])
     for categories, expected in (
         (["web_search", "email"], "['email'] are not assignable"),
-        (["web_search", "mcp:github"], "connector picker"),
-        (["mcp"], "connector picker"),
+        (["web_search", "mcp:github"], "built from a prompt cannot grant"),
+        (["mcp"], "built from a prompt cannot grant"),
         ({"a": 1}, "must be a list"),
         (False, "must be a list"),
     ):
