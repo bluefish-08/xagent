@@ -1529,44 +1529,64 @@ describe("TraceEventRenderer", () => {
     expect(screen.getByText("Invalid duration")).toBeInTheDocument()
   })
 
-  it("renders an unavailable connector call as a plain status line", () => {
-    render(
-      <TraceEventRenderer
-        events={[
-          {
-            event_id: "start",
-            event_type: "react_task_start",
-            step_id: "step-1",
-            timestamp: 1,
-            data: { step_name: "Work" },
+  const renderUnavailableConnector = (result: Record<string, unknown>) => render(
+    <TraceEventRenderer
+      events={[
+        {
+          event_id: "start",
+          event_type: "react_task_start",
+          step_id: "step-1",
+          timestamp: 1,
+          data: { step_name: "Work" },
+        },
+        {
+          event_id: "tool-start",
+          event_type: "tool_execution_start",
+          step_id: "step-1",
+          timestamp: 2,
+          data: { tool_name: "mcp_google_drive_42_unavailable", tool_call_id: "A" },
+        },
+        {
+          event_id: "tool-failed",
+          event_type: "tool_execution_failed",
+          step_id: "step-1",
+          timestamp: 3,
+          data: {
+            tool_name: "mcp_google_drive_42_unavailable",
+            tool_call_id: "A",
+            error: "MCP server tools could not be loaded.",
+            result,
           },
-          {
-            event_id: "tool-start",
-            event_type: "tool_execution_start",
-            step_id: "step-1",
-            timestamp: 2,
-            data: { tool_name: "mcp_google_drive_42_unavailable", tool_call_id: "A" },
-          },
-          {
-            event_id: "tool-failed",
-            event_type: "tool_execution_failed",
-            step_id: "step-1",
-            timestamp: 3,
-            data: {
-              tool_name: "mcp_google_drive_42_unavailable",
-              tool_call_id: "A",
-              error: "MCP server tools could not be loaded.",
-              result: { unavailable_server: "Google Drive" },
-            },
-          },
-        ]}
-      />,
-    )
+        },
+      ]}
+    />,
+  )
 
-    expect(
-      screen.getByText("traceEventRenderer.connectorUnavailable:Google Drive"),
-    ).toBeInTheDocument()
+  it("renders an unavailable connector call as a plain status line", () => {
+    renderUnavailableConnector({ unavailable_server: "Google Drive" })
+
+    const title = screen.getByText("traceEventRenderer.connectorUnavailable:Google Drive")
+    expect(title.parentElement?.textContent).toBe(
+      "traceEventRenderer.connectorUnavailable:Google Drive",
+    )
     expect(screen.queryByRole("button", { name: /connectorUnavailable/ })).toBeNull()
+    expect(screen.queryByRole("button", { name: /Unavailable/ })).toBeNull()
+  })
+
+  it("shows the credential error of an oauth_token_required outage on the status line", () => {
+    renderUnavailableConnector({
+      success: false,
+      status: "error",
+      error: "MCP server credentials are unavailable.",
+      failure_code: "oauth_token_required",
+      reason: "oauth_token_required",
+      content: [{ text: "MCP server credentials are unavailable. Please reconnect the MCP server credentials and retry." }],
+      is_error: true,
+      unavailable_server: "Google Drive",
+    })
+
+    const title = screen.getByText("traceEventRenderer.connectorUnavailable:Google Drive")
+    expect(title.parentElement).toHaveTextContent("MCP server credentials are unavailable.")
     expect(screen.queryByRole("button", { name: /Unavailable/ })).toBeNull()
   })
 

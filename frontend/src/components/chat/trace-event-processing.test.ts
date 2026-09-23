@@ -310,6 +310,50 @@ describe("processTraceEvents unavailable connector placeholder", () => {
     ])
   })
 
+  it.each([
+    ["a non-empty error", "MCP server credentials are unavailable.", { statusLine: true, error: "MCP server credentials are unavailable." }],
+    ["a blank error", "  ", { statusLine: true }],
+    ["a non-string error", 42, { statusLine: true }],
+  ])("sets the status line detail from result.error given %s", (_, error, data) => {
+    const steps = processTraceEvents(
+      failedCall("mcp_google_drive_42_unavailable", {
+        success: false,
+        is_error: true,
+        error,
+        unavailable_server: "Google Drive",
+      }) as never,
+      tc,
+    )
+
+    expect(steps[0].actions).toEqual([
+      expect.objectContaining({ type: "info", data }),
+    ])
+  })
+
+  it("only converts tool failures into a connector status line", () => {
+    const steps = processTraceEvents(
+      [
+        stepStart,
+        ev("dag_step_failed", {
+          error: "step failed",
+          result: { unavailable_server: "Google Drive" },
+        }),
+      ].map((event, index) => ({ ...event, timestamp: index + 1 })) as never,
+      tc,
+    )
+
+    expect(steps[0].actions).toEqual([
+      {
+        id: "event-1",
+        type: "error",
+        title: "traceEventRenderer.executionFailed",
+        status: "failed",
+        timestamp: 2000,
+        data: { error: "step failed" },
+      },
+    ])
+  })
+
   it("keeps an ordinary MCP tool failure as a failed tool call", () => {
     const steps = processTraceEvents(
       failedCall("mcp_notion_search", {
@@ -393,11 +437,18 @@ describe("processTraceEvents unavailable connector placeholder", () => {
     expect(actions[1]).toEqual(statusLineAction("event-2", 3000))
   })
 
-  it("keeps the web_search card when a sibling reusing the id ends first", () => {
+  it("appends a status line without removing cards when a sibling reusing the id ends first", () => {
     const actions = run(start(S, "A"), start(P, "A"), endS, placeholderFailure("A"))
 
     expect(actions).toHaveLength(3)
-    expect(webSearchCards(actions)).toHaveLength(1)
+    // The end lookup ignores tool names (baseline, out of scope): S's result lands on P's card.
+    expect(actions[0]).toMatchObject({ type: "tool", status: "completed", data: { tool: S } })
+    expect(actions[0].data.output).toBeUndefined()
+    expect(actions[1]).toMatchObject({
+      type: "tool",
+      status: "completed",
+      data: { tool: P, output: "RESULT_S" },
+    })
     expect(actions[2]).toEqual(statusLineAction("event-4", 5000))
   })
 
