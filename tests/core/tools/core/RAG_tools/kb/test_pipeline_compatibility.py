@@ -1331,7 +1331,10 @@ async def test_web_root_exception_after_successful_page_raises_without_remaining
     assert outcome is not None
     assert outcome.operation_type == "web_ingestion"
     assert [child.status for child in outcome.child_outcomes] == ["success"]
+    # Known pair, out of scope (#795): infer_rollback_status still falls back to
+    # has_side_effects().
     assert outcome.side_effects_may_remain is False
+    assert outcome.rollback_status is RollbackStatus.INCOMPLETE
 
 
 @pytest.mark.asyncio
