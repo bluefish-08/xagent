@@ -390,7 +390,7 @@ describe("AgentBuilder preview", () => {
     it.each([
       ["an unsaved connector pick", ["file"], ["github"], ["file", "web_search"], ["file", "web_search", "mcp:github"]],
       ["an unsaved connector removal", ["file", "mcp:github"], [], ["file", "web_search"], ["file", "web_search"]],
-      ["a legacy bare mcp", ["file", "mcp"], null, ["web_search"], ["web_search", "mcp"]],
+      ["a bare mcp grant", ["file", "mcp"], null, ["web_search"], ["web_search", "mcp"]],
       ["stored connectors on an empty result", ["basic", "mcp:github"], null, [], ["mcp:github"]],
     ])("keeps %s", async (_label, stored, picked, chatResult, expected) => {
       storedToolCategories = stored

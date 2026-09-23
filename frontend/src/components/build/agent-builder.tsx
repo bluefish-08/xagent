@@ -2995,7 +2995,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               if (updates.selectedKbs !== undefined) setSelectedKbs(updates.selectedKbs);
               if (updates.selectedSkills !== undefined) setSelectedSkills(updates.selectedSkills);
               const chatCategories = updates.selectedToolCategories
-              // Chat never writes connectors: keep a legacy bare "mcp" or saving revokes it.
+              // Chat never writes connectors: keep a bare "mcp" grant or saving revokes it.
               if (chatCategories !== undefined) setSelectedToolCategories(prev => [...chatCategories, ...prev.filter(c => c === "mcp")]);
             }}
             availableOptions={{

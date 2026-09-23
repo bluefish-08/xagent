@@ -395,7 +395,7 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
                         const skills = Array.isArray(toolArgs.skills) ? toolArgs.skills : [toolArgs.skills];
                         configUpdates.selectedSkills = skills.map((skill: any) => typeof skill === 'string' ? skill : skill.name || skill.value).filter(Boolean);
                       }
-                      // Null args mean "keep"; the result, not the args, is what was stored.
+                      // Null args leave the form alone; the result, not the args, is what was stored.
                       if (toolArgs.tool_categories != null && Array.isArray(result.tool_categories)) {
                         configUpdates.selectedToolCategories = result.tool_categories;
                       }
