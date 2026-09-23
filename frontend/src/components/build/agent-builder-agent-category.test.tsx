@@ -432,6 +432,26 @@ describe("AgentBuilder extra built-in tools (issue #306)", () => {
     await waitFor(() => expect(block()).not.toBeNull())
   })
 
+  it.each([
+    { source: "a knowledge base", patch: { knowledge_bases: ["kb1"] } },
+    { source: "an MCP connector", patch: { tool_categories: ["mcp:foo"] } },
+  ])("lists always-available tools when only $source configures tools", async ({ patch }) => {
+    installApi(
+      [],
+      undefined,
+      toolsBody([{ name: "clock_a", description: "", category: "other", enabled: true, always_available: true }])
+    )
+    const baseImpl = apiRequestMock.getMockImplementation()!
+    apiRequestMock.mockImplementation(async (url: string, opts?: { method?: string }) =>
+      url.endsWith(`/api/agents/${AGENT_ID}`)
+        ? new Response(JSON.stringify({ ...agentResponse([]), ...patch }), { status: 200 })
+        : baseImpl(url, opts)
+    )
+    render(<AgentBuilder agentId={AGENT_ID} />)
+
+    await waitFor(() => expect(block()?.textContent).toBe(`${PREFIX}clock_a`))
+  })
+
   it("lists only the skill loader for a zero-tool agent with a skill selected", async () => {
     installApi(
       [],

@@ -1097,6 +1097,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     }
   })
 
+  // Depends on mcpServers/officialApps having loaded: a preview sent earlier
+  // falls back to the raw MCP selectors.
   function buildToolCategories(): string[] {
     const categories = [...selectedToolCategories]
     if (selectedKbs.length > 0 && !categories.includes("knowledge")) {
@@ -1119,9 +1121,12 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     return categories
   }
 
+  // Same as buildToolCategories() being non-empty, without resolving MCP selectors (which warns).
+  const hasConfiguredTools =
+    selectedToolCategories.length > 0 || selectedKbs.length > 0 || hasSshBindings || selectedMcpServers.length > 0
   // load_skill is appended outside tool selection, so a zero-tool agent still gets it.
   const alwaysAvailableToolNames = [
-    ...(buildToolCategories().length > 0 ? intrinsicToolNames : []),
+    ...(hasConfiguredTools ? intrinsicToolNames : []),
     ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : []),
   ]
 
