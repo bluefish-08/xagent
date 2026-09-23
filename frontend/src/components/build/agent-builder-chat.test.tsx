@@ -426,25 +426,21 @@ describe("AgentBuilderChat", () => {
   }
 
   it.each([
-    // The server kept the connector the model did not pass; forwarding the
-    // model's own list would drop it from the form.
-    ["the stored list, not the model's", { tool_categories: ["file"] }, ["file", "mcp:github"]],
+    ["the stored list, not the model's", { tool_categories: [" file", "file"] }, ["file"]],
     ["an explicit empty list", { tool_categories: [] }, []],
-  ])("forwards %s to the parent unfiltered", async (_label, toolParams, stored) => {
+  ])("forwards %s to the parent", async (_label, toolParams, stored) => {
     const updates = await emitAgentToolEnd(vi.fn(), toolParams, stored)
-    const update = updates.find((arg) => arg?.storedToolCategories !== undefined)
-    expect(update?.storedToolCategories).toEqual(stored)
+    const update = updates.find((arg) => arg?.selectedToolCategories !== undefined)
+    expect(update?.selectedToolCategories).toEqual(stored)
   })
 
   it.each([
-    // A rename-only call still reports the stored categories; applying them
-    // would wipe picks the user has made but not saved yet.
     ["an omitted argument", { name: "Renamed" }, ["file"]],
     ["an explicit null argument", { name: "Renamed", tool_categories: null }, ["file"]],
     ["a null stored result", { tool_categories: ["file"] }, null],
   ])("leaves the unsaved selection alone on %s", async (_label, toolParams, stored) => {
     const updates = await emitAgentToolEnd(vi.fn(), toolParams, stored)
-    expect(updates.some((arg) => arg?.storedToolCategories !== undefined)).toBe(false)
+    expect(updates.some((arg) => arg?.selectedToolCategories !== undefined)).toBe(false)
   })
 
   it("passes failed task completion status into the process renderer", async () => {

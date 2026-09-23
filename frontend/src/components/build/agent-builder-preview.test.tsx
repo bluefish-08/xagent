@@ -1,7 +1,6 @@
 import React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { AgentConfig } from "./agent-builder-chat"
 
 const apiRequestMock = vi.hoisted(() => vi.fn())
 const setTaskIdMock = vi.hoisted(() => vi.fn())
@@ -9,7 +8,7 @@ const sendMessageMock = vi.hoisted(() => vi.fn())
 const dispatchMock = vi.hoisted(() => vi.fn())
 const taskConversationPanelMock = vi.hoisted(() => vi.fn())
 const closeFilePreviewMock = vi.hoisted(() => vi.fn())
-const agentBuilderChatMock = vi.hoisted(() => vi.fn())
+const connectMcpDialogMock = vi.hoisted(() => vi.fn())
 
 vi.mock("@/lib/api-wrapper", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api-wrapper")>(
@@ -108,19 +107,38 @@ vi.mock("@/components/task/task-conversation-panel", () => ({
   },
 }))
 
-vi.mock("@/components/build/agent-builder-chat", () => ({
-  AgentBuilderChat: (props: unknown) => {
-    agentBuilderChatMock(props)
-    return null
-  },
+vi.mock("@/components/chat/ChatInput", () => ({
+  ChatInput: ({ onSend }: { onSend?: (message: string) => void }) => (
+    <button type="button" onClick={() => onSend?.("add web search")}>send-chat-input</button>
+  ),
 }))
+
+vi.mock("@/components/chat/ChatMessage", () => ({
+  ChatMessage: () => null,
+}))
+
+class MockWebSocket {
+  static OPEN = 1
+  static instances: MockWebSocket[] = []
+  readyState = 0
+  sentMessages: string[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: string }) => void) | null = null
+  constructor() { MockWebSocket.instances.push(this) }
+  send(message: string) { this.sentMessages.push(message) }
+  close() {}
+  open() { this.readyState = MockWebSocket.OPEN; this.onopen?.() }
+}
 
 vi.mock("@/components/kb/knowledge-base-creation-dialog", () => ({
   KnowledgeBaseCreationDialog: () => null,
 }))
 
 vi.mock("@/components/mcp/connect-mcp-dialog", () => ({
-  ConnectMcpDialog: () => null,
+  ConnectMcpDialog: (props: unknown) => {
+    connectMcpDialogMock(props)
+    return null
+  },
 }))
 
 vi.mock("@/components/chat/FileMentionDropdown", () => ({
@@ -161,7 +179,6 @@ describe("AgentBuilder preview", () => {
   beforeEach(() => {
     storedToolCategories = ["ssh"]
     putBody = undefined
-    agentBuilderChatMock.mockReset()
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
     sendMessageMock.mockReset()
@@ -191,18 +208,14 @@ describe("AgentBuilder preview", () => {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
       }
       if (url.endsWith("/api/mcp/servers")) {
-        return Promise.resolve(new Response(JSON.stringify([{ id: 1, name: "github" }]), { status: 200 }))
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
       }
       if (url.endsWith("/api/agents/42/triggers")) {
         return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }))
       }
       if (url.endsWith("/api/agents/42") && init?.method === "PUT") {
         putBody = JSON.parse(init.body as string)
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: 42, tool_categories: putBody?.tool_categories, logo_url: null }), {
-            status: 200,
-          })
-        )
+        return Promise.resolve(new Response(JSON.stringify({ id: 42, ...putBody, logo_url: null }), { status: 200 }))
       }
       if (url.endsWith("/api/agents/42")) {
         return Promise.resolve(
@@ -323,11 +336,34 @@ describe("AgentBuilder preview", () => {
     })
   })
 
-  describe("with a builder-chat category result", () => {
-    const applyChatUpdate = (updates: Partial<AgentConfig>) =>
+  describe("after a builder-chat category update", () => {
+    beforeEach(() => {
+      MockWebSocket.instances = []
+      globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+    })
+
+    const chatUpdatesCategories = async (categories: string[]) => {
+      fireEvent.click(screen.getByText("send-chat-input"))
+      const ws = MockWebSocket.instances[0]
+      act(() => ws.open())
+      await waitFor(() => expect(ws.sentMessages).toHaveLength(1))
       act(() => {
-        agentBuilderChatMock.mock.lastCall?.[0].onUpdateConfig(updates)
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "trace_event",
+            event_id: "tool-end",
+            event_type: "tool_execution_end",
+            step_id: "react-1",
+            timestamp: 3,
+            data: {
+              tool_name: "update_agent",
+              tool_params: { agent_id: 42, tool_categories: categories },
+              result: { status: "success", agent_id: 42, tool_categories: categories },
+            },
+          }),
+        })
       })
+    }
 
     const previewCategories = async () => {
       fireEvent.click(screen.getByText("send-preview-message"))
@@ -351,27 +387,21 @@ describe("AgentBuilder preview", () => {
       return putBody?.tool_categories
     }
 
-    it("carries its stored connectors into preview and save", async () => {
-      storedToolCategories = ["file"]
+    it.each([
+      ["an unsaved connector pick", ["file"], ["github"], ["file", "web_search"], ["file", "web_search", "mcp:github"]],
+      ["an unsaved connector removal", ["file", "mcp:github"], [], ["file", "web_search"], ["file", "web_search"]],
+      ["a legacy bare mcp", ["file", "mcp"], null, ["web_search"], ["web_search", "mcp"]],
+      ["stored connectors on an empty result", ["basic", "mcp:github"], null, [], ["mcp:github"]],
+    ])("keeps %s", async (_label, stored, picked, chatResult, expected) => {
+      storedToolCategories = stored
       render(<AgentBuilder agentId="42" />)
       await screen.findByDisplayValue("Existing SSH agent")
+      if (picked) act(() => connectMcpDialogMock.mock.lastCall?.[0].onConnectSelected(picked))
 
-      // Bare mcp follows page-load handling: kept, not stripped.
-      applyChatUpdate({ storedToolCategories: ["file", "mcp", "mcp:github"] })
+      await chatUpdatesCategories(chatResult)
 
-      expect(await previewCategories()).toEqual(["file", "mcp", "mcp:github"])
-      expect(await saveCategories()).toEqual(["file", "mcp", "mcp:github"])
-    })
-
-    it("clears previously selected connectors when it is empty", async () => {
-      storedToolCategories = ["basic", "mcp:github"]
-      render(<AgentBuilder agentId="42" />)
-      await screen.findByDisplayValue("Existing SSH agent")
-
-      applyChatUpdate({ storedToolCategories: [] })
-
-      expect(await previewCategories()).toEqual([])
-      expect(await saveCategories()).toEqual([])
+      expect(await previewCategories()).toEqual(expected)
+      expect(await saveCategories()).toEqual(expected)
     })
   })
 

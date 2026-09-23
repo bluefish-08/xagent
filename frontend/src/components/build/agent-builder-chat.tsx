@@ -63,7 +63,6 @@ export interface AgentConfig {
   selectedKbs?: string[]
   selectedSkills?: string[]
   selectedToolCategories?: string[]
-  storedToolCategories?: string[]
 }
 
 interface BuildChatPayload {
@@ -396,10 +395,9 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
                         const skills = Array.isArray(toolArgs.skills) ? toolArgs.skills : [toolArgs.skills];
                         configUpdates.selectedSkills = skills.map((skill: any) => typeof skill === 'string' ? skill : skill.name || skill.value).filter(Boolean);
                       }
-                      // Only when the model set the field (null means "keep"), and
-                      // only what the server stored; the parent splits it like page load.
+                      // Null args mean "keep"; the result, not the args, is what was stored.
                       if (toolArgs.tool_categories != null && Array.isArray(result.tool_categories)) {
-                        configUpdates.storedToolCategories = result.tool_categories;
+                        configUpdates.selectedToolCategories = result.tool_categories;
                       }
                       if (toolArgs.suggested_prompts) {
                         const sp = Array.isArray(toolArgs.suggested_prompts) ? toolArgs.suggested_prompts : [toolArgs.suggested_prompts];
