@@ -834,16 +834,22 @@ export function processTraceEvents(
           const connector = (errorData.result as { unavailable_server?: unknown } | null | undefined)
             ?.unavailable_server;
           if (typeof connector === 'string' && connector.trim()) {
+            const callId = errorData.tool_call_id;
+            const idMatches = step.actions.filter(
+              a => a.type === 'tool' && a.status === 'running' && !!callId && a.data.tool_call_id === callId
+            );
+            // Only an unambiguous id match may replace a card; a fallback match could be a sibling tool.
+            const ownCard = idMatches.length === 1 ? idMatches[0] : null;
             const statusLine: StepAction = {
-              id: lastTool?.id ?? eventId,
+              id: ownCard?.id ?? eventId,
               type: 'info',
               title: t('traceEventRenderer.connectorUnavailable', { connector: connector.trim() }),
               status: 'completed',
-              timestamp: lastTool?.timestamp ?? timestamp,
+              timestamp: ownCard?.timestamp ?? timestamp,
               data: { statusLine: true },
             };
-            if (lastTool) {
-              step.actions[step.actions.indexOf(lastTool)] = statusLine;
+            if (ownCard) {
+              step.actions[step.actions.indexOf(ownCard)] = statusLine;
             } else {
               step.actions.push(statusLine);
             }

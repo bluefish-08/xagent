@@ -343,6 +343,72 @@ describe("processTraceEvents unavailable connector placeholder", () => {
       ),
     ])
   })
+
+  const placeholderFailure = (toolCallId?: string) =>
+    ev("tool_execution_failed", {
+      tool_name: "mcp_google_drive_42_unavailable",
+      ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+      error: "MCP server tools could not be loaded.",
+      result: { success: false, is_error: true, unavailable_server: "Google Drive" },
+    })
+  const statusLineAction = (id: string, timestamp: number) => ({
+    id,
+    type: "info",
+    title: "traceEventRenderer.connectorUnavailable:Google Drive",
+    status: "completed",
+    timestamp,
+    data: { statusLine: true },
+  })
+
+  it.each([
+    ["does not match any running card", "B", "C"],
+    ["is missing", undefined, undefined],
+    ["is shared by two running cards", "A", "A"],
+  ])(
+    "pushes a status line and keeps every card when the failure id %s",
+    (_, placeholderStartId, failedId) => {
+      const events = [
+        stepStart,
+        ev("tool_execution_start", {
+          tool_name: "web_search",
+          tool_call_id: "A",
+          tool_args: { query: "a" },
+        }),
+        ev("tool_execution_start", {
+          tool_name: "mcp_google_drive_42_unavailable",
+          tool_call_id: placeholderStartId,
+        }),
+        placeholderFailure(failedId),
+      ].map((event, index) => ({ ...event, timestamp: index + 1 }))
+
+      const steps = processTraceEvents(events as never, tc)
+
+      expect(steps[0].actions).toHaveLength(3)
+      expect(steps[0].actions[0]).toMatchObject({
+        type: "tool",
+        status: "running",
+        data: { tool: "web_search", tool_call_id: "A" },
+      })
+      expect(steps[0].actions[0].data.error).toBeUndefined()
+      expect(steps[0].actions[1]).toMatchObject({
+        type: "tool",
+        status: "running",
+        data: { tool: "mcp_google_drive_42_unavailable" },
+      })
+      expect(steps[0].actions[2]).toEqual(statusLineAction("event-3", 4000))
+    },
+  )
+
+  it("renders a failure without a matching start as only a status line", () => {
+    const events = [stepStart, placeholderFailure("A")].map((event, index) => ({
+      ...event,
+      timestamp: index + 1,
+    }))
+
+    const steps = processTraceEvents(events as never, tc)
+
+    expect(steps[0].actions).toEqual([statusLineAction("event-1", 2000)])
+  })
 })
 
 describe("getFriendlyToolName", () => {
