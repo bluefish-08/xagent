@@ -2264,12 +2264,13 @@ class UnavailableMCPTool(AbstractBaseTool):
             "error": self._message,
             "content": [{"text": content_message}],
             "is_error": True,
-            "unavailable_server": self._server_name,
         }
         if self._reason is not None:
             result["reason"] = self._reason
         if self._failure_code is not None:
             result["failure_code"] = self._failure_code
+        # Output filtering truncates keys in insertion order; keep this after reason.
+        result["unavailable_server"] = self._server_name
         return result
 
     async def run_json_async(self, args: Mapping[str, Any]) -> Any:

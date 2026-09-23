@@ -301,6 +301,29 @@ async def test_unavailable_mcp_failure_restores_classification_under_truncation(
 
 
 @pytest.mark.asyncio
+async def test_unavailable_mcp_failure_keeps_reason_at_six_fields() -> None:
+    from xagent.core.tools.adapters.vibe.mcp_adapter import UnavailableMCPTool
+
+    tool = UnavailableMCPTool(
+        server_name="github",
+        server_id=7,
+        failure_code="oauth_token_required",
+        reason="oauth_token_required",
+    )
+    wrapper = OutputFilteredToolWrapper(
+        target_tool=tool,
+        max_chars=1_000,
+        max_fields=6,
+        max_recursion=5,
+    )
+
+    result = await wrapper.run_json_async({})
+
+    assert result["reason"] == "oauth_token_required"
+    assert result["failure_code"] == "oauth_token_required"
+
+
+@pytest.mark.asyncio
 async def test_classified_failure_restore_rejects_malformed_envelope() -> None:
     """The classified-failure restore must not let a tool smuggle raw values.
 
