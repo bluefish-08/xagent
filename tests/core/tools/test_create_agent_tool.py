@@ -19,6 +19,7 @@ from xagent.core.tools.adapters.vibe.agent_tool import (
     ListToolCategoriesTool,
     PublishedAgentToolRecord,
     UpdateAgentTool,
+    _assignable_tool_categories,
     _coerce_db_task_id,
     _DelegatedAgentTaskEventTraceHandler,
     build_published_agent_tools_from_records,
@@ -251,10 +252,25 @@ class TestCreateAgentTool:
     @pytest.mark.parametrize(
         ("requested", "expected"),
         [
-            (["file", "email", "File", "MCP:x"], "['email', 'File', 'MCP:x'] are not"),
-            ("", "[''] are not assignable"),
-            (["file", "mcp"], "['mcp'] <connector error>"),
-            (["file", " mcp:github"], "[' mcp:github'] <connector error>"),
+            (
+                ["file", "email", "File", "MCP:x"],
+                "tool_categories ['email', 'File', 'MCP:x'] are not assignable. "
+                "Choose from: <choices>. Nothing was saved.",
+            ),
+            (
+                "",
+                "tool_categories [''] are not assignable. "
+                "Choose from: <choices>. Nothing was saved.",
+            ),
+            (
+                ["email", "mcp"],
+                "tool_categories ['email'] are not assignable. Choose from: "
+                "<choices>. ['mcp'] <connector error> Nothing was saved.",
+            ),
+            (
+                ["file", " mcp:github"],
+                "[' mcp:github'] <connector error> Nothing was saved.",
+            ),
             ({"a": 1}, "must be a list"),
             (True, "must be a list"),
             (42, "must be a list"),
@@ -267,7 +283,11 @@ class TestCreateAgentTool:
     ) -> None:
         with pytest.raises(ValueError) as excinfo:
             resolve_llm_tool_categories(requested, "<connector error>")
-        assert expected in str(excinfo.value)
+        choices = ", ".join(_assignable_tool_categories())
+        message = str(excinfo.value)
+        if expected == "must be a list":
+            assert message.endswith(f"Choose from: {choices}.")
+        assert expected.replace("<choices>", choices) in message
 
     def test_coerce_db_task_id_accepts_only_db_task_formats(self) -> None:
         assert _coerce_db_task_id(12) == 12
@@ -1935,6 +1955,14 @@ class TestUpdateAgentTool:
         self, session_local: Any
     ) -> None:
         user_id, agent_id = _seed_agent(session_local, ["basic", "mcp:github"])
+        refresh = Session.refresh
+        locked_refreshes: list[Any] = []
+
+        def spy_refresh(
+            self: Session, instance: Any, *args: Any, **kwargs: Any
+        ) -> None:
+            locked_refreshes.append(kwargs.get("with_for_update"))
+            refresh(self, instance, *args, **kwargs)
 
         async def builder_saves_meanwhile(*_args: Any, **_kwargs: Any) -> list[str]:
             with session_local() as db:
@@ -1943,9 +1971,12 @@ class TestUpdateAgentTool:
                 )
             return []
 
-        with patch(
-            "xagent.core.tools.adapters.vibe.agent_tool.find_missing_knowledge_bases",
-            new=builder_saves_meanwhile,
+        with (
+            patch(
+                "xagent.core.tools.adapters.vibe.agent_tool.find_missing_knowledge_bases",
+                new=builder_saves_meanwhile,
+            ),
+            patch.object(Session, "refresh", spy_refresh),
         ):
             result = await UpdateAgentTool(
                 session_factory=session_local, user_id=user_id
@@ -1959,15 +1990,34 @@ class TestUpdateAgentTool:
 
         assert result["status"] == "success"
         assert _stored(session_local, agent_id)[1] == ["file", "mcp:slack"]
+        assert True in locked_refreshes
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stored", "unshared", "expected"),
+        [
+            (
+                ["basic", "mcp"],
+                [{"type": "mcp", "id": 3, "name": "gmail"}],
+                "are not shared with the team: gmail. Nothing was saved: it "
+                "grants every connector ('mcp')",
+            ),
+            (
+                ["basic", "mcp:ghost", "mcp:drive"],
+                [
+                    {"type": "mcp", "name": "ghost", "reason": "unresolved"},
+                    {"type": "mcp", "id": 4, "name": "drive"},
+                ],
+                "are not shared with the team: drive; not found: ghost. Nothing "
+                "was saved: the user must share or remove them",
+            ),
+        ],
+    )
     async def test_update_agent_names_connectors_unshared_with_the_team(
-        self, session_local: Any
+        self, session_local: Any, stored: list[str], unshared: list, expected: str
     ) -> None:
-        user_id, agent_id = _seed_agent(session_local, ["basic", "mcp"], team_id=7)
-        set_agent_team_hooks(
-            connector_validator=lambda *_: [{"type": "mcp", "id": 3, "name": "gmail"}]
-        )
+        user_id, agent_id = _seed_agent(session_local, stored, team_id=7)
+        set_agent_team_hooks(connector_validator=lambda *_: unshared)
         try:
             result = await UpdateAgentTool(
                 session_factory=session_local, user_id=user_id
@@ -1978,9 +2028,9 @@ class TestUpdateAgentTool:
             set_agent_team_hooks()
 
         assert result["status"] == "error"
-        assert "(gmail) are not shared" in result["message"]
-        assert "retry without tool_categories" in result["message"]
-        assert _stored(session_local, agent_id) == ("tc_agent", ["basic", "mcp"])
+        assert expected in result["message"]
+        assert "Retry without tool_categories" in result["message"]
+        assert _stored(session_local, agent_id) == ("tc_agent", stored)
 
     @pytest.mark.asyncio
     async def test_update_agent_partial_update(self) -> None:

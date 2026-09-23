@@ -175,7 +175,7 @@ class WorkforcePromptBuilderState:
                     requested_categories,
                     "are connectors, which a Workforce built from a prompt cannot "
                     "grant; once it is created, the user can add connectors to its "
-                    "agents in the agent builder.",
+                    "worker agents in the agent builder.",
                 )
             )
         except ValueError as exc:

@@ -62,7 +62,7 @@ def _is_connector_category(category: str) -> bool:
 
 
 def resolve_llm_tool_categories(raw: Any, connector_error: str) -> list[str]:
-    """Raises ``ValueError`` with a message for the model; never drops entries."""
+    """Raises ``ValueError`` for the model instead of silently dropping bad entries."""
     choices = _assignable_tool_categories()
     parsed = ensure_list(raw)
     if parsed is None:
@@ -92,6 +92,15 @@ def resolve_llm_tool_categories(raw: Any, connector_error: str) -> list[str]:
     if problems:
         raise ValueError(" ".join(problems) + " Nothing was saved.")
     return selected
+
+
+_STORED_TOOL_CATEGORIES_FIELD = Field(
+    default=None,
+    description=(
+        "Stored non-connector tool categories; only meaningful when status is "
+        "``success``. ``null`` means unconfigured (every default tool)."
+    ),
+)
 
 
 def without_connector_categories(categories: Any) -> list[str] | None:
@@ -491,10 +500,7 @@ class CreateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Creation status")
     message: str = Field(description="Detailed message about the created agent")
-    tool_categories: Optional[list[str]] = Field(
-        default=None,
-        description="Stored non-connector tool categories; null means unconfigured",
-    )
+    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
 
 
 class UpdateAgentToolArgs(BaseModel):
@@ -552,10 +558,7 @@ class UpdateAgentToolResult(BaseModel):
     )
     status: str = Field(description="Update status")
     message: str = Field(description="Detailed message about the updated agent")
-    tool_categories: Optional[list[str]] = Field(
-        default=None,
-        description="Stored non-connector tool categories; null means unconfigured",
-    )
+    tool_categories: Optional[list[str]] = _STORED_TOOL_CATEGORIES_FIELD
 
 
 class ListAgentsToolArgs(BaseModel):
@@ -1347,7 +1350,6 @@ class UpdateAgentTool(AbstractBaseTool):
                     updates["instructions"] = new_instructions
                     changes.append("instructions updated")
 
-                # Update tool_categories if provided
                 if model_categories is not None:
                     changes.append(f"tool_categories → {model_categories}")
 
@@ -1402,9 +1404,9 @@ class UpdateAgentTool(AbstractBaseTool):
 
                 connector_note = ""
                 if model_categories is not None:
-                    # Re-read after the awaits above: a builder save may have
-                    # changed the connectors meanwhile.
-                    db.refresh(agent)
+                    # Re-read and lock after the awaits above: a builder save may
+                    # have changed the connectors meanwhile.
+                    db.refresh(agent, with_for_update=True)
                     connectors = list(
                         dict.fromkeys(
                             c
@@ -1427,7 +1429,24 @@ class UpdateAgentTool(AbstractBaseTool):
                         or agent
                     )
                 except UnsharedConnectorsError as exc:
-                    names = ", ".join(str(c["name"]) for c in exc.connectors)
+                    missing = [
+                        c for c in exc.connectors if c.get("reason") == "unresolved"
+                    ]
+                    unshared = [c for c in exc.connectors if c not in missing]
+                    problems = [
+                        f"{label}: {', '.join(str(c['name']) for c in found)}"
+                        for label, found in (
+                            ("not shared with the team", unshared),
+                            ("not found", missing),
+                        )
+                        if found
+                    ]
+                    fix = (
+                        "it grants every connector ('mcp'), so the user must share "
+                        "these or change that grant"
+                        if "mcp" in updates["tool_categories"]
+                        else "the user must share or remove them"
+                    )
                     return UpdateAgentToolResult(
                         agent_id=0,
                         agent_name="",
@@ -1435,9 +1454,8 @@ class UpdateAgentTool(AbstractBaseTool):
                         markdown_link="",
                         status="error",
                         message=(
-                            f"Error: this team agent's connectors ({names}) are not "
-                            "shared with the team. Nothing was saved. Ask the user "
-                            "to share or remove them in the agent builder; retry "
+                            f"Error: this team agent's connectors are {'; '.join(problems)}. "
+                            f"Nothing was saved: {fix} in the agent builder. Retry "
                             "without tool_categories to save the other fields."
                         ),
                     ).model_dump()

@@ -184,7 +184,10 @@ def test_builder_state_validates_tool_categories_like_create_agent() -> None:
     state = WorkforcePromptBuilderState.from_agents([])
     for categories, expected in (
         (["web_search", "email"], "['email'] are not assignable"),
-        (["web_search", "mcp:github"], "built from a prompt cannot grant"),
+        (
+            ["web_search", "mcp:github"],
+            "cannot grant; once it is created, the user can add connectors to its worker agents",
+        ),
         (["mcp"], "built from a prompt cannot grant"),
         ({"a": 1}, "must be a list"),
         (False, "must be a list"),
