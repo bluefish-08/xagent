@@ -1119,9 +1119,11 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     return categories
   }
 
-  const alwaysAvailableToolNames = buildToolCategories().length > 0
-    ? [...intrinsicToolNames, ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : [])]
-    : []
+  // load_skill is appended outside tool selection, so a zero-tool agent still gets it.
+  const alwaysAvailableToolNames = [
+    ...(buildToolCategories().length > 0 ? intrinsicToolNames : []),
+    ...(skillLoaderTool && selectedSkills.length > 0 ? [skillLoaderTool] : []),
+  ]
 
   // Helper function for category descriptions
   function getCategoryDescription(category: string): string {

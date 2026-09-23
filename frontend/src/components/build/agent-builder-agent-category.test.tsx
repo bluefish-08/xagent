@@ -431,4 +431,23 @@ describe("AgentBuilder extra built-in tools (issue #306)", () => {
 
     await waitFor(() => expect(block()).not.toBeNull())
   })
+
+  it("lists only the skill loader for a zero-tool agent with a skill selected", async () => {
+    installApi(
+      [],
+      undefined,
+      toolsBody([{ name: "clock_a", description: "", category: "other", enabled: true, always_available: true }]),
+      [{ name: "writer" }]
+    )
+    render(<AgentBuilder agentId={AGENT_ID} />)
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("builds.configForm.name.placeholder")).toHaveValue("Legacy Agent")
+      expect(toolCategorySelector()?.textContent).toContain("basic")
+    })
+
+    fireEvent.click(document.getElementById("selectAllSkills")!)
+
+    await waitFor(() => expect(block()?.textContent).toBe(`${PREFIX}skill_loader_x`))
+  })
 })
