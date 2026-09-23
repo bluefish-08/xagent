@@ -811,6 +811,13 @@ def _get_completed_step_metadata(
     return None
 
 
+def _ingested_document_identity(result: IngestionResult) -> tuple[bool, Optional[str]]:
+    register_metadata = _get_completed_step_metadata(result, "register_document") or {}
+    register_created = bool(register_metadata.get("created"))
+    doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
+    return register_created, doc_id
+
+
 def _restore_ingest_file_backup(
     *,
     file_path: Path,
@@ -935,7 +942,7 @@ def _rollback_failed_web_document_ingestion(
         is_admin=is_admin,
         rag_snapshot=rag_snapshot,
         file_id=file_id,
-        context="web rollback",
+        label="web rollback",
     )
 
 
@@ -945,11 +952,14 @@ def _rollback_ingested_document(
     result: Optional[IngestionResult],
     user_id: int,
     is_admin: bool,
-    context: str,
+    label: str,
     rag_snapshot: Optional["_RagDocumentSnapshot"] = None,
     file_id: Optional[str] = None,
 ) -> None:
-    """DOCUMENT compensation shared by the web, local and cloud rollbacks."""
+    """DOCUMENT compensation shared by the web, local and cloud rollbacks.
+
+    Only the web path passes ``rag_snapshot`` and ``file_id``.
+    """
     if result is None:
         if rag_snapshot is not None:
             _restore_rag_document_snapshot(
@@ -966,9 +976,7 @@ def _rollback_ingested_document(
             )
         return
 
-    register_metadata = _get_completed_step_metadata(result, "register_document") or {}
-    register_created = bool(register_metadata.get("created"))
-    doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
+    register_created, doc_id = _ingested_document_identity(result)
     if not doc_id:
         if rag_snapshot is not None:
             _restore_rag_document_snapshot(
@@ -993,10 +1001,11 @@ def _rollback_ingested_document(
             is_admin,
         )
         _ensure_cleanup_succeeded(
-            f"delete document '{doc_id}' during {context}",
+            f"delete document '{doc_id}' during {label}",
             document_delete_result,
         )
         if rag_snapshot is None:
+            # delete_document already clears status.
             return
 
     if rag_snapshot is not None:
@@ -1334,64 +1343,7 @@ async def _rollback_failed_ingestion(
     user_id = int(user.id)
     file_record_id = str(file_record.file_id)
     vector_store = get_vector_index_store()
-    register_metadata = _get_completed_step_metadata(result, "register_document") or {}
-    register_created = bool(register_metadata.get("created"))
-    doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
-
-    async def _compensate_collection() -> None:
-        collection_delete_result = delete_collection(
-            collection_name,
-            user_id,
-            bool(user.is_admin),
-        )
-        _ensure_cleanup_succeeded(
-            f"delete collection '{collection_name}' during rollback",
-            collection_delete_result,
-        )
-
-        physical_cleanup = delete_collection_physical_dir(
-            user_id=user_id,
-            collection_name=collection_name,
-        )
-        if physical_cleanup.status not in {"success", "not_found"}:
-            error_detail = physical_cleanup.error or "unknown physical cleanup failure"
-            raise RuntimeError(
-                f"delete collection physical directory during rollback failed: {error_detail}"
-            )
-        remaining_records = vector_store.list_document_records(
-            collection_name=None,
-            user_id=user_id,
-            is_admin=bool(user.is_admin),
-        )
-        remaining_file_ids = {
-            file_id
-            for file_id in (
-                _get_document_record_file_id(record) for record in remaining_records
-            )
-            if file_id
-        }
-        delete_collection_uploaded_files(
-            db,
-            user_id=user_id,
-            collection_file_ids=collection_file_ids,
-            remaining_file_ids=remaining_file_ids,
-            collection_dir=physical_cleanup.collection_dir,
-        )
-        if not uploaded_file_existed_before:
-            # The collection cleanup above may already delete+commit the UploadedFile
-            # row, so reuse the stable file_id instead of touching a deleted ORM instance.
-            refreshed_file_record = (
-                db.query(UploadedFile)
-                .filter(UploadedFile.file_id == file_record_id)
-                .first()
-            )
-            if refreshed_file_record is not None:
-                UploadedFileStore(db).delete(refreshed_file_record, delete_local=False)
-        await _cleanup_failed_new_collection_metadata(
-            collection_name=collection_name,
-            user=user,
-        )
-        db.commit()
+    register_created, doc_id = _ingested_document_identity(result)
 
     def _compensate_document() -> None:
         _rollback_ingested_document(
@@ -1399,7 +1351,7 @@ async def _rollback_failed_ingestion(
             result=result,
             user_id=user_id,
             is_admin=bool(user.is_admin),
-            context="rollback",
+            label="rollback",
         )
 
     def _compensate_file() -> None:
@@ -1444,6 +1396,66 @@ async def _rollback_failed_ingestion(
             )
             if file_id
         }
+
+        async def _compensate_collection() -> None:
+            collection_delete_result = delete_collection(
+                collection_name,
+                user_id,
+                bool(user.is_admin),
+            )
+            _ensure_cleanup_succeeded(
+                f"delete collection '{collection_name}' during rollback",
+                collection_delete_result,
+            )
+
+            physical_cleanup = delete_collection_physical_dir(
+                user_id=user_id,
+                collection_name=collection_name,
+            )
+            if physical_cleanup.status not in {"success", "not_found"}:
+                error_detail = (
+                    physical_cleanup.error or "unknown physical cleanup failure"
+                )
+                raise RuntimeError(
+                    f"delete collection physical directory during rollback failed: {error_detail}"
+                )
+            remaining_records = vector_store.list_document_records(
+                collection_name=None,
+                user_id=user_id,
+                is_admin=bool(user.is_admin),
+            )
+            remaining_file_ids = {
+                file_id
+                for file_id in (
+                    _get_document_record_file_id(record) for record in remaining_records
+                )
+                if file_id
+            }
+            delete_collection_uploaded_files(
+                db,
+                user_id=user_id,
+                collection_file_ids=collection_file_ids,
+                remaining_file_ids=remaining_file_ids,
+                collection_dir=physical_cleanup.collection_dir,
+            )
+            if not uploaded_file_existed_before:
+                # The collection cleanup above may already delete+commit the UploadedFile
+                # row, so reuse the stable file_id instead of touching a deleted ORM instance.
+                refreshed_file_record = (
+                    db.query(UploadedFile)
+                    .filter(UploadedFile.file_id == file_record_id)
+                    .first()
+                )
+                if refreshed_file_record is not None:
+                    UploadedFileStore(db).delete(
+                        refreshed_file_record, delete_local=False
+                    )
+            await _cleanup_failed_new_collection_metadata(
+                collection_name=collection_name,
+                user=user,
+            )
+            db.commit()
+
         # Comparing doc_ids, not file_ids: two ingests of the same path share a
         # file_id, so a file_id match cannot tell a sibling's work from ours.
         delete_whole_collection = await _rollback_may_delete_collection(
@@ -1461,17 +1473,16 @@ async def _rollback_failed_ingestion(
             ),
             context="failed-ingest rollback",
         )
-        outcome = await get_kb_coordinator().rollback_failed_upload_ingestion(
-            RollbackFailedUploadIngestionRequest(
-                document_compensation=(
-                    None if delete_whole_collection else _compensate_document
-                ),
-                file_compensation=None if delete_whole_collection else _compensate_file,
-                collection_compensation=(
-                    _compensate_collection if delete_whole_collection else None
-                ),
+        if delete_whole_collection:
+            request = RollbackFailedUploadIngestionRequest(
+                collection_compensation=_compensate_collection
             )
-        )
+        else:
+            request = RollbackFailedUploadIngestionRequest(
+                document_compensation=_compensate_document,
+                file_compensation=_compensate_file,
+            )
+        outcome = await get_kb_coordinator().rollback_failed_upload_ingestion(request)
         if outcome.error is not None:
             raise outcome.error
         _restore_ingest_file_backup(
@@ -1533,7 +1544,7 @@ async def _rollback_failed_cloud_ingestion(
             result=result,
             user_id=user_id,
             is_admin=bool(user.is_admin),
-            context="cloud rollback",
+            label="cloud rollback",
         )
 
     def _compensate_file() -> None:

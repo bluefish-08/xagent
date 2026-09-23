@@ -2147,8 +2147,8 @@ class KBCoordinator:
         Stops at the first failing callback and returns its exception in
         ``result.error``; never raises for a failing callback.
         """
-        # Not to_thread: callbacks use the caller's Session (not thread-safe;
-        # shared by gather siblings in /ingest-cloud).
+        # Not to_thread: callbacks use the caller's Session, which is not
+        # thread-safe (/ingest-cloud also shares it across gather siblings).
         attempted = False
         for boundary, callback in (
             ("DOCUMENT", request.document_compensation),
