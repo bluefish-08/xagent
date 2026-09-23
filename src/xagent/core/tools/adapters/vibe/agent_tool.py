@@ -1442,7 +1442,7 @@ class UpdateAgentTool(AbstractBaseTool):
                         if found
                     ]
                     fix = (
-                        "it grants every connector ('mcp'), so the user must share "
+                        "it grants every MCP server ('mcp'), so the user must share "
                         "these or change that grant"
                         if "mcp" in updates["tool_categories"]
                         else "the user must share or remove them"

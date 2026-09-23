@@ -2000,7 +2000,7 @@ class TestUpdateAgentTool:
                 ["basic", "mcp"],
                 [{"type": "mcp", "id": 3, "name": "gmail"}],
                 "are not shared with the team: gmail. Nothing was saved: it "
-                "grants every connector ('mcp')",
+                "grants every MCP server ('mcp')",
             ),
             (
                 ["basic", "mcp:ghost", "mcp:drive"],
