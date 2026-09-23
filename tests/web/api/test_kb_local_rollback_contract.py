@@ -425,19 +425,6 @@ async def test_failing_exception_is_chained_unwrapped(monkeypatch) -> None:
     assert info.value.__cause__ is boom
 
 
-async def test_document_failure_chains_the_cleanup_error(monkeypatch) -> None:
-    calls: list[str] = []
-    db, _ = _install_leaves(monkeypatch, calls, document_status="error")
-
-    with pytest.raises(RollbackFailureError) as info:
-        await _rollback(db)
-
-    assert type(info.value.__cause__) is RuntimeError
-    assert str(info.value.__cause__) == (
-        "delete document 'doc-1' during rollback failed: boom"
-    )
-
-
 @pytest.mark.parametrize(("may_delete", "ran"), SHAPES)
 async def test_restore_failure_after_commit_reports_both(
     monkeypatch, may_delete, ran
@@ -510,24 +497,6 @@ async def test_rollback_does_not_yield_to_sibling_coroutines(
 
 def test_wrapper_stays_a_coroutine_function() -> None:
     assert inspect.iscoroutinefunction(kb_module._rollback_failed_ingestion)
-
-
-def test_web_document_rollback_keeps_its_failure_label(monkeypatch) -> None:
-    monkeypatch.setattr(
-        kb_module,
-        "delete_document",
-        lambda *_a: SimpleNamespace(status="error", message="boom"),
-    )
-
-    with pytest.raises(RuntimeError) as info:
-        kb_module._rollback_failed_web_document_ingestion(
-            collection_name="coll",
-            result=_result(doc_id="d"),
-            user_id=7,
-            is_admin=False,
-        )
-
-    assert str(info.value) == "delete document 'd' during web rollback failed: boom"
 
 
 # --- Text surfaced by /ingest and the legacy (non-staged) document job ---

@@ -1527,7 +1527,7 @@ async def _rollback_failed_cloud_ingestion(
     vector_store = get_vector_index_store()
 
     def _compensate_document() -> None:
-        # Must precede FILE's records query; delete_document already clears status.
+        # Must precede FILE's records query.
         _rollback_ingested_document(
             collection_name=collection_name,
             result=result,

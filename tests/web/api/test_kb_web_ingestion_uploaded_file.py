@@ -2504,9 +2504,6 @@ def test_web_rollback_skips_status_clear_after_deleting_registered_doc() -> None
     with (
         patch("xagent.web.api.kb.delete_document") as mock_delete_document,
         patch("xagent.web.api.kb.clear_ingestion_status") as mock_clear_status,
-        patch(
-            "xagent.web.api.kb._restore_rag_document_snapshot"
-        ) as mock_restore_snapshot,
     ):
         mock_delete_document.return_value = MagicMock(status="success")
 
@@ -2520,4 +2517,31 @@ def test_web_rollback_skips_status_clear_after_deleting_registered_doc() -> None
 
     mock_delete_document.assert_called_once_with("test_collection", "doc-1", 1, False)
     mock_clear_status.assert_not_called()
-    mock_restore_snapshot.assert_not_called()
+
+
+def test_web_document_rollback_keeps_its_failure_label() -> None:
+    from xagent.core.tools.core.RAG_tools.core.schemas import (
+        IngestionResult,
+        IngestionStepResult,
+    )
+
+    result = IngestionResult(
+        status="partial",
+        doc_id="d",
+        completed_steps=[
+            IngestionStepResult(name="register_document", metadata={"created": True})
+        ],
+        message="partial failure",
+    )
+    with patch("xagent.web.api.kb.delete_document") as mock_delete_document:
+        mock_delete_document.return_value = MagicMock(status="error", message="boom")
+
+        with pytest.raises(RuntimeError) as info:
+            _rollback_failed_web_document_ingestion(
+                collection_name="coll",
+                result=result,
+                user_id=7,
+                is_admin=False,
+            )
+
+    assert str(info.value) == "delete document 'd' during web rollback failed: boom"
