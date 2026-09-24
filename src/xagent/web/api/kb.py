@@ -314,10 +314,9 @@ def _create_document_compensation(
                 rag_snapshot=rag_document_snapshot,
                 file_id=file_record_id,
             )
-            # Only the new-web builder passes this; with no RAG snapshot,
-            # DOCUMENT has cleared this doc's status by the time it returns.
-            doc_id = getattr(ingestion_result, "doc_id", None)
-            if status_cleared is not None and isinstance(doc_id, str) and doc_id:
+            # No RAG snapshot: a normal return means DOCUMENT already cleared status.
+            doc_id = _normalized_doc_id(getattr(ingestion_result, "doc_id", None))
+            if status_cleared is not None and rag_document_snapshot is None and doc_id:
                 status_cleared.add(doc_id)
 
         return _compensate
@@ -342,12 +341,7 @@ def _create_status_compensation(
             if ingestion_runs_snapshot is not None:
                 _restore_ingestion_runs_snapshot(ingestion_runs_snapshot)
             elif ingestion_result is not None:
-                doc_id = (
-                    ingestion_result.doc_id
-                    if isinstance(ingestion_result.doc_id, str)
-                    and ingestion_result.doc_id
-                    else None
-                )
+                doc_id = _normalized_doc_id(ingestion_result.doc_id)
                 if doc_id and doc_id not in (status_cleared or ()):
                     clear_ingestion_status(
                         collection_name,
@@ -810,10 +804,14 @@ def _get_completed_step_metadata(
     return None
 
 
+def _normalized_doc_id(doc_id: object) -> Optional[str]:
+    return doc_id if isinstance(doc_id, str) and doc_id else None
+
+
 def _ingested_document_identity(result: IngestionResult) -> tuple[bool, Optional[str]]:
     register_metadata = _get_completed_step_metadata(result, "register_document") or {}
     register_created = bool(register_metadata.get("created"))
-    doc_id = result.doc_id if isinstance(result.doc_id, str) and result.doc_id else None
+    doc_id = _normalized_doc_id(result.doc_id)
     return register_created, doc_id
 
 
@@ -2588,6 +2586,15 @@ def _create_new_web_file_handler_result(
         raise
 
 
+def _existing_uploaded_file_version(record: Any) -> UploadedFileVersionSnapshot:
+    if getattr(record, "id", None) is None:
+        raise ValueError(
+            f"Uploaded file {record.file_id} has no row id; "
+            "cannot take its version receipt"
+        )
+    return snapshot_uploaded_file_version(record)
+
+
 def _refresh_existing_file_if_changed(
     existing_record: Any,
     temp_file_path: Path,
@@ -2627,7 +2634,7 @@ def _refresh_existing_file_if_changed(
     """
     existing_path = Path(str(existing_record.storage_path))
     record_snapshot = _snapshot_uploaded_file_record(existing_record)
-    previous_version = snapshot_uploaded_file_version(existing_record)
+    previous_version = _existing_uploaded_file_version(existing_record)
     if not existing_path.exists():
         try:
             existing_path = ManagedFileRef(existing_record).ensure_local()
@@ -2815,7 +2822,7 @@ def _recreate_missing_existing_file(
 ) -> FileHandlerResult:
     existing_path = Path(str(existing_record.storage_path))
     record_snapshot = _snapshot_uploaded_file_record(existing_record)
-    previous_version = snapshot_uploaded_file_version(existing_record)
+    previous_version = _existing_uploaded_file_version(existing_record)
     ingestion_runs_snapshot = _snapshot_ingestion_runs_for_uploaded_file(
         str(existing_record.file_id)
     )

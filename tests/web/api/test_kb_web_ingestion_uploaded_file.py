@@ -2694,6 +2694,34 @@ def test_new_web_page_status_still_cleared_when_document_rollback_fails(
     )
 
 
+def test_status_still_clears_after_document_restores_a_rag_snapshot() -> None:
+    status_cleared: set[str] = set()
+    result = _failed_page_result(registered=False)
+    with (
+        patch("xagent.web.api.kb._restore_rag_document_snapshot") as mock_restore,
+        patch("xagent.web.api.kb.clear_ingestion_status") as mock_clear_status,
+    ):
+        _create_document_compensation(
+            collection_name="coll",
+            user_id=1,
+            is_admin=False,
+            file_record_id="file-1",
+            rag_document_snapshot=MagicMock(),
+            status_cleared=status_cleared,
+        )(result)()
+        _create_status_compensation(
+            collection_name="coll",
+            user_id=1,
+            is_admin=False,
+            status_cleared=status_cleared,
+        )(result)()
+
+    mock_restore.assert_called_once()
+    mock_clear_status.assert_called_once_with(
+        "coll", "doc-1", user_id=1, is_admin=False
+    )
+
+
 @pytest.mark.parametrize("handler", ["refresh", "recreate"])
 def test_web_file_handler_rejects_record_without_row_id_before_side_effects(
     tmp_path: Path, handler: str
@@ -2725,7 +2753,7 @@ def test_web_file_handler_rejects_record_without_row_id_before_side_effects(
         patch(
             "xagent.web.api.kb._snapshot_ingestion_runs_for_uploaded_file"
         ) as mock_snapshot_runs,
-        pytest.raises(TypeError),
+        pytest.raises(ValueError, match="has no row id"),
     ):
         if handler == "refresh":
             _refresh_existing_file_if_changed(
