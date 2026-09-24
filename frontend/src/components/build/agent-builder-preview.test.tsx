@@ -604,6 +604,23 @@ describe("AgentBuilder preview", () => {
       expectDropped(123)
     })
 
+    it("delivers the pending message after a config edit but starts the next send on a new task", async () => {
+      render(<AgentBuilder />)
+      await sendPreview()
+
+      fireEvent.click(screen.getByText("builds.configForm.executionMode.think.title"))
+      await resolveCreate(123)
+
+      expect(setTaskIdMock).toHaveBeenCalledWith(123, { navigate: false })
+      expect(sendMessageMock).toHaveBeenCalledWith("Preview this", expect.objectContaining({ targetTaskId: 123 }), undefined)
+
+      await sendPreview()
+      const createModes = apiRequestMock.mock.calls
+        .filter(([url]) => String(url).endsWith("/api/chat/task/create"))
+        .map(([, init]) => JSON.parse(init.body as string).execution_mode)
+      expect(createModes).toEqual(["balanced", "think"])
+    })
+
     it("does not report a send that fails after Clear", async () => {
       let rejectSend!: (error: Error) => void
       sendMessageMock.mockReturnValue(new Promise((_, reject) => { rejectSend = reject }))

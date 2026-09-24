@@ -714,6 +714,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const previewTaskIdRef = useRef<number | null>(null)
   const previewGenerationRef = useRef(0)
+  const previewConfigGenerationRef = useRef(0)
 
   const resetPreviewSession = useCallback(() => {
     previewGenerationRef.current += 1
@@ -729,6 +730,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }, [closeFilePreview, dispatch, setTaskId])
 
   const invalidatePreviewTask = useCallback(() => {
+    previewConfigGenerationRef.current += 1
     previewTaskIdRef.current = null
   }, [])
 
@@ -740,9 +742,6 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }, [resetPreviewSession])
 
   useEffect(() => {
-    if (!previewTaskIdRef.current) {
-      return
-    }
     invalidatePreviewTask()
   }, [instructions, executionMode, selectedKbs, selectedSkills, selectedToolCategories, selectedMcpServers, modelConfig, invalidatePreviewTask])
 
@@ -1208,6 +1207,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       const finalToolCategories = buildToolCategories()
 
       if (!previewTaskId) {
+        const configGenerationAtStart = previewConfigGenerationRef.current
         const response = await apiRequest(`${getApiUrl()}/api/chat/task/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1243,7 +1243,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         if (!Number.isFinite(previewTaskId)) {
           throw new Error("Preview task creation returned an invalid task id")
         }
-        previewTaskIdRef.current = previewTaskId
+        // Config edited mid-create: this message still goes to the pre-edit task, the next send starts a fresh one.
+        if (previewConfigGenerationRef.current === configGenerationAtStart) {
+          previewTaskIdRef.current = previewTaskId
+        }
 
         // Close any file preview opened from the previous preview task before switching context.
         closeFilePreview()
