@@ -15,7 +15,6 @@ const searchParamsMock = vi.hoisted(() => new URLSearchParams())
 const translateMock = vi.hoisted(() => (key: string) => key)
 const sendMessageMock = vi.hoisted(() => vi.fn())
 const dispatchMock = vi.hoisted(() => vi.fn())
-const appState = vi.hoisted(() => ({ isProcessing: false }))
 
 // Spied rather than mocked via vi.mock: handleCreate now updates the address
 // bar via the native History API instead of router.replace/push, precisely
@@ -49,7 +48,7 @@ vi.mock("@/contexts/app-context-chat", () => ({
     setTaskId: vi.fn(),
     closeFilePreview: vi.fn(),
     dispatch: dispatchMock,
-    state: { currentTask: null, isProcessing: appState.isProcessing, traceEvents: [], filePreview: { isOpen: false, fileId: "", fileName: "", viewMode: "preview" } },
+    state: { currentTask: null, traceEvents: [], filePreview: { isOpen: false, fileId: "", fileName: "", viewMode: "preview" } },
   }),
 }))
 
@@ -111,7 +110,6 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     runWorkforceMock.mockReset()
     sendMessageMock.mockReset().mockResolvedValue(undefined)
     dispatchMock.mockReset()
-    appState.isProcessing = false
     historyReplaceStateSpy.mockClear()
   })
 
@@ -591,7 +589,7 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     })
   })
 
-  it("clears processing when a config edit invalidates a still-running preview", async () => {
+  it("clears processing state when a config edit invalidates the test preview", async () => {
     runWorkforcePreviewMock.mockResolvedValueOnce({
       workforce_run_id: 1,
       task_id: 42,
@@ -613,7 +611,6 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
 
     fireEvent.click(screen.getByText("Send Test"))
     await waitFor(() => expect(runWorkforcePreviewMock).toHaveBeenCalledTimes(1))
-    appState.isProcessing = true
     dispatchMock.mockClear()
 
     fireEvent.click(screen.getByText("workforces.actions.addAgent"))
@@ -622,6 +619,16 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     await waitFor(() => {
       expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
     })
+  })
+
+  it("clears processing state when the builder unmounts", async () => {
+    const { unmount } = render(<WorkforceBuilder />)
+    await waitFor(() => expect(listAgentOptionsMock).toHaveBeenCalledOnce())
+    dispatchMock.mockClear()
+
+    unmount()
+
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
   })
 
   it("does not fire a second concurrent preview-creation request when a draft edit invalidates the first one mid-flight", async () => {

@@ -638,6 +638,8 @@ function WorkforceRunPageInner() {
       d({ type: "SET_DAG_EXECUTION", payload: null })
       d({ type: "SET_CURRENT_TASK", payload: null })
       d({ type: "SET_HISTORY_LOADING", payload: false })
+      // Nulling taskId closes the socket, so no terminal WS event will clear this.
+      d({ type: "SET_PROCESSING", payload: false })
       set(null, { navigate: false })
     }
   }, [])

@@ -926,6 +926,17 @@ describe("workforce route entry points", () => {
     expect(await screen.findByText("workforces.run.readyTitle")).toBeInTheDocument()
   })
 
+  it("clears processing state when the run page unmounts", async () => {
+    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
+    const { unmount } = render(<WorkforceRunPage />)
+    expect(await screen.findByText("Launch Workforce")).toBeInTheDocument()
+    dispatchMock.mockClear()
+
+    unmount()
+
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+  })
+
   it("opens a historical run from the shared Runs popover", async () => {
     getWorkforceMock.mockResolvedValueOnce(workforceDetail)
     listWorkforceRunsMock.mockResolvedValueOnce({
