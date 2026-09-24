@@ -2616,7 +2616,7 @@ def _roll_back_new_web_page(file_info, result, *, with_operation: bool):
             file_id="file-1",
             user_id=1,
         )
-    return KBCoordinator.__new__(KBCoordinator).rollback_failed_ingestion_sync(
+    outcome = KBCoordinator.__new__(KBCoordinator).rollback_failed_ingestion_sync(
         RollbackFailedIngestionRequest(
             collection="coll",
             user_id=None,
@@ -2629,6 +2629,7 @@ def _roll_back_new_web_page(file_info, result, *, with_operation: bool):
             status_compensation=file_info.get("status_compensation"),
         )
     )
+    return outcome, operation
 
 
 @pytest.mark.parametrize("with_operation", [False, True])
@@ -2641,7 +2642,7 @@ def test_new_web_page_registered_doc_status_cleared_only_by_delete_document(
         patch("xagent.web.api.kb.clear_ingestion_status") as mock_clear_status,
     ):
         mock_delete_document.return_value = MagicMock(status="success")
-        outcome = _roll_back_new_web_page(
+        outcome, _ = _roll_back_new_web_page(
             file_info,
             _failed_page_result(registered=True),
             with_operation=with_operation,
@@ -2662,7 +2663,7 @@ def test_new_web_page_unregistered_doc_status_cleared_once(
         patch("xagent.web.api.kb.delete_document") as mock_delete_document,
         patch("xagent.web.api.kb.clear_ingestion_status") as mock_clear_status,
     ):
-        outcome = _roll_back_new_web_page(
+        outcome, _ = _roll_back_new_web_page(
             file_info,
             _failed_page_result(registered=False),
             with_operation=with_operation,
@@ -2673,10 +2674,12 @@ def test_new_web_page_unregistered_doc_status_cleared_once(
         "coll", "doc-1", user_id=1, is_admin=False
     )
     assert outcome.first_error is None
+    assert outcome.side_effects_may_remain is False
 
 
+@pytest.mark.parametrize("with_operation", [False, True])
 def test_new_web_page_status_still_cleared_when_document_rollback_fails(
-    tmp_path: Path,
+    tmp_path: Path, with_operation: bool
 ) -> None:
     file_info = _new_web_file_info(tmp_path)
     with (
@@ -2684,14 +2687,19 @@ def test_new_web_page_status_still_cleared_when_document_rollback_fails(
         patch("xagent.web.api.kb.clear_ingestion_status") as mock_clear_status,
     ):
         mock_delete_document.return_value = MagicMock(status="error", message="boom")
-        outcome = _roll_back_new_web_page(
-            file_info, _failed_page_result(registered=True), with_operation=False
+        outcome, operation = _roll_back_new_web_page(
+            file_info,
+            _failed_page_result(registered=True),
+            with_operation=with_operation,
         )
 
     assert set(outcome.boundary_errors) == {"DOCUMENT"}
     mock_clear_status.assert_called_once_with(
         "coll", "doc-1", user_id=1, is_admin=False
     )
+    if with_operation:
+        pending = {step.idempotency_key for step in operation.uncompensated_steps()}
+        assert pending == {"document:coll:doc-1"}
 
 
 def test_status_still_clears_after_document_restores_a_rag_snapshot() -> None:
