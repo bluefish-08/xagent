@@ -1142,3 +1142,45 @@ async def test_failed_ingest_config_cleanup_follows_the_cleanup_decision(
     )
 
     assert cleaned == ["demo"]
+
+
+@pytest.mark.asyncio
+async def test_failed_ingest_config_cleanup_warns_when_side_effects_may_remain(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cleaned: list[str] = []
+
+    async def fake_cleanup(*, collection_name: str, user: Any) -> None:
+        cleaned.append(collection_name)
+
+    monkeypatch.setattr(
+        kb_module, "_cleanup_failed_new_collection_metadata", fake_cleanup
+    )
+    caplog.set_level("WARNING", logger="xagent.web.api.kb")
+    user = User()
+    user.id = 3
+
+    await kb_module._cleanup_collection_metadata_after_failed_ingest(
+        collection_existed_before=False,
+        collection_name="demo",
+        user=user,
+        context="ingest",
+        decision=KBApiFailedIngestCleanupDecision(
+            successful_documents=0,
+            side_effects_may_remain=True,
+        ),
+    )
+
+    assert cleaned == []
+    assert [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == "xagent.web.api.kb"
+    ] == [
+        (
+            "WARNING",
+            "Skipping failed-ingest collection metadata cleanup for demo/user_3 "
+            "during ingest because rollback side effects may remain",
+        )
+    ]
