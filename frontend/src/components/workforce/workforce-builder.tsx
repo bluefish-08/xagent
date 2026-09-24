@@ -233,6 +233,7 @@ export function WorkforceBuilder({ workforceId }: WorkforceBuilderProps) {
     useEffect(() => {
         return () => {
             const { closeFilePreview: close, dispatch: d, setTaskId: set } = cleanupRef.current
+            previewGenerationRef.current += 1
             previewTaskIdRef.current = null
             close()
             d({ type: "CLEAR_MESSAGES" })
@@ -612,6 +613,7 @@ export function WorkforceBuilder({ workforceId }: WorkforceBuilderProps) {
             }
         } catch (err) {
             if (previewTaskIdRef.current === -1) previewTaskIdRef.current = null
+            if (previewGenerationRef.current !== generationAtStart) return
             const nextError = err instanceof Error ? err.message : t("workforces.errors.run")
             toast.error(nextError)
         } finally {
