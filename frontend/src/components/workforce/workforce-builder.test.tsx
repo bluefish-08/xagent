@@ -621,6 +621,13 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     })
   })
 
+  it("nulls the shared task on mount", async () => {
+    render(<WorkforceBuilder />)
+    await waitFor(() => expect(listAgentOptionsMock).toHaveBeenCalledOnce())
+
+    expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
+  })
+
   it("nulls the shared task when the builder unmounts", async () => {
     const { unmount } = render(<WorkforceBuilder />)
     await waitFor(() => expect(listAgentOptionsMock).toHaveBeenCalledOnce())
