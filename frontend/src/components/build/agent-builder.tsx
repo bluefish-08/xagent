@@ -713,8 +713,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const previewTaskIdRef = useRef<number | null>(null)
+  const previewGenerationRef = useRef(0)
 
   const resetPreviewSession = useCallback(() => {
+    previewGenerationRef.current += 1
     previewTaskIdRef.current = null
     closeFilePreview()
     dispatch({ type: "CLEAR_MESSAGES" })
@@ -1173,6 +1175,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }
 
   const handlePreviewSendMessage = async (content: string, _config?: any, files?: File[]) => {
+    const generationAtStart = previewGenerationRef.current
     try {
       // Check if general model is selected
       if (!modelConfig.general) {
@@ -1235,6 +1238,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
         }
 
         const taskData = await response.json()
+        if (previewGenerationRef.current !== generationAtStart) return
         previewTaskId = Number(taskData.task_id)
         if (!Number.isFinite(previewTaskId)) {
           throw new Error("Preview task creation returned an invalid task id")
@@ -1274,6 +1278,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       await sendMessage(backendMessage, { force: true, targetTaskId: previewTaskId }, files)
     } catch (error) {
       console.error("Preview failed:", error)
+      if (previewGenerationRef.current !== generationAtStart) return
       dispatch({
         type: "ADD_MESSAGE",
         payload: {
