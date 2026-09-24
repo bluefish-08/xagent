@@ -330,6 +330,7 @@ def test_document_delete_still_ignores_other_tenant_references(test_env, temp_up
     )
 
     assert response.status_code == 200
+    # Current scope, not desired: #2662 item 5 flips this.
     assert not _row_exists(sessions, file_id)
     assert not path.exists()
 
@@ -352,6 +353,7 @@ def test_reference_lookup_returns_every_candidate_reference_and_nothing_else(
         ["f-1", "f-2", "f-3"], user_id=user.id, is_admin=False
     )
 
+    assert len(records) == DEFAULT_VECTOR_STORE_SCAN_LIMIT + 2
     assert {record.file_id for record in records} == {"f-1", "f-2", "f-3"}
 
 

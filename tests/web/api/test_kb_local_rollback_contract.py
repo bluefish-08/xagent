@@ -40,7 +40,7 @@ WHOLE = [
     "may_delete",
     "delete_collection",
     "physdir",
-    "refs",
+    "refs:[]",
     "del_coll_files",
     "query",
     "store.delete:refreshed",
@@ -52,7 +52,7 @@ KEPT = [
     "list:coll",
     "may_delete",
     "delete_document",
-    "refs",
+    "refs:['file-1']",
     "orphan",
     "commit",
     "restore",
@@ -143,7 +143,7 @@ def _install_leaves(
         _hit("orphan")
 
     def _refs(file_ids, *, user_id, is_admin):
-        _hit("refs")
+        _hit(f"refs:{sorted(file_ids)}")
         return []
 
     def _clear_status(collection, doc_id, *, user_id, is_admin):
@@ -324,6 +324,7 @@ async def test_collection_decision_compares_doc_ids(
         "context": "failed-ingest rollback",
     }
     assert seen["collection_file_ids"] == file_ids
+    assert f"refs:{sorted(file_ids)}" in calls
 
 
 async def test_collection_existed_before_still_asks_the_decision(monkeypatch) -> None:
@@ -363,7 +364,7 @@ async def test_collection_existed_before_still_asks_the_decision(monkeypatch) ->
             id="physical-dir-without-detail",
         ),
         pytest.param(
-            {"may_delete": True, "raises": {"refs": RuntimeError("list down")}},
+            {"may_delete": True, "raises": {"refs:[]": RuntimeError("list down")}},
             {},
             WHOLE[:5],
             "list down",
@@ -411,7 +412,7 @@ async def test_collection_existed_before_still_asks_the_decision(monkeypatch) ->
             id="orphan-before-commit",
         ),
         pytest.param(
-            {"raises": {"refs": RuntimeError("refs down")}},
+            {"raises": {"refs:['file-1']": RuntimeError("refs down")}},
             {},
             KEPT[:4],
             "refs down",

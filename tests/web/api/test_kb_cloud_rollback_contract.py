@@ -36,7 +36,7 @@ temp_uploads = kb_dir.temp_uploads
 REGISTERED = [{"name": "register_document", "metadata": {"created": True}}]
 FULL_CHAIN = [
     "delete_document",
-    "refs",
+    "refs:['file-1']",
     "orphan",
     "list:coll",
     "may_delete",
@@ -88,7 +88,7 @@ def _install_leaves(
         calls.append("orphan")
 
     def _refs(file_ids, *, user_id, is_admin):
-        calls.append("refs")
+        calls.append(f"refs:{sorted(file_ids)}")
         if refs_error is not None:
             raise refs_error
         return []
@@ -168,7 +168,7 @@ async def _rollback(
             {},
             False,
             True,
-            [c for c in FULL_CHAIN if c != "orphan"],
+            [FULL_CHAIN[0], "refs:[]", *FULL_CHAIN[3:]],
             id="no-file-record-still-lists",
         ),
         pytest.param(
