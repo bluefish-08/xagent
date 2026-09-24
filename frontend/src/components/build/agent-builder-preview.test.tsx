@@ -651,5 +651,21 @@ describe("AgentBuilder preview", () => {
         }),
       )
     })
+
+    it("still reports a send that fails without a reset", async () => {
+      sendMessageMock.mockRejectedValue(new Error("send failed"))
+      render(<AgentBuilder />)
+      await sendPreview()
+      await resolveCreate(123)
+
+      await waitFor(() =>
+        expect(dispatchMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "ADD_MESSAGE",
+            payload: expect.objectContaining({ content: "builds.preview.errors.requestFailed" }),
+          }),
+        ),
+      )
+    })
   })
 })
