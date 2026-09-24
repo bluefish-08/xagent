@@ -108,9 +108,9 @@ class FileHandlerResult(TypedDict):
         rollback_context: Optional operation-outcome metadata describing the
             web file side effect. This is internal and does not affect public
             web ingestion result schemas.
-        file_compensation: Optional FILE-boundary compensation callback.
-            Declaring any boundary callback also disables the pipeline's own
-            persistent-file cleanup: the handler owns whatever it wrote.
+        file_compensation: Optional FILE-boundary compensation callback. The
+            pipeline never deletes a persistent file_path itself; declare this
+            to have it removed when the page's ingestion fails.
         document_compensation: Optional DOCUMENT-boundary compensation callback.
         status_compensation: Optional STATUS-boundary compensation callback.
         snapshot_compensation: Optional SNAPSHOT-boundary compensation callback.
@@ -289,55 +289,6 @@ def _run_per_boundary_compensation(
     result = pipeline_facade.rollback_failed_ingestion_sync(request)
     warnings.extend(result.warnings)
     return result.first_error
-
-
-def _run_legacy_persistent_file_compensation(
-    *,
-    pipeline_facade: "KBPipelineCompatibilityFacade",
-    page_operation: Any,
-    collection: str,
-    url: str,
-    copied_persistent_file: Optional[Path],
-    file_info: Optional[FileHandlerResult],
-    warnings: list[str],
-) -> Optional[str]:
-    if not copied_persistent_file or not copied_persistent_file.exists():
-        return None
-    # A handler that declared boundary compensation owns this file's fate --
-    # the new-file handler deletes it, the reuse handler leaves it alone. That
-    # second case is why this matters: its file_path is a pre-existing file,
-    # and unlinking it here would destroy user data.
-    if file_info and _has_per_boundary_compensation(file_info):
-        return None
-
-    def _compensate() -> None:
-        copied_persistent_file.unlink()
-
-    pipeline_facade.record_web_page_file_side_effect(
-        page_operation,
-        collection=collection,
-        url=url,
-        file_path=str(copied_persistent_file),
-        file_id=cast(Optional[str], file_info.get("file_id")) if file_info else None,
-        reason="legacy_persistent_file",
-        extra_payload={"rollback_kind": "legacy_persistent_file"},
-        compensation=_compensate,
-    )
-    errors = pipeline_facade.compensate_web_page_file_side_effect(page_operation)
-    if not errors:
-        logger.info(
-            "Cleaned up persistent file due to ingestion failure: %s",
-            copied_persistent_file,
-        )
-        return None
-
-    cleanup_reason = str(errors[0])
-    message = (
-        f"Failed to clean up persistent file {copied_persistent_file}: {cleanup_reason}"
-    )
-    logger.warning(message)
-    warnings.append(message)
-    return cleanup_reason
 
 
 def _looks_like_crawler_block(error: str) -> bool:
@@ -542,7 +493,6 @@ async def _run_web_ingestion_impl(
                     # Call file_handler if provided (for persistent storage and UploadedFile record)
                     final_file_path = temp_file
                     final_file_id = None
-                    copied_persistent_file = None
                     file_info: Optional[FileHandlerResult] = None
 
                     if file_handler:
@@ -557,8 +507,8 @@ async def _run_web_ingestion_impl(
                                 raise ValueError(
                                     "File handler returned no file information"
                                 )
-                            # Ignoring it would let the persistent-file cleanup
-                            # below unlink a pre-existing file_path.
+                            # Ignoring it would silently drop the handler's
+                            # failure rollback.
                             if "rollback_on_failure" in file_info:
                                 raise ValueError(
                                     "rollback_on_failure is no longer supported; "
@@ -593,13 +543,6 @@ async def _run_web_ingestion_impl(
                                         file_compensation,
                                     ),
                                 )
-
-                            # Track if we successfully copied a persistent file for cleanup
-                            if (
-                                final_file_path != temp_file
-                                and final_file_path.exists()
-                            ):
-                                copied_persistent_file = final_file_path
 
                             logger.debug(
                                 "File handler returned: path=%s, file_id=%s",
@@ -676,8 +619,6 @@ async def _run_web_ingestion_impl(
                                 warnings=warnings,
                                 ingestion_result=ingest_result,
                             )
-                            # Only clear temp file reference on success
-                            copied_persistent_file = None
                         else:
                             failed_urls[crawl_result.url] = ingest_result.message
                             msg = (
@@ -694,18 +635,6 @@ async def _run_web_ingestion_impl(
                                 warnings=warnings,
                                 ingestion_result=ingest_result,
                             )
-                            legacy_cleanup_error = (
-                                _run_legacy_persistent_file_compensation(
-                                    pipeline_facade=pipeline_facade,
-                                    page_operation=page_operation,
-                                    collection=collection,
-                                    url=crawl_result.url,
-                                    copied_persistent_file=copied_persistent_file,
-                                    file_info=file_info,
-                                    warnings=warnings,
-                                )
-                            )
-                            rollback_error = rollback_error or legacy_cleanup_error
                             if rollback_error:
                                 rollback_failed_urls[crawl_result.url] = rollback_error
                             pipeline_facade.finish_web_page_operation(
@@ -713,7 +642,6 @@ async def _run_web_ingestion_impl(
                                 status=ingest_result.status,
                                 message=ingest_result.message,
                             )
-                            copied_persistent_file = None
 
                     except Exception as e:
                         logger.exception("Failed to ingest %s", crawl_result.url)
@@ -733,21 +661,6 @@ async def _run_web_ingestion_impl(
                         )
                         if rollback_error:
                             rollback_failed_urls[crawl_result.url] = rollback_error
-
-                        # Legacy cleanup for handlers that only returned a file path.
-                        legacy_cleanup_error = _run_legacy_persistent_file_compensation(
-                            pipeline_facade=pipeline_facade,
-                            page_operation=page_operation,
-                            collection=collection,
-                            url=crawl_result.url,
-                            copied_persistent_file=copied_persistent_file,
-                            file_info=file_info,
-                            warnings=warnings,
-                        )
-                        rollback_error = rollback_error or legacy_cleanup_error
-                        if rollback_error:
-                            rollback_failed_urls[crawl_result.url] = rollback_error
-                        copied_persistent_file = None
                         pipeline_facade.finish_web_page_operation(
                             page_operation,
                             status="error",
