@@ -110,7 +110,8 @@ class FileHandlerResult(TypedDict):
             web ingestion result schemas.
         file_compensation: Optional FILE-boundary compensation callback. The
             pipeline never deletes a persistent file_path itself; declare this
-            to have it removed when the page's ingestion fails.
+            to undo the handler's file change (e.g. delete a fresh copy or
+            restore a refreshed file) when the page's ingestion fails.
         document_compensation: Optional DOCUMENT-boundary compensation callback.
         status_compensation: Optional STATUS-boundary compensation callback.
         snapshot_compensation: Optional SNAPSHOT-boundary compensation callback.
@@ -204,6 +205,22 @@ def _has_per_boundary_compensation(file_info: FileHandlerResult) -> bool:
             "status_compensation",
             "snapshot_compensation",
         )
+    )
+
+
+def _log_kept_path_only_file(
+    file_info: Optional[FileHandlerResult], file_path: Path, temp_dir: str, url: str
+) -> None:
+    if not file_info or _has_per_boundary_compensation(file_info):
+        return
+    if Path(temp_dir) in file_path.parents:
+        return
+    # Log only: adding to result.warnings would change the public result.
+    logger.warning(
+        "Kept file_handler file %s after ingestion of %s failed; "
+        "declare file_compensation if it should be removed",
+        file_path,
+        url,
     )
 
 
@@ -626,6 +643,9 @@ async def _run_web_ingestion_impl(
                                 f"{ingest_result.message}"
                             )
                             warnings.append(msg)
+                            _log_kept_path_only_file(
+                                file_info, final_file_path, temp_dir, crawl_result.url
+                            )
                             rollback_error = _run_file_handler_compensation(
                                 pipeline_facade=pipeline_facade,
                                 page_operation=page_operation,
@@ -650,6 +670,9 @@ async def _run_web_ingestion_impl(
                             f"Failed to ingest {crawl_result.url}: {str(e)}"
                         )
                         warnings.append(failure_message)
+                        _log_kept_path_only_file(
+                            file_info, final_file_path, temp_dir, crawl_result.url
+                        )
 
                         rollback_error = _run_file_handler_compensation(
                             pipeline_facade=pipeline_facade,
