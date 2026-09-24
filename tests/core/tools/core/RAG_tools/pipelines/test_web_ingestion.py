@@ -1431,13 +1431,14 @@ class TestWebIngestionFileHandler:
         assert events == []
         assert stored_file.read_text() == "user data"
         assert result.status == "error"
-        assert result.failed_urls == {
-            "https://example.com/page1": (
-                "File persistence failed for https://example.com/page1: "
-                "rollback_on_failure is no longer supported; return per-boundary "
-                "callbacks such as file_compensation instead"
-            )
-        }
+        rejection = (
+            "File persistence failed for https://example.com/page1: "
+            "rollback_on_failure is no longer supported; return per-boundary "
+            "callbacks such as file_compensation instead"
+        )
+        assert result.failed_urls == {"https://example.com/page1": rejection}
+        assert rejection in result.warnings
+        assert result.side_effects_may_remain is True
         outcome = operation_facade.last_outcome
         assert outcome is not None
         (child,) = outcome.child_outcomes
