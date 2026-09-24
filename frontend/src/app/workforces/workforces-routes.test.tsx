@@ -919,22 +919,24 @@ describe("workforce route entry points", () => {
     expect(await screen.findByTestId("task-conversation-panel")).toBeInTheDocument()
 
     fireEvent.click(await screen.findByRole("button", { name: "workforces.runs.title" }))
+    setTaskIdMock.mockClear()
     fireEvent.click(await screen.findByRole("button", { name: "workforces.run.newRun" }))
 
+    expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
     expect(routerPushMock).not.toHaveBeenCalled()
     expect(screen.queryByTestId("task-conversation-panel")).not.toBeInTheDocument()
     expect(await screen.findByText("workforces.run.readyTitle")).toBeInTheDocument()
   })
 
-  it("clears processing state when the run page unmounts", async () => {
+  it("nulls the shared task when the run page unmounts", async () => {
     getWorkforceMock.mockResolvedValueOnce(workforceDetail)
     const { unmount } = render(<WorkforceRunPage />)
     expect(await screen.findByText("Launch Workforce")).toBeInTheDocument()
-    dispatchMock.mockClear()
+    setTaskIdMock.mockClear()
 
     unmount()
 
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+    expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
   })
 
   it("opens a historical run from the shared Runs popover", async () => {

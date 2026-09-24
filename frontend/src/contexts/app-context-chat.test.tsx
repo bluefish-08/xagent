@@ -1892,6 +1892,24 @@ describe("AppProvider websocket message routing", () => {
     expect(screen.getByTestId("task-dag-terminated-at").textContent).toBe("")
   })
 
+  it.each([
+    { next: null, processing: "false" },
+    { next: 2, processing: "true" },
+  ])("leaves processing=$processing after setTaskId($next) mid-run", ({ next, processing }) => {
+    let setTask: ((taskId: number | null) => void) | undefined
+    function SetTaskProbe() {
+      const { setTaskId } = useApp()
+      setTask = (taskId) => setTaskId(taskId, { navigate: false })
+      return null
+    }
+    render(<AppProvider token="token"><SeedRunningTask /><SetTaskProbe /><StateProbe /></AppProvider>)
+    expect(screen.getByTestId("processing").textContent).toBe("true")
+
+    act(() => { setTask?.(next) })
+
+    expect(screen.getByTestId("processing").textContent).toBe(processing)
+  })
+
   it("rejects a queued message once the conversation is reset before delivery", async () => {
     let send: (() => Promise<void> | undefined) | undefined
     let reset: (() => void) | undefined

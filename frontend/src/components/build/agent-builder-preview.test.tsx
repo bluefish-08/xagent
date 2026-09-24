@@ -529,22 +529,21 @@ describe("AgentBuilder preview", () => {
     expect(closeFilePreviewMock).toHaveBeenCalledTimes(1)
   })
 
-  it("clears processing state when the preview resets on mount", async () => {
+  it("nulls the shared task when the preview resets on mount", async () => {
     render(<AgentBuilder />)
     await screen.findByText("send-preview-message")
 
     expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
   })
 
-  it("clears processing state when the preview is cleared", async () => {
+  it("nulls the shared task when the preview is cleared", async () => {
     render(<AgentBuilder />)
     await screen.findByText("send-preview-message")
-    dispatchMock.mockClear()
+    setTaskIdMock.mockClear()
 
     fireEvent.click(screen.getByTitle("common.clear"))
 
-    expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+    expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
   })
 
   it("does not show App Widget in the builder form (widget moved to Deploy dialog)", async () => {
