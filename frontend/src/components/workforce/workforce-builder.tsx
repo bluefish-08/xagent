@@ -163,9 +163,8 @@ export function WorkforceBuilder({ workforceId }: WorkforceBuilderProps) {
     }, [hasUnsavedDraft, isEditingDetails])
 
     const previewTaskIdRef = useRef<number | null>(null)
-    // Bumped whenever handleCreate resets the preview state, so an in-flight
-    // handleTestSendMessage call started before Create doesn't clobber the
-    // reset with its now-orphaned (pre-save) result once its await resolves.
+    // Bumped by every preview reset (invalidatePreviewRun, which Create also
+    // calls, and unmount) so an in-flight test send can tell it went stale.
     const previewGenerationRef = useRef(0)
     // Independent of previewTaskIdRef's -1 sentinel: invalidatePreviewRun
     // resets that ref to null even while a preview-creation request is
@@ -577,10 +576,8 @@ export function WorkforceBuilder({ workforceId }: WorkforceBuilderProps) {
                 if (!taskId) throw new Error("Invalid run response: missing task_id")
 
                 if (previewGenerationRef.current !== generationAtStart) {
-                    // Create succeeded while this request was in flight: the
-                    // run it started targets the now-discarded pre-save
-                    // draft snapshot. Drop it instead of resurrecting it as
-                    // the active conversation over handleCreate's reset.
+                    // A reset happened while this run was starting: drop it
+                    // instead of re-attaching the discarded run.
                     return
                 }
                 previewTaskIdRef.current = taskId

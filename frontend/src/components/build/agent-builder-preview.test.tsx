@@ -604,6 +604,18 @@ describe("AgentBuilder preview", () => {
       expectDropped(123)
     })
 
+    it("reuses the created task for the next send when the config is unchanged", async () => {
+      render(<AgentBuilder />)
+      await sendPreview()
+      await resolveCreate(123)
+
+      fireEvent.click(screen.getByText("send-preview-message"))
+
+      await waitFor(() => expect(sendMessageMock).toHaveBeenCalledTimes(2))
+      expect(apiRequestMock.mock.calls.filter(([url]) => String(url).endsWith("/api/chat/task/create"))).toHaveLength(1)
+      expect(sendMessageMock.mock.calls.map(([, config]) => config.targetTaskId)).toEqual([123, 123])
+    })
+
     it("delivers the pending message after a config edit but starts the next send on a new task", async () => {
       render(<AgentBuilder />)
       await sendPreview()
