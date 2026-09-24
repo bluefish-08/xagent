@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FILE_STATUS_BATCH_SIZE = 200
+_ORPHAN_LOOKUP_BATCH_SIZE = 200
 _STALE_FILE_STATUSES = {"FAILED", "UNKNOWN", "RUNNING"}
 _DEFAULT_DELETABLE_STALE_STATUSES = {"FAILED"}
 
@@ -217,8 +218,8 @@ def _list_document_records_for_file_ids_impl(
     table = None
     try:
         table = conn.open_table("documents")
-        for offset in range(0, len(normalized_file_ids), _FILE_STATUS_BATCH_SIZE):
-            batch = normalized_file_ids[offset : offset + _FILE_STATUS_BATCH_SIZE]
+        for offset in range(0, len(normalized_file_ids), _ORPHAN_LOOKUP_BATCH_SIZE):
+            batch = normalized_file_ids[offset : offset + _ORPHAN_LOOKUP_BATCH_SIZE]
             combined_filter = _combine_lancedb_filters(
                 _build_file_id_in_filter(batch), user_filter
             )

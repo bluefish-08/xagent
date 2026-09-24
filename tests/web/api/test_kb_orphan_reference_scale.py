@@ -338,7 +338,7 @@ def test_reference_lookup_returns_every_candidate_reference_and_nothing_else(
     test_env, monkeypatch
 ):
     _app, _headers, user, _sessions = test_env
-    monkeypatch.setattr(kb_file_service, "_FILE_STATUS_BATCH_SIZE", 2)
+    monkeypatch.setattr(kb_file_service, "_ORPHAN_LOOKUP_BATCH_SIZE", 2)
     table = _documents()
     table.add(
         [
