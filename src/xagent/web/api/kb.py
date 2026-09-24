@@ -223,9 +223,9 @@ def _create_file_compensation_restore(
     existing_path: Path,
     backup_path: Optional[Path],
     record_snapshot: dict[str, Any],
+    previous_version: UploadedFileVersionSnapshot,
+    expected_current_version: UploadedFileVersionSnapshot,
     had_existing_file: bool = True,
-    previous_version: UploadedFileVersionSnapshot | None = None,
-    expected_current_version: UploadedFileVersionSnapshot | None = None,
 ) -> Callable[[], None]:
     """Create a FILE-boundary compensation callback for restoring a refreshed/recreated web file."""
 
@@ -250,13 +250,7 @@ def _create_file_compensation_restore(
                 .first()
             )
             if refreshed_record is not None:
-                if previous_version is None or expected_current_version is None:
-                    logger.warning(
-                        "Skipping legacy uploaded-file metadata rollback without "
-                        "both previous and applied version receipts: %s",
-                        file_record_id,
-                    )
-                elif had_existing_file:
+                if had_existing_file:
                     UploadedFileStore(rollback_db).upsert_by_storage_path(
                         user_id=previous_version.user_id,
                         file_id=previous_version.file_id,
@@ -299,6 +293,7 @@ def _create_document_compensation(
     is_admin: bool,
     file_record_id: str,
     rag_document_snapshot: Optional["_RagDocumentSnapshot"] = None,
+    status_cleared: Optional[set[str]] = None,
 ) -> Callable[[Optional[IngestionResult]], Callable[[], None]]:
     """Create a DOCUMENT-boundary compensation factory.
 
@@ -319,6 +314,11 @@ def _create_document_compensation(
                 rag_snapshot=rag_document_snapshot,
                 file_id=file_record_id,
             )
+            # Only the new-web builder passes this; with no RAG snapshot,
+            # DOCUMENT has cleared this doc's status by the time it returns.
+            doc_id = getattr(ingestion_result, "doc_id", None)
+            if status_cleared is not None and isinstance(doc_id, str) and doc_id:
+                status_cleared.add(doc_id)
 
         return _compensate
 
@@ -331,6 +331,7 @@ def _create_status_compensation(
     user_id: int,
     is_admin: bool,
     ingestion_runs_snapshot: Optional["_IngestionRunsSnapshot"] = None,
+    status_cleared: Optional[set[str]] = None,
 ) -> Callable[[Optional[IngestionResult]], Callable[[], None]]:
     """Create a STATUS-boundary compensation factory."""
 
@@ -347,7 +348,7 @@ def _create_status_compensation(
                     and ingestion_result.doc_id
                     else None
                 )
-                if doc_id:
+                if doc_id and doc_id not in (status_cleared or ()):
                     clear_ingestion_status(
                         collection_name,
                         doc_id,
@@ -2542,16 +2543,19 @@ def _create_new_web_file_handler_result(
             file_record_id=file_record_id,
             persistent_file_path=persistent_file_path,
         )
+        status_cleared: set[str] = set()
         document_compensation = _create_document_compensation(
             collection_name=collection_name,
             user_id=user_id,
             is_admin=is_admin,
             file_record_id=file_record_id,
+            status_cleared=status_cleared,
         )
         status_compensation = _create_status_compensation(
             collection_name=collection_name,
             user_id=user_id,
             is_admin=is_admin,
+            status_cleared=status_cleared,
         )
 
         return FileHandlerResult(
@@ -2623,11 +2627,7 @@ def _refresh_existing_file_if_changed(
     """
     existing_path = Path(str(existing_record.storage_path))
     record_snapshot = _snapshot_uploaded_file_record(existing_record)
-    previous_version = (
-        snapshot_uploaded_file_version(existing_record)
-        if getattr(existing_record, "id", None) is not None
-        else None
-    )
+    previous_version = snapshot_uploaded_file_version(existing_record)
     if not existing_path.exists():
         try:
             existing_path = ManagedFileRef(existing_record).ensure_local()
@@ -2815,11 +2815,7 @@ def _recreate_missing_existing_file(
 ) -> FileHandlerResult:
     existing_path = Path(str(existing_record.storage_path))
     record_snapshot = _snapshot_uploaded_file_record(existing_record)
-    previous_version = (
-        snapshot_uploaded_file_version(existing_record)
-        if getattr(existing_record, "id", None) is not None
-        else None
-    )
+    previous_version = snapshot_uploaded_file_version(existing_record)
     ingestion_runs_snapshot = _snapshot_ingestion_runs_for_uploaded_file(
         str(existing_record.file_id)
     )
@@ -2889,9 +2885,9 @@ def _recreate_missing_existing_file(
                 .filter(UploadedFile.file_id == str(existing_record.file_id))
                 .first()
             )
-            if refreshed_record is not None and (
-                previous_version is None
-                or snapshot_uploaded_file_version(refreshed_record) != previous_version
+            if (
+                refreshed_record is not None
+                and snapshot_uploaded_file_version(refreshed_record) != previous_version
             ):
                 raise UploadedFileVersionConflict(
                     "Uploaded file changed while recreate setup failed; "
