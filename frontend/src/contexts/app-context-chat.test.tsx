@@ -1893,9 +1893,9 @@ describe("AppProvider websocket message routing", () => {
   })
 
   it.each([
-    { next: null, processing: "false" },
-    { next: 2, processing: "true" },
-  ])("leaves processing=$processing after setTaskId($next) mid-run", ({ next, processing }) => {
+    ["clears processing on setTaskId(null)", null, "false"],
+    ["keeps processing on a task switch", 2, "true"],
+  ] as const)("%s", (_label, next, processing) => {
     let setTask: ((taskId: number | null) => void) | undefined
     function SetTaskProbe() {
       const { setTaskId } = useApp()

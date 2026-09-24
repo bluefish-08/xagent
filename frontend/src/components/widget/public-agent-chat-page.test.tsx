@@ -447,12 +447,9 @@ describe("PublicAgentChatPage", () => {
     expect(localStorage.getItem(taskKey)).toBeNull()
   })
 
-  it("clears stale run state when ending a conversation mid-run", async () => {
+  it("clears stale run state when ending a conversation", async () => {
     localStorage.setItem("widget_task_17_guest-1", "71")
     fetchMock.mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
-    // Once taskId nulls the socket closes, so no terminal event will ever
-    // reset this state; setTaskId(null) itself clears isProcessing.
-    app.state = { ...app.state, isProcessing: true }
 
     renderWidgetPage()
 
