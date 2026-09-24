@@ -10,6 +10,7 @@ const taskConversationPanelMock = vi.hoisted(() => vi.fn())
 const closeFilePreviewMock = vi.hoisted(() => vi.fn())
 const connectMcpDialogMock = vi.hoisted(() => vi.fn())
 const multiSelectMock = vi.hoisted(() => vi.fn())
+const appState = vi.hoisted(() => ({ isProcessing: false }))
 
 vi.mock("@/lib/api-wrapper", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api-wrapper")>(
@@ -37,7 +38,7 @@ vi.mock("@/contexts/app-context-chat", () => ({
       messages: [],
       traceEvents: [],
       currentTask: null,
-      isProcessing: false,
+      isProcessing: appState.isProcessing,
       isHistoryLoading: false,
       taskId: null,
       filePreview: { isOpen: false },
@@ -185,6 +186,7 @@ describe("AgentBuilder preview", () => {
     storedToolCategories = ["ssh"]
     putBody = undefined
     availableTools = []
+    appState.isProcessing = false
     apiRequestMock.mockReset()
     setTaskIdMock.mockReset()
     sendMessageMock.mockReset()
@@ -527,6 +529,30 @@ describe("AgentBuilder preview", () => {
       },
     })
     expect(closeFilePreviewMock).toHaveBeenCalledTimes(1)
+  })
+
+  describe("while another run left the shared app state processing", () => {
+    beforeEach(() => {
+      appState.isProcessing = true
+    })
+
+    it("clears processing when the preview resets on mount", async () => {
+      render(<AgentBuilder />)
+      await screen.findByText("send-preview-message")
+
+      expect(setTaskIdMock).toHaveBeenCalledWith(null, { navigate: false })
+      expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+    })
+
+    it("clears processing when the preview is cleared", async () => {
+      render(<AgentBuilder />)
+      await screen.findByText("send-preview-message")
+      dispatchMock.mockClear()
+
+      fireEvent.click(screen.getByTitle("common.clear"))
+
+      expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
+    })
   })
 
   it("does not show App Widget in the builder form (widget moved to Deploy dialog)", async () => {
