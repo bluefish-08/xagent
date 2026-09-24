@@ -1352,6 +1352,8 @@ async def _rollback_failed_ingestion(
         )
 
     def _compensate_file() -> None:
+        if uploaded_file_existed_before:
+            return
         if register_created and doc_id:
             remaining_records = _list_document_records_for_file_ids(
                 [file_record_id],
@@ -1372,7 +1374,7 @@ async def _rollback_failed_ingestion(
                 remaining_file_ids=remaining_file_ids,
             )
             db.commit()
-        elif not uploaded_file_existed_before:
+        else:
             UploadedFileStore(db).delete(file_record, delete_local=False)
             db.commit()
 
@@ -1416,8 +1418,12 @@ async def _rollback_failed_ingestion(
                 raise RuntimeError(
                     f"delete collection physical directory during rollback failed: {error_detail}"
                 )
+            # Only this run's own row may go; the directory pass would take any row.
+            own_file_ids = (
+                set() if uploaded_file_existed_before else collection_file_ids
+            )
             remaining_records = _list_document_records_for_file_ids(
-                collection_file_ids,
+                own_file_ids,
                 user_id=user_id,
                 is_admin=bool(user.is_admin),
             )
@@ -1431,9 +1437,9 @@ async def _rollback_failed_ingestion(
             delete_collection_uploaded_files(
                 db,
                 user_id=user_id,
-                collection_file_ids=collection_file_ids,
+                collection_file_ids=own_file_ids,
                 remaining_file_ids=remaining_file_ids,
-                collection_dir=physical_cleanup.collection_dir,
+                collection_dir=None,
             )
             if not uploaded_file_existed_before:
                 # The collection cleanup above may already delete+commit the UploadedFile
@@ -1545,6 +1551,8 @@ async def _rollback_failed_cloud_ingestion(
         )
 
     def _compensate_file() -> None:
+        if uploaded_file_existed_before:
+            return
         remaining_records = _list_document_records_for_file_ids(
             [file_record_id] if file_record_id is not None else [],
             user_id=user_id,
