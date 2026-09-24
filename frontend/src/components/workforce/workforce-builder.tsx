@@ -268,6 +268,8 @@ export function WorkforceBuilder({ workforceId }: WorkforceBuilderProps) {
         dispatch({ type: "SET_DAG_EXECUTION", payload: null })
         dispatch({ type: "SET_CURRENT_TASK", payload: null })
         dispatch({ type: "SET_HISTORY_LOADING", payload: false })
+        // Nulling taskId closes the socket, so no terminal WS event will clear this.
+        dispatch({ type: "SET_PROCESSING", payload: false })
         setTaskId(null, { navigate: false })
     }, [closeFilePreview, dispatch, setTaskId])
 

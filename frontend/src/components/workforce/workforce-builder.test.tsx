@@ -14,6 +14,8 @@ const routerPushMock = vi.hoisted(() => vi.fn())
 const searchParamsMock = vi.hoisted(() => new URLSearchParams())
 const translateMock = vi.hoisted(() => (key: string) => key)
 const sendMessageMock = vi.hoisted(() => vi.fn())
+const dispatchMock = vi.hoisted(() => vi.fn())
+const appState = vi.hoisted(() => ({ isProcessing: false }))
 
 // Spied rather than mocked via vi.mock: handleCreate now updates the address
 // bar via the native History API instead of router.replace/push, precisely
@@ -46,8 +48,8 @@ vi.mock("@/contexts/app-context-chat", () => ({
     sendMessage: sendMessageMock,
     setTaskId: vi.fn(),
     closeFilePreview: vi.fn(),
-    dispatch: vi.fn(),
-    state: { currentTask: null, traceEvents: [], filePreview: { isOpen: false, fileId: "", fileName: "", viewMode: "preview" } },
+    dispatch: dispatchMock,
+    state: { currentTask: null, isProcessing: appState.isProcessing, traceEvents: [], filePreview: { isOpen: false, fileId: "", fileName: "", viewMode: "preview" } },
   }),
 }))
 
@@ -108,6 +110,8 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     getWorkforceMock.mockReset()
     runWorkforceMock.mockReset()
     sendMessageMock.mockReset().mockResolvedValue(undefined)
+    dispatchMock.mockReset()
+    appState.isProcessing = false
     historyReplaceStateSpy.mockClear()
   })
 
@@ -584,6 +588,39 @@ describe("WorkforceBuilder — create mode (no workforceId)", () => {
     fireEvent.click(screen.getByText("Send Test"))
     await waitFor(() => {
       expect(runWorkforcePreviewMock).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it("clears processing when a config edit invalidates a still-running preview", async () => {
+    runWorkforcePreviewMock.mockResolvedValueOnce({
+      workforce_run_id: 1,
+      task_id: 42,
+      status: "running",
+      redirect_url: "/task/42",
+    })
+
+    render(<WorkforceBuilder />)
+    await waitFor(() => expect(listAgentOptionsMock).toHaveBeenCalledOnce())
+
+    fireEvent.click(screen.getByText("workforces.canvas.title"))
+    fireEvent.click(screen.getByText("workforces.canvas.chooseLead.title"))
+    fireEvent.click(await screen.findByText("Project Coordinator"))
+    fireEvent.click(screen.getByText("workforces.canvas.addFirstAgent.title"))
+    fireEvent.click(await screen.findByText("Web Researcher"))
+    await waitFor(() => {
+      expect(screen.queryByText("workforces.detail.addMemberTitle")).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Send Test"))
+    await waitFor(() => expect(runWorkforcePreviewMock).toHaveBeenCalledTimes(1))
+    appState.isProcessing = true
+    dispatchMock.mockClear()
+
+    fireEvent.click(screen.getByText("workforces.actions.addAgent"))
+    fireEvent.click(await screen.findByText("Silent Analyst"))
+
+    await waitFor(() => {
+      expect(dispatchMock).toHaveBeenCalledWith({ type: "SET_PROCESSING", payload: false })
     })
   })
 
