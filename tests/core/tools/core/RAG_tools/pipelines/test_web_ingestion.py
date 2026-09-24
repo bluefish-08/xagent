@@ -1,5 +1,6 @@
 """Unit tests for web ingestion pipeline."""
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,7 @@ from xagent.core.tools.core.RAG_tools.kb import (
 )
 from xagent.core.tools.core.RAG_tools.pipelines.web_ingestion import (
     _callback_accepts_ingestion_result,
+    _log_kept_path_only_file,
     run_web_ingestion,
 )
 from xagent.core.tools.core.RAG_tools.utils.string_utils import sanitize_for_doc_id
@@ -1634,6 +1636,7 @@ class TestHandlerWithoutFileCompensation:
     async def test_failed_page_keeps_the_file_and_reports_it(
         self,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
         failure: str,
         file_id: Optional[str],
         callbacks: dict[str, Any],
@@ -1655,7 +1658,10 @@ class TestHandlerWithoutFileCompensation:
             },
             "exception": {"side_effect": RuntimeError("boom")},
         }[failure]
-        reason = {"error_result": "embedding failed", "exception": "boom"}[failure]
+        reason, warning_prefix = {
+            "error_result": ("embedding failed", "Partial ingestion for"),
+            "exception": ("boom", "Failed to ingest"),
+        }[failure]
 
         def file_handler(
             temp_file_path: Path, title: str, collection: str, url: str
@@ -1663,6 +1669,7 @@ class TestHandlerWithoutFileCompensation:
             return {"file_path": str(stored_file), "file_id": file_id, **callbacks}
 
         module = "xagent.core.tools.core.RAG_tools.pipelines.web_ingestion"
+        caplog.set_level(logging.WARNING, logger=module)
         with (
             patch(f"{module}.WebCrawler") as mock_crawler_class,
             patch(
@@ -1697,6 +1704,7 @@ class TestHandlerWithoutFileCompensation:
         assert stored_file.read_text(encoding="utf-8") == "user data"
         assert result.status == "error"
         assert result.message == f"Web ingestion failed: {url} returned {reason}"
+        assert result.warnings == [f"{warning_prefix} {url}: {reason}"]
         assert result.side_effects_may_remain is remains
         outcome = operation_facade.last_outcome
         assert outcome is not None
@@ -1706,3 +1714,32 @@ class TestHandlerWithoutFileCompensation:
             remains,
             rollback_status,
         )
+        kept_logs = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and str(stored_file) in record.getMessage()
+        ]
+        assert kept_logs == (
+            []
+            if callbacks
+            else [
+                f"Kept file_handler file {stored_file} after ingestion of {url} "
+                "failed; declare file_compensation if it should be removed"
+            ]
+        )
+
+    def test_pipeline_temp_file_is_not_reported_as_kept(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        temp_file = tmp_path / "0_page.md"
+        module = "xagent.core.tools.core.RAG_tools.pipelines.web_ingestion"
+        with caplog.at_level(logging.WARNING, logger=module):
+            _log_kept_path_only_file(
+                {"file_path": str(temp_file), "file_id": "file-1"},
+                temp_file,
+                str(tmp_path),
+                "https://example.com/page1",
+            )
+
+        assert caplog.records == []
