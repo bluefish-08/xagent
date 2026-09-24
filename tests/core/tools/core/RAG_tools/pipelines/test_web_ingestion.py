@@ -1645,7 +1645,7 @@ class TestHandlerWithoutFileCompensation:
             operation_compatibility=operation_facade
         )
         stored_file = tmp_path / "stored.md"
-        stored_file.write_text("user data")
+        stored_file.write_text("user data", encoding="utf-8")
         url = "https://example.com/page1"
         ingest_patch: dict[str, Any] = {
             "error_result": {
@@ -1694,7 +1694,7 @@ class TestHandlerWithoutFileCompensation:
                 file_handler=file_handler,
             )
 
-        assert stored_file.read_text() == "user data"
+        assert stored_file.read_text(encoding="utf-8") == "user data"
         assert result.status == "error"
         assert result.message == f"Web ingestion failed: {url} returned {reason}"
         assert result.side_effects_may_remain is remains
