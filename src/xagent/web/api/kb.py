@@ -62,6 +62,7 @@ from ...core.tools.core.RAG_tools.core.schemas import (
     FusionConfig,
     IngestionConfig,
     IngestionResult,
+    IngestionStepResult,
     ListCollectionsResult,
     ParseMethod,
     ParseResultResponse,
@@ -816,6 +817,64 @@ def _ingested_document_identity(result: IngestionResult) -> tuple[bool, Optional
     return register_created, doc_id
 
 
+def _file_document_registered(collection_name: str, file_id: str) -> bool:
+    doc_id = generate_deterministic_doc_id(collection_name, file_id)
+    return (collection_name, doc_id) in _list_document_refs_for_uploaded_file(file_id)
+
+
+def _document_existed_before_ingest(
+    collection_name: str, existing_file_record: Optional[UploadedFile]
+) -> bool:
+    if existing_file_record is None:
+        return False
+    try:
+        return _file_document_registered(
+            collection_name, str(existing_file_record.file_id)
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Unknown counts as existing, so a raised ingest keeps the document.
+        logger.warning(
+            "Could not check for an existing document of %s in %s: %s",
+            existing_file_record.file_id,
+            collection_name,
+            exc,
+        )
+        return True
+
+
+def _raised_ingestion_rollback_result(
+    *,
+    collection_name: str,
+    file_id: str,
+    document_existed_before: bool,
+    message: str,
+) -> IngestionResult:
+    """Rebuild the document identity an ingest lost when it raised."""
+    doc_id = generate_deterministic_doc_id(collection_name, file_id)
+    try:
+        registered = _file_document_registered(collection_name, file_id)
+    except Exception:  # noqa: BLE001
+        # Unknown counts as registered: deleting a missing new document stops the
+        # rollback before FILE; a pre-existing one only has its status cleared.
+        registered = True
+    completed_steps = (
+        [
+            IngestionStepResult(
+                name="register_document",
+                metadata={"doc_id": doc_id, "created": not document_existed_before},
+            )
+        ]
+        if registered
+        else []
+    )
+    return IngestionResult(
+        status="error",
+        doc_id=doc_id,
+        completed_steps=completed_steps,
+        message=message,
+    )
+
+
 def _restore_ingest_file_backup(
     *,
     file_path: Path,
@@ -1451,14 +1510,15 @@ async def _rollback_failed_ingestion(
             )
             db.commit()
 
-        # Comparing doc_ids, not file_ids: two ingests of the same path share a
-        # file_id, so a file_id match cannot tell a sibling's work from ours.
+        # Any record but the document this run created counts as another's, so a
+        # pre-existing document under the same doc_id blocks the collection delete.
         delete_whole_collection = await _rollback_may_delete_collection(
             collection_name=collection_name,
             user_id=user_id,
             collection_existed_before=collection_existed_before,
             other_document_present=any(
-                (
+                not register_created
+                or (
                     record.get("doc_id")
                     if isinstance(record, dict)
                     else getattr(record, "doc_id", None)
@@ -3848,6 +3908,9 @@ async def ingest(
         .first()
     )
     uploaded_file_existed_before = existing_file_record is not None
+    document_existed_before = _document_existed_before_ingest(
+        safe_collection, existing_file_record
+    )
     had_existing_file = file_path.exists()
     file_backup_path: Optional[Path] = None
     if had_existing_file:
@@ -4046,9 +4109,10 @@ async def ingest(
         raise
     except Exception:
         if file_record is not None:
-            rollback_result = IngestionResult(
-                status="error",
-                doc_id=safe_filename,
+            rollback_result = _raised_ingestion_rollback_result(
+                collection_name=safe_collection,
+                file_id=str(file_record.file_id),
+                document_existed_before=document_existed_before,
                 message="Ingestion setup failed before completion.",
             )
             rollback_api_result = KBApiOperationResult(result=rollback_result)
@@ -4629,11 +4693,14 @@ async def ingest_cloud(
                             )
                         return rollback_execution.operation_result
 
-                    uploaded_file_existed_before = (
+                    existing_file_record = (
                         db.query(UploadedFile)
                         .filter(UploadedFile.storage_path == str(file_path))
                         .first()
-                        is not None
+                    )
+                    uploaded_file_existed_before = existing_file_record is not None
+                    document_existed_before = _document_existed_before_ingest(
+                        safe_collection, existing_file_record
                     )
 
                     file_record = _upsert_uploaded_file_record(
@@ -4712,6 +4779,12 @@ async def ingest_cloud(
                             doc_id=source_filename,
                             message=f"Ingestion failed: {str(e)}",
                         )
+                        raised_result = _raised_ingestion_rollback_result(
+                            collection_name=safe_collection,
+                            file_id=str(file_record.file_id),
+                            document_existed_before=document_existed_before,
+                            message=rollback_result.message,
+                        )
                         rollback_api_result = KBApiOperationResult(
                             result=rollback_result,
                             operation_outcome=api_result.operation_outcome
@@ -4724,7 +4797,7 @@ async def ingest_cloud(
                                 db=db,
                                 user=_user,
                                 collection_name=safe_collection,
-                                result=rollback_result,
+                                result=raised_result,
                                 file_path=file_path,
                                 file_record=file_record,
                                 collection_existed_before=collection_existed_before,
