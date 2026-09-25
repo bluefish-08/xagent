@@ -359,6 +359,7 @@ def test_ingest_cloud_raised_ingestion_clears_status_by_real_doc_id(
 
     assert response.status_code == 200
     assert response.json()[0]["doc_id"] == "cloud.csv"
+    assert response.json()[0]["message"] == "Ingestion failed: parser crashed"
     clear_status.assert_called_once_with(
         "cloud_coll",
         generate_deterministic_doc_id("cloud_coll", seen["file_id"]),

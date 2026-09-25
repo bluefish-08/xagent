@@ -621,6 +621,7 @@ def test_ingest_setup_failure_clears_status_by_real_doc_id(
     )
 
     assert response.status_code == 500
+    assert not response.json()["detail"].startswith("Failed to fully roll back")
     clear_status.assert_called_once_with(
         "coll",
         generate_deterministic_doc_id("coll", seen["file_id"]),
