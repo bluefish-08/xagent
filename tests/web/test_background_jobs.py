@@ -947,7 +947,9 @@ def test_kb_document_job_without_target_path_fails_before_ingestion(
         ingest.assert_not_called()
         assert isinstance(info.value, BackgroundJobHandlerError)
         assert info.value.retryable is False
-        assert "target_path" in str(info.value)
+        assert str(info.value) == (
+            "Document ingest job payload has no target_path; resubmit the upload"
+        )
         db.refresh(job)
         assert job.progress["message"] == "Queued"
     finally:
