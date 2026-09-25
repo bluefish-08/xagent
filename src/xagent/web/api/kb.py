@@ -822,27 +822,28 @@ def _file_document_registered(collection_name: str, file_id: str) -> bool:
     return (collection_name, doc_id) in _list_document_refs_for_uploaded_file(file_id)
 
 
-def _document_existed_before_ingest(
+async def _document_existed_before_ingest(
     collection_name: str, existing_file_record: Optional[UploadedFile]
 ) -> bool:
     if existing_file_record is None:
         return False
+    file_id = str(existing_file_record.file_id)
     try:
-        return _file_document_registered(
-            collection_name, str(existing_file_record.file_id)
+        return await asyncio.to_thread(
+            _file_document_registered, collection_name, file_id
         )
     except Exception as exc:  # noqa: BLE001
         # Unknown counts as existing, so a raised ingest keeps the document.
         logger.warning(
             "Could not check for an existing document of %s in %s: %s",
-            existing_file_record.file_id,
+            file_id,
             collection_name,
             exc,
         )
         return True
 
 
-def _raised_ingestion_rollback_result(
+async def _raised_ingestion_rollback_result(
     *,
     collection_name: str,
     file_id: str,
@@ -852,10 +853,18 @@ def _raised_ingestion_rollback_result(
     """Rebuild the document identity an ingest lost when it raised."""
     doc_id = generate_deterministic_doc_id(collection_name, file_id)
     try:
-        registered = _file_document_registered(collection_name, file_id)
+        registered = await asyncio.to_thread(
+            _file_document_registered, collection_name, file_id
+        )
     except Exception:  # noqa: BLE001
         # Unknown counts as registered: deleting a missing new document stops the
         # rollback before FILE; a pre-existing one only has its status cleared.
+        logger.warning(
+            "Could not check whether document %s is registered in %s",
+            doc_id,
+            collection_name,
+            exc_info=True,
+        )
         registered = True
     completed_steps = (
         [
@@ -1510,8 +1519,8 @@ async def _rollback_failed_ingestion(
             )
             db.commit()
 
-        # Any record but the document this run created counts as another's, so a
-        # pre-existing document under the same doc_id blocks the collection delete.
+        # Compare doc_ids, not file_ids (same-path ingests share a file_id); any
+        # record but the document this run created counts as another's.
         delete_whole_collection = await _rollback_may_delete_collection(
             collection_name=collection_name,
             user_id=user_id,
@@ -3908,7 +3917,7 @@ async def ingest(
         .first()
     )
     uploaded_file_existed_before = existing_file_record is not None
-    document_existed_before = _document_existed_before_ingest(
+    document_existed_before = await _document_existed_before_ingest(
         safe_collection, existing_file_record
     )
     had_existing_file = file_path.exists()
@@ -4109,7 +4118,7 @@ async def ingest(
         raise
     except Exception:
         if file_record is not None:
-            rollback_result = _raised_ingestion_rollback_result(
+            rollback_result = await _raised_ingestion_rollback_result(
                 collection_name=safe_collection,
                 file_id=str(file_record.file_id),
                 document_existed_before=document_existed_before,
@@ -4699,7 +4708,7 @@ async def ingest_cloud(
                         .first()
                     )
                     uploaded_file_existed_before = existing_file_record is not None
-                    document_existed_before = _document_existed_before_ingest(
+                    document_existed_before = await _document_existed_before_ingest(
                         safe_collection, existing_file_record
                     )
 
@@ -4779,7 +4788,7 @@ async def ingest_cloud(
                             doc_id=source_filename,
                             message=f"Ingestion failed: {str(e)}",
                         )
-                        raised_result = _raised_ingestion_rollback_result(
+                        raised_result = await _raised_ingestion_rollback_result(
                             collection_name=safe_collection,
                             file_id=str(file_record.file_id),
                             document_existed_before=document_existed_before,
