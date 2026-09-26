@@ -829,7 +829,14 @@ async def _document_existed_before_ingest(
 ) -> bool:
     if existing_file_record is None:
         return False
-    file_id = str(existing_file_record.file_id)
+    return await _file_document_existed_before_ingest(
+        collection_name, str(existing_file_record.file_id)
+    )
+
+
+async def _file_document_existed_before_ingest(
+    collection_name: str, file_id: str
+) -> bool:
     try:
         return await asyncio.to_thread(
             _file_document_registered, collection_name, file_id
@@ -4261,6 +4268,10 @@ async def create_ingest_job(
         if existing_file_record is not None
         else _background_ingest_file_id(user_id=int(_user.id), storage_path=file_path)
     )
+    # Checked even without a row: the uuid5 file_id can match an earlier document.
+    document_existed_before = await _file_document_existed_before_ingest(
+        safe_collection, file_id
+    )
     staged_file_path = _build_background_ingest_staging_path(
         user_id=int(_user.id),
         filename=safe_filename,
@@ -4351,6 +4362,7 @@ async def create_ingest_job(
         "is_admin": bool(_user.is_admin),
         "ingestion_config": config.model_dump(mode="json"),
         "collection_existed_before": collection_existed_before,
+        "document_existed_before": document_existed_before,
     }
 
     try:

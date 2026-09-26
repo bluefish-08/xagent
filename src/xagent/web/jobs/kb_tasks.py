@@ -239,9 +239,11 @@ def handle_kb_ingest_document(db: Session, job: BackgroundJob) -> dict[str, Any]
             context="background staged document superseded exception",
         )
         return _superseded_staged_document_result(payload)
-    except Exception:
+    except Exception as exc:
         if int(job.attempts or 0) >= int(job.max_attempts or 1):
-            _cleanup_staged_document_input(payload)
+            # Last attempt only: a retry re-registers the same doc_id and reuses
+            # its parse, chunk and embedding rows.
+            _rollback_raised_staged_document_ingestion(db, payload, exc)
         _cleanup_failed_staged_job_collection_metadata_if_current(
             db,
             payload,
@@ -694,6 +696,31 @@ def _rollback_failed_staged_document_ingestion_if_current(
         payload,
         result,
         api_result=api_result,
+    )
+
+
+def _rollback_raised_staged_document_ingestion(
+    db: Session,
+    payload: dict[str, Any],
+    exc: Exception,
+) -> None:
+    from ..api.kb import _raised_ingestion_rollback_result
+
+    file_id = payload.get("file_id")
+    if not file_id:
+        _cleanup_staged_document_input(payload)
+        return
+    result = asyncio.run(
+        _raised_ingestion_rollback_result(
+            collection_name=str(payload["collection"]),
+            file_id=str(file_id),
+            # Stamped at submit; a job queued before the stamp keeps the document.
+            document_existed_before=bool(payload.get("document_existed_before", True)),
+            message=str(exc),
+        )
+    )
+    _rollback_failed_staged_document_ingestion_if_current(
+        db, payload, result, api_result=KBApiOperationResult(result=result)
     )
 
 
