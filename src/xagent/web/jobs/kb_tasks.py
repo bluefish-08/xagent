@@ -707,21 +707,30 @@ def _rollback_raised_staged_document_ingestion(
     from ..api.kb import _raised_ingestion_rollback_result
 
     file_id = payload.get("file_id")
-    if not file_id:
-        _cleanup_staged_document_input(payload)
-        return
-    result = asyncio.run(
-        _raised_ingestion_rollback_result(
-            collection_name=str(payload["collection"]),
-            file_id=str(file_id),
-            # Stamped at submit; a job queued before the stamp keeps the document.
-            document_existed_before=bool(payload.get("document_existed_before", True)),
-            message=str(exc),
+    try:
+        if not file_id or not _is_staged_document_generation_latest(db, payload):
+            return
+        result = asyncio.run(
+            _raised_ingestion_rollback_result(
+                collection_name=str(payload["collection"]),
+                file_id=str(file_id),
+                # Stamped at submit; a job queued before the stamp keeps the document.
+                document_existed_before=bool(
+                    payload.get("document_existed_before", True)
+                ),
+                message=str(exc),
+            )
+        ).model_copy(update={"file_id": str(file_id)})
+        _rollback_failed_staged_document_ingestion(
+            db, payload, result, api_result=KBApiOperationResult(result=result)
         )
-    )
-    _rollback_failed_staged_document_ingestion_if_current(
-        db, payload, result, api_result=KBApiOperationResult(result=result)
-    )
+    except BackgroundJobHandlerError:
+        raise
+    except Exception:
+        # Only the rollback's own verdict may replace the ingest error.
+        raise exc
+    finally:
+        _cleanup_staged_document_input(payload)
 
 
 def _publish_staged_document_ingestion(

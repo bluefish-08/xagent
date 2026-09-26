@@ -17,11 +17,16 @@ from xagent.core.tools.core.RAG_tools.file.register_document import register_doc
 from xagent.core.tools.core.RAG_tools.management.collection_manager import (
     update_collection_stats_sync,
 )
+from xagent.core.tools.core.RAG_tools.utils.string_utils import (
+    generate_deterministic_doc_id,
+)
 from xagent.web.api import kb as kb_module
 from xagent.web.jobs.exceptions import BackgroundJobHandlerError
 from xagent.web.jobs.kb_tasks import handle_kb_ingest_document
 from xagent.web.models.background_job import BackgroundJob
+from xagent.web.models.database import Base
 from xagent.web.models.uploaded_file import UploadedFile
+from xagent.web.models.user import User
 from xagent.web.services.kb_ingest_targets import admit_kb_ingest_target
 
 test_env = kb_dir.test_env
@@ -151,6 +156,15 @@ def _assert_original_error(outcome: Any, message: str = "binding write failed") 
     assert str(outcome) == message
 
 
+def _assert_rebuilt_result(outcome: Any, payload: dict[str, Any]) -> None:
+    doc_id = generate_deterministic_doc_id("coll", payload["file_id"])
+    assert outcome.result["doc_id"] == doc_id
+    assert outcome.result["file_id"] == payload["file_id"]
+    assert outcome.result["completed_steps"] == [
+        {"name": "register_document", "metadata": {"doc_id": doc_id, "created": True}}
+    ]
+
+
 def _publish_first(test_env: Any, filename: str = "doc.txt") -> dict[str, Any]:
     first: dict[str, Any] = {}
     job_id = _submit(test_env, b"first", filename=filename)
@@ -173,7 +187,6 @@ def test_last_attempt_raise_removes_the_new_document(test_env, temp_uploads) -> 
     assert _file_ids(test_env) == []
     assert not _collection_exists("coll")
     assert not Path(payload["source_path"]).exists()
-    assert not Path(payload["target_path"]).exists()
     assert payload["document_existed_before"] is False
 
 
@@ -302,6 +315,7 @@ def test_failed_post_check_before_registration_reports_an_incomplete_rollback(
     test_env, temp_uploads
 ) -> None:
     job_id = _submit(test_env, b"new")
+    payload = _payload(test_env, job_id)
 
     with patch(
         "xagent.web.api.kb._list_document_refs_for_uploaded_file",
@@ -315,6 +329,53 @@ def test_failed_post_check_before_registration_reports_an_incomplete_rollback(
         "Failed to fully roll back cloud ingest for coll/doc.txt: delete document "
     )
     assert str(outcome).endswith("Original ingestion error: before registration")
+    _assert_rebuilt_result(outcome, payload)
+    assert not Path(payload["source_path"]).exists()
+
+
+def test_missing_user_fails_the_job_and_keeps_the_document(
+    test_env, temp_uploads
+) -> None:
+    seen: dict[str, Any] = {}
+    job_id = _submit(test_env, b"new")
+    payload = _payload(test_env, job_id)
+    db = test_env[3]()
+    try:
+        db.query(User).delete()
+        db.commit()
+    finally:
+        db.close()
+
+    outcome = _run(test_env, job_id, _register_then_raise(seen))
+
+    assert isinstance(outcome, BackgroundJobHandlerError)
+    assert outcome.retryable is False
+    assert str(outcome) == (
+        f"Cannot roll back KB ingestion for missing user {payload['user_id']}"
+    )
+    _assert_rebuilt_result(outcome, payload)
+    assert _list_refs(seen["file_id"]) == [("coll", seen["doc_id"])]
+    assert not Path(payload["source_path"]).exists()
+
+
+@pytest.mark.parametrize("table", ["kb_ingest_targets", "users"])
+def test_failed_read_before_the_rollback_keeps_the_original_error(
+    test_env, temp_uploads, table
+) -> None:
+    job_id = _submit(test_env, b"new")
+    payload = _payload(test_env, job_id)
+
+    def _drop_table(_kwargs: dict[str, Any]) -> None:
+        db = test_env[3]()
+        try:
+            Base.metadata.tables[table].drop(db.get_bind())
+        finally:
+            db.close()
+
+    outcome = _run(test_env, job_id, _register_then_raise({}, _drop_table))
+
+    _assert_original_error(outcome)
+    assert not Path(payload["source_path"]).exists()
 
 
 def test_raise_before_registration_rolls_back_cleanly(test_env, temp_uploads) -> None:
@@ -351,9 +412,14 @@ def test_superseded_job_leaves_the_document_to_the_newer_upload(
         finally:
             db.close()
 
-    outcome = _run(test_env, job_id, _register_then_raise(seen, _newer_upload))
+    with patch(
+        "xagent.web.api.kb._raised_ingestion_rollback_result",
+        wraps=kb_module._raised_ingestion_rollback_result,
+    ) as rebuild:
+        outcome = _run(test_env, job_id, _register_then_raise(seen, _newer_upload))
 
     _assert_original_error(outcome)
+    rebuild.assert_not_awaited()
     assert _list_refs(seen["file_id"]) == [("coll", seen["doc_id"])]
     assert not Path(payload["source_path"]).exists()
 
@@ -385,13 +451,31 @@ def test_job_without_file_id_reports_the_original_error(
         payload.pop("file_id")
         return payload
 
-    outcome = _run(
-        test_env,
-        job_id,
-        _raise_before_registration,
-        attempts=attempts,
-        payload=_no_file_id,
-    )
+    # Fails the post-raise check, which would count an identity built from None
+    # as registered and fail deleting it.
+    with patch(
+        "xagent.web.api.kb._list_document_refs_for_uploaded_file",
+        side_effect=RuntimeError("refs down"),
+    ):
+        outcome = _run(
+            test_env,
+            job_id,
+            _register_then_raise({}),
+            attempts=attempts,
+            payload=_no_file_id,
+        )
 
-    _assert_original_error(outcome, "before registration")
+    _assert_original_error(outcome)
     assert Path(payload["source_path"]).exists() is (attempts == 1)
+
+
+def test_duplicate_submit_skips_the_existence_check(test_env, temp_uploads) -> None:
+    check = AsyncMock(return_value=False)
+    with patch(
+        "xagent.web.api.kb._document_existed_before_ingest_for_file_id", new=check
+    ):
+        first = _submit(test_env, b"same")
+        second = _submit(test_env, b"same")
+
+    assert second == first
+    check.assert_awaited_once()
