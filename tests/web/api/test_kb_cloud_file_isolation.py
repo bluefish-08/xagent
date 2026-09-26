@@ -1,4 +1,6 @@
-"""One /ingest-cloud file cannot reach another file or the request (#2664)."""
+"""Each /ingest-cloud file reads credentials in its own Session, and one file
+raising cannot end the request (#2664).
+"""
 
 from __future__ import annotations
 
@@ -57,6 +59,8 @@ def test_credentials_are_read_in_a_session_the_worker_owns(
     _connect_drive(test_env, monkeypatch)
     request_sessions: list[Any] = []
     credential_sessions: list[Any] = []
+    loop_threads: list[int] = []
+    credential_threads: list[int] = []
     original_override = app.dependency_overrides[get_db]
 
     def _recording_get_db():
@@ -64,8 +68,12 @@ def test_credentials_are_read_in_a_session_the_worker_owns(
             request_sessions.append(db)
             yield db
 
+    def _on_loop(*_args, **_kwargs):
+        loop_threads.append(threading.get_ident())
+
     def _spy(user_id, db, account_id=None):
         credential_sessions.append(db)
+        credential_threads.append(threading.get_ident())
         return cloud_storage.get_google_credentials(user_id, db, account_id)
 
     app.dependency_overrides[get_db] = _recording_get_db
@@ -77,6 +85,7 @@ def test_credentials_are_read_in_a_session_the_worker_owns(
                 patch(
                     "xagent.web.api.kb._ensure_collection_access",
                     new_callable=AsyncMock,
+                    side_effect=_on_loop,
                 ),
                 patch("xagent.web.api.kb.get_collection_sync", return_value=object()),
             ):
@@ -99,6 +108,8 @@ def test_credentials_are_read_in_a_session_the_worker_owns(
         id(db) for db in request_sessions
     }
     assert not any(db.in_transaction() for db in credential_sessions)
+    assert len(loop_threads) == 1
+    assert loop_threads[0] not in credential_threads
 
 
 def test_concurrent_credential_reads_all_see_the_connected_account(

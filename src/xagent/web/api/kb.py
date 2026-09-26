@@ -4824,6 +4824,8 @@ async def ingest_cloud(
             logger.error(
                 "Cloud ingest of %s raised", file_info.fileName, exc_info=outcome
             )
+            # Only steps before the first ingest write can raise out of process_file;
+            # later steps must catch their own errors or this entry hides their writes.
             outcome = KBApiOperationResult(
                 result=IngestionResult(
                     status="error",
