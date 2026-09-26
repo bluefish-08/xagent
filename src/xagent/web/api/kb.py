@@ -3930,7 +3930,9 @@ async def ingest(
         .filter(UploadedFile.storage_path == str(file_path))
         .first()
     )
-    uploaded_file_existed_before = existing_file_record is not None
+    existing_file_id = (
+        str(existing_file_record.file_id) if existing_file_record is not None else None
+    )
     document_existed_before = await _document_existed_before_ingest(
         safe_collection, existing_file_record
     )
@@ -4041,6 +4043,12 @@ async def ingest(
             storage_path=file_path,
             mime_type=mime_type,
             file_size=int(total_size),
+        )
+        # An insert gets a fresh file_id, so a fresh doc id; only an in-place update
+        # keeps the ones the lookup found.
+        uploaded_file_existed_before = str(file_record.file_id) == existing_file_id
+        document_existed_before = (
+            document_existed_before and uploaded_file_existed_before
         )
 
         def _run_ingestion() -> KBApiOperationResult[IngestionResult]:
@@ -4721,7 +4729,11 @@ async def ingest_cloud(
                         .filter(UploadedFile.storage_path == str(file_path))
                         .first()
                     )
-                    uploaded_file_existed_before = existing_file_record is not None
+                    existing_file_id = (
+                        str(existing_file_record.file_id)
+                        if existing_file_record is not None
+                        else None
+                    )
                     document_existed_before = await _document_existed_before_ingest(
                         safe_collection, existing_file_record
                     )
@@ -4733,6 +4745,14 @@ async def ingest_cloud(
                         storage_path=file_path,
                         mime_type=stored_mime_type,
                         file_size=int(file_path.stat().st_size),
+                    )
+                    # An insert gets a fresh file_id, so a fresh doc id; only an
+                    # in-place update keeps the ones the lookup found.
+                    uploaded_file_existed_before = (
+                        str(file_record.file_id) == existing_file_id
+                    )
+                    document_existed_before = (
+                        document_existed_before and uploaded_file_existed_before
                     )
 
                     # Run ingestion (blocking)
