@@ -996,7 +996,6 @@ async def test_unreadable_config_does_not_overwrite_an_existing_collection(
     async def _unreadable(**kwargs: Any) -> Any:
         raise RuntimeError("config store down")
 
-    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
     monkeypatch.setattr(
         kb_module,
         "_get_api_compatibility_facade",
@@ -1031,7 +1030,6 @@ async def test_unreadable_config_still_publishes_a_new_collection(
     async def _unreadable(**kwargs: Any) -> Any:
         raise RuntimeError("config store down")
 
-    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
     monkeypatch.setattr(
         kb_module,
         "_get_api_compatibility_facade",
@@ -1113,7 +1111,6 @@ async def test_config_save_failure_advice_matches_what_the_user_can_do(
     async def _no_existing_config(**kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(kb_module, "list_document_records", _records_lookup([{"d": 1}]))
     monkeypatch.setattr(
         kb_module,
         "_get_api_compatibility_facade",
