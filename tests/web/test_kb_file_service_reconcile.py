@@ -798,8 +798,15 @@ def test_reconcile_looks_up_and_cascades_through_the_facades_store(reconcile_env
     db.close()
 
 
-def test_reconcile_counts_a_store_outage_after_cached_statuses(reconcile_env):
+def test_reconcile_counts_a_store_outage_after_cached_statuses(
+    reconcile_env, monkeypatch: pytest.MonkeyPatch
+):
     _docs_table, session_local, uploads_dir = reconcile_env
+    monkeypatch.setattr(
+        kb_file_service,
+        "_file_status_cache",
+        kb_file_service._FileStatusCache(ttl_seconds=3600),
+    )
     a, b = _old_uploads(session_local, uploads_dir, "a.md", "b.md")
     store = _OtherBackend(
         docs=[

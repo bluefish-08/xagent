@@ -164,7 +164,7 @@ def _file_service_offenders(source: str, package: str = "") -> list[tuple[int, s
     offenders = [
         (lineno, mod)
         for lineno, mod in _imported_modules(source, package)
-        if any(sub in mod for sub in FILE_SERVICE_FORBIDDEN_SUBSTRINGS)
+        if any(sub in mod.lower() for sub in FILE_SERVICE_FORBIDDEN_SUBSTRINGS)
     ]
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.alias):
@@ -194,6 +194,8 @@ def test_file_service_guard_flags_direct_lancedb_access() -> None:
         "get_connection_from_env()\n"
         "store._get_connection()\n"
         "store._get_table('documents')\n"
+        "from ..LanceDB import model_tag_utils\n"
+        "import xagent.core.tools.core.RAG_tools.LanceDB as ldb\n"
     )
     offenders = set(_file_service_offenders(snippet, "xagent.web.services"))
     assert {
@@ -206,6 +208,8 @@ def test_file_service_guard_flags_direct_lancedb_access() -> None:
         (6, "get_connection_from_env"),
         (7, "_get_connection"),
         (8, "_get_table"),
+        (9, "xagent.web.LanceDB"),
+        (10, "xagent.core.tools.core.RAG_tools.LanceDB"),
     } <= offenders
 
 
