@@ -2771,6 +2771,38 @@ class TestGetSandboxAllowLocalFallbackOnCapacity:
             assert get_sandbox_allow_local_fallback_on_capacity() is False
 
 
+class TestCheckpointGateStallWarningConfig:
+    """Config for reporting a long-held exclusive checkpoint section."""
+
+    def test_defaults_to_30_seconds(self, monkeypatch):
+        from xagent.config import (
+            CHECKPOINT_GATE_STALL_WARNING_SECONDS,
+            get_checkpoint_gate_stall_warning_seconds,
+        )
+
+        monkeypatch.delenv(CHECKPOINT_GATE_STALL_WARNING_SECONDS, raising=False)
+        assert get_checkpoint_gate_stall_warning_seconds() == 30.0
+
+    def test_env_override(self, monkeypatch):
+        from xagent.config import (
+            CHECKPOINT_GATE_STALL_WARNING_SECONDS,
+            get_checkpoint_gate_stall_warning_seconds,
+        )
+
+        monkeypatch.setenv(CHECKPOINT_GATE_STALL_WARNING_SECONDS, "2.5")
+        assert get_checkpoint_gate_stall_warning_seconds() == 2.5
+
+    @pytest.mark.parametrize("value", ["abc", "0", "-1", "nan", "inf"])
+    def test_invalid_values_fall_back(self, monkeypatch, value):
+        from xagent.config import (
+            CHECKPOINT_GATE_STALL_WARNING_SECONDS,
+            get_checkpoint_gate_stall_warning_seconds,
+        )
+
+        monkeypatch.setenv(CHECKPOINT_GATE_STALL_WARNING_SECONDS, value)
+        assert get_checkpoint_gate_stall_warning_seconds() == 30.0
+
+
 class TestCompactThresholdConfig:
     """Config for context-compaction threshold derivation."""
 
@@ -3025,6 +3057,15 @@ def test_default_task_execution_host_configuration_is_self_contained(monkeypatch
     assert config.get_task_execution_role() == "combined"
     assert config.get_channel_ingress_enabled() is False
     config.validate_task_execution_host_config()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "invalid"])
+def test_local_host_rejects_invalid_runtime_secret_ttl_at_startup(monkeypatch, value):
+    monkeypatch.setenv(config.SHARED_TASK_EXECUTION_ENABLED, "false")
+    monkeypatch.setenv(config.TASK_EXECUTION_ROLE, "combined")
+    monkeypatch.setenv(config.TASK_RUNTIME_SECRETS_TTL_SECONDS, value)
+    with pytest.raises(ValueError):
+        config.validate_task_execution_host_config()
 
 
 @pytest.mark.parametrize("value", ["", " ", "deployment/channel"])

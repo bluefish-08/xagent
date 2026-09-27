@@ -157,6 +157,7 @@ TASK_RUNTIME_HOOK_QUEUE_TIMEOUT_SECONDS = (
 )
 CHECKPOINT_ENCODING_V2 = "XAGENT_CHECKPOINT_ENCODING_V2"
 CHECKPOINT_HISTORY_LIMIT = "XAGENT_CHECKPOINT_HISTORY_LIMIT"
+CHECKPOINT_GATE_STALL_WARNING_SECONDS = "XAGENT_CHECKPOINT_GATE_STALL_WARNING_SECONDS"
 ASYNC_TRACE_DB_ENABLED = "XAGENT_ASYNC_TRACE_DB_ENABLED"
 TRACE_DB_MAX_INFLIGHT = "XAGENT_TRACE_DB_MAX_INFLIGHT"
 COMPACT_THRESHOLD_RATIO = "XAGENT_COMPACT_THRESHOLD_RATIO"
@@ -835,13 +836,14 @@ def get_channel_ingress_enabled() -> bool:
 
 
 def validate_task_execution_host_config() -> None:
-    """Reject incomplete shared deployments before accepting tasks."""
+    """Reject invalid execution configuration before accepting tasks."""
     role = get_task_execution_role()
     if not get_shared_task_execution_enabled():
         if role != "combined":
             raise ValueError(
                 f"{TASK_EXECUTION_ROLE}={role} requires {SHARED_TASK_EXECUTION_ENABLED}"
             )
+        get_task_runtime_secrets_ttl_seconds()
         return
     if not get_redis_url():
         raise ValueError(f"{SHARED_TASK_EXECUTION_ENABLED} requires {REDIS_URL}")
@@ -1111,6 +1113,27 @@ def get_checkpoint_history_limit() -> int:
         The number of checkpoint rows to keep per execution (>= 0).
     """
     return _get_positive_int_env(CHECKPOINT_HISTORY_LIMIT, 8, minimum=0)
+
+
+def get_checkpoint_gate_stall_warning_seconds() -> float:
+    """Seconds an exclusive checkpoint section may run before it is reported.
+
+    The section is never timed out: abandoning a write that may still land
+    would create the uncertain outcome it exists to rule out. Crossing this
+    threshold only logs a warning and counts a stall, repeating each interval
+    while the section is still held.
+
+    Priority:
+        1. XAGENT_CHECKPOINT_GATE_STALL_WARNING_SECONDS environment variable
+        2. Default ``30``
+
+    Invalid or non-positive values fall back to the default.
+
+    Returns:
+        The stall warning interval in seconds.
+    """
+    value = _get_positive_float_env(CHECKPOINT_GATE_STALL_WARNING_SECONDS, 30.0)
+    return 30.0 if value is None else value
 
 
 def get_compact_threshold_ratio() -> float:
