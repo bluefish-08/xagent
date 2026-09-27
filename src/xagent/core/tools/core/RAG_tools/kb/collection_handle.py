@@ -364,13 +364,20 @@ class KBCollectionHandle(ABC):
     def capture_document_rows(
         self, doc_ids: Sequence[str], *, user_id: int, is_admin: bool
     ) -> KBDocumentRowsSnapshot:
-        """Capture these documents' rows in the caller's scope, across tables."""
+        """Capture these documents' rows across the document and embedding tables.
+
+        Non-admin reads are limited to ``user_id`` on tables with that column.
+        """
 
     @abstractmethod
     def restore_document_rows(
         self, snapshot: KBDocumentRowsSnapshot, *, user_id: int, is_admin: bool
     ) -> None:
-        """Put the snapshot's rows back and delete newer ones in the caller's scope."""
+        """Upsert the snapshot's rows and delete its documents' rows it lacks.
+
+        Reads and deletes are limited to ``user_id`` on tables with that column;
+        upserts match by row key only.
+        """
 
     # --- Parse data-plane (#509) ---
 
@@ -1342,6 +1349,11 @@ class LanceDBCollectionHandle(KBCollectionHandle):
 
         Non-admin reads are limited to ``user_id`` on tables with that column.
         """
+        if isinstance(doc_ids, str):
+            raise DocumentValidationError(
+                "doc_ids must be a sequence of ids, not a str"
+            )
+        doc_ids = tuple(doc_ids)
         conn = self._document_row_connection()
         table_names = set(list_table_names(conn))
         target_tables = [name for name in _DOCUMENT_ROW_KEYS if name in table_names]
@@ -1360,7 +1372,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                 _safe_close_table(table)
         return KBDocumentRowsSnapshot(
             collection=self.context.collection,
-            doc_ids=tuple(doc_ids),
+            doc_ids=doc_ids,
             rows_by_table=rows_by_table,
         )
 
@@ -1369,14 +1381,27 @@ class LanceDBCollectionHandle(KBCollectionHandle):
     ) -> None:
         """Restore a :meth:`capture_document_rows` snapshot table by table.
 
-        In the caller's scope, rows of the snapshot's documents that it does
-        not hold are deleted, so rows written after the capture do not survive.
+        Rows of the snapshot's documents that it does not hold are deleted, so
+        rows written after the capture do not survive. Reads and deletes are
+        limited to ``user_id`` on tables with that column; upserts match by row
+        key only.
         """
         if snapshot.collection != self.context.collection:
             raise DocumentValidationError(
                 f"Handle bound to collection {self.context.collection!r} "
                 f"cannot restore a snapshot from {snapshot.collection!r}"
             )
+        for rows in snapshot.rows_by_table.values():
+            for row in rows:
+                if (
+                    row.get("collection") != self.context.collection
+                    or row.get("doc_id") not in snapshot.doc_ids
+                ):
+                    raise DocumentValidationError(
+                        f"Snapshot of {self.context.collection!r} holds a row of "
+                        f"{row.get('collection')!r}/{row.get('doc_id')!r} "
+                        "outside its documents"
+                    )
         conn = self._document_row_connection()
         table_names = set(list_table_names(conn))
         restore_tables = [

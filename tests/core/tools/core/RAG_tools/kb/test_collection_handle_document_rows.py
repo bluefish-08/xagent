@@ -64,7 +64,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _seed_document(collection: str, doc_id: str, *, source: str = "old") -> None:
+def _seed_document(
+    collection: str, doc_id: str, *, source: str = "old", user_id: int = 1
+) -> None:
     get_vector_index_store().upsert_documents(
         [
             {
@@ -77,13 +79,15 @@ def _seed_document(collection: str, doc_id: str, *, source: str = "old") -> None
                 "uploaded_at": _now(),
                 "title": None,
                 "language": None,
-                "user_id": 1,
+                "user_id": user_id,
             }
         ]
     )
 
 
-def _seed_parse(collection: str, doc_id: str, parse_hash: str) -> None:
+def _seed_parse(
+    collection: str, doc_id: str, parse_hash: str, *, user_id: int = 1
+) -> None:
     get_vector_index_store().upsert_parses(
         [
             {
@@ -94,7 +98,7 @@ def _seed_parse(collection: str, doc_id: str, parse_hash: str) -> None:
                 "created_at": _now(),
                 "params_json": "{}",
                 "parsed_content": "[]",
-                "user_id": 1,
+                "user_id": user_id,
             }
         ]
     )
@@ -135,7 +139,13 @@ def _seed_chunk(collection: str, doc_id: str, chunk_id: str, **fields) -> None:
 
 
 def _seed_embedding(
-    collection: str, doc_id: str, chunk_id: str, *, parse_hash: str, model: str
+    collection: str,
+    doc_id: str,
+    chunk_id: str,
+    *,
+    parse_hash: str,
+    model: str,
+    user_id: int = 1,
 ) -> None:
     get_vector_index_store().upsert_embeddings(
         model,
@@ -152,7 +162,7 @@ def _seed_embedding(
                 "chunk_hash": f"h-{chunk_id}",
                 "created_at": _now(),
                 "metadata": "{}",
-                "user_id": 1,
+                "user_id": user_id,
             }
         ],
     )
@@ -250,12 +260,24 @@ def test_capture_reads_the_fixed_tables_and_every_embedding_table_only() -> None
 def test_non_admin_rows_are_limited_to_the_caller_where_tables_have_user_id() -> None:
     _seed_chunk("coll", "d1", "k1", user_id=1)
     _seed_chunk("coll", "d1", "k-other", user_id=2)
+    _seed_document("coll", "d1", user_id=2)
+    _seed_parse("coll", "d1", "p-other", user_id=2)
+    _seed_embedding("coll", "d1", "k-other", parse_hash="p1", model="m1", user_id=2)
+    get_ingestion_status_store().write_ingestion_status(
+        "coll", "d1", status="done", user_id=2
+    )
     _set_pointer("coll", "d1", "parse")
     handle = make_handle()
 
     snapshot = handle.capture_document_rows(["d1"], user_id=1, is_admin=False)
     assert [row["chunk_id"] for row in snapshot.rows_by_table["chunks"]] == ["k1"]
     assert len(snapshot.rows_by_table["main_pointers"]) == 1
+    assert [
+        (name, row["user_id"])
+        for name, rows in snapshot.rows_by_table.items()
+        for row in rows
+        if row.get("user_id") == 2
+    ] == []
 
     _seed_chunk("coll", "d1", "k-new", user_id=1)
     _conn().open_table("chunks").add([_chunk_row("coll", "d1", "k-new", user_id=2)])
@@ -271,6 +293,11 @@ def test_non_admin_rows_are_limited_to_the_caller_where_tables_have_user_id() ->
         ("k1", "old", 1),
     ]
     assert _rows("main_pointers", "step_type") == [("parse",)]
+    owned_tables = ["documents", "parses", "ingestion_runs", *_embedding_tables()]
+    assert len(owned_tables) == 4
+    assert {name: _rows(name, "user_id") for name in owned_tables} == {
+        name: [(2,)] for name in owned_tables
+    }
 
 
 def test_admin_capture_reads_every_owner() -> None:
@@ -319,6 +346,57 @@ def test_no_documents_captures_nothing_and_restores_nothing() -> None:
     assert snapshot.rows_by_table
     assert all(rows == [] for rows in snapshot.rows_by_table.values())
     assert _rows("chunks", "chunk_id") == [("k1",), ("k2",)]
+
+
+def test_capture_takes_any_iterable_of_ids_but_not_a_str() -> None:
+    _seed_chunk("coll", "d1", "k1")
+    _seed_chunk("coll", "d2", "k1")
+    handle = make_handle()
+
+    snapshot = handle.capture_document_rows(
+        (doc_id for doc_id in ["d1", "d2"]), user_id=1, is_admin=True
+    )
+
+    assert snapshot.doc_ids == ("d1", "d2")
+    assert sorted(row["doc_id"] for row in snapshot.rows_by_table["chunks"]) == [
+        "d1",
+        "d2",
+    ]
+    with pytest.raises(DocumentValidationError):
+        handle.capture_document_rows("d1", user_id=1, is_admin=True)
+
+
+def test_restore_invalidates_the_table_cache_once_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_chunk("coll", "d1", "k1")
+    handle = make_handle()
+    snapshot = handle.capture_document_rows(["d1"], user_id=1, is_admin=True)
+    store = get_vector_index_store()
+    spy = MagicMock(wraps=store.invalidate_table_cache)
+    monkeypatch.setattr(store, "invalidate_table_cache", spy)
+
+    handle.restore_document_rows(snapshot, user_id=1, is_admin=True)
+    spy.assert_called_once_with()
+    handle.restore_document_rows(snapshot, user_id=1, is_admin=True)
+    assert spy.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "row",
+    [_chunk_row("other", "d1", "k9"), _chunk_row("coll", "d2", "k9")],
+    ids=["other-collection", "other-document"],
+)
+def test_restore_refuses_rows_outside_the_snapshot_documents(row) -> None:
+    _seed_chunk("coll", "d1", "k1")
+    snapshot = KBDocumentRowsSnapshot(
+        collection="coll", doc_ids=("d1",), rows_by_table={"chunks": [row]}
+    )
+
+    with pytest.raises(DocumentValidationError):
+        make_handle("coll").restore_document_rows(snapshot, user_id=1, is_admin=True)
+
+    assert _rows("chunks", "collection", "doc_id", "chunk_id") == [("coll", "d1", "k1")]
 
 
 def test_restore_refuses_another_collections_snapshot() -> None:

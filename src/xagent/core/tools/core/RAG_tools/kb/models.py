@@ -187,7 +187,10 @@ class KBVectorStorageCleanupResult:
 
 @dataclass(frozen=True)
 class KBDocumentRowsSnapshot:
-    """Rows of some documents in one collection, in the caller's scope, by table."""
+    """Rows of some documents in one collection, keyed by table name.
+
+    A non-admin capture holds only the caller's rows on tables with ``user_id``.
+    """
 
     collection: str
     doc_ids: tuple[str, ...]
