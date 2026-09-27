@@ -23,6 +23,7 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
     IngestionConfig,
     IngestionResult,
 )
+from xagent.core.tools.core.RAG_tools.kb import KBApiCompatibilityFacade
 from xagent.core.tools.core.RAG_tools.utils.string_utils import (
     generate_deterministic_doc_id,
 )
@@ -123,13 +124,17 @@ def _install_leaves(
         "clear_ingestion_status": _clear_status,
         "_delete_uploaded_file_if_orphaned": _orphan,
         "_find_referenced_file_ids": _refs,
-        "_rollback_may_delete_collection": _may_delete,
         "delete_collection": _delete_collection,
         "_cleanup_failed_new_collection_metadata": _metadata_cleanup,
         "_restore_ingest_file_backup": _restore,
     }
     for name, fake in fakes.items():
         monkeypatch.setattr(kb_module, name, fake)
+    monkeypatch.setattr(
+        KBApiCompatibilityFacade,
+        "failed_ingest_may_delete_collection",
+        staticmethod(_may_delete),
+    )
     return SimpleNamespace(
         commit=lambda: calls.append("commit"),
         rollback=lambda: calls.append("rollback"),
