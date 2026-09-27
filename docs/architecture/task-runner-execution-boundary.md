@@ -140,6 +140,28 @@ that `turn_id` against the checkpoint it rebuilds from, so a turn that was
 written replays instead of being applied twice, and one that was not written is
 applied once.
 
+That replay needs a runtime that can reconcile the `turn_id`: the command's own
+run, or a run that is live in this process. When the task's run has changed
+since the command targeted it and no such runtime exists, an earlier attempt
+may have accepted the message as a new turn and started a run for it before
+crashing. That input is at-most-once: the retry does not run it again.
+It settles the command as accepted with an unknown outcome, advances the
+delivery row to `dispatched` ("do not resend", not "applied"), and leaves the
+task in its recovered state. The sender gets the `outcome_unknown` delivery
+frame; with no reachable origin connection the notice is also published
+task-wide. A same-id resend is answered from the command's stored result, so
+it reports the unknown outcome instead of success. A new-turn claim that finds
+the turn already in the transcript (`TaskTurnAlreadyAccepted`) settles the
+same way instead of failing on the unique index.
+
+Rows that no owner can settle any more are reconciled by lease recovery,
+which never redrives the turn. Recovering an expired lease advances that
+task's `pending` user rows to `dispatched` in the recovery transaction, and a
+periodic sweep does the same for rows older than one lease TTL. Both require
+a quiescent task: an appendable status (never PENDING or WAITING_FOR_USER), no
+pause or resume request in flight, no live lease, no pending or processing
+command on the task, and no failed command with the row's `turn_id`.
+
 While the fenced run is still live, input that arrives after an unknown write
 never queues behind it: the fenced context rejects it as not accepted, and the
 client resends it under a new id.
@@ -212,3 +234,24 @@ shared `commandId` identifies the internal deterministic command, whereas its
 nonshared error correlates with the original `messageId`. Nonshared SDK replies
 return a correlation ID, not a new durable deduplication guarantee. Check task
 state before deciding whether to resume or send new input.
+
+## Context cache lifetime
+
+`ContextManager` is a process-wide cache keyed by the execution id, which stays
+the same across runs and owners. It may hold a context only while a run of that
+execution is active in this process, while an injection holds it, or while it
+is fenced by an `outcome_unknown` write. Otherwise the checkpoint is
+authoritative: another process may have extended it since this one last ran the
+task. The last user of an idle context evicts it (`AgentRunner.run` on exit and
+each injection on return), and the next input restores from the checkpoint. A
+context restored that way belongs to no run, so a live input on it returns
+`defer` and the caller takes the deferred path. A reader that started before an
+eviction discards its snapshot and reads again, because the evicted context's
+last write may postdate that read.
+
+Before a completed run publishes its result, the runner writes one more
+checkpoint (`run_end_tail`) when the context changed after the pattern's last
+checkpoint, for example the delivered answer it appended. The write reuses that
+checkpoint's pattern state, is skipped for fenced contexts and for waiting or
+interrupted results, and is best effort: a failure is logged and the result
+stands.
