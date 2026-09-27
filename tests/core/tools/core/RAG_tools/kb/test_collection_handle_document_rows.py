@@ -37,7 +37,9 @@ from xagent.core.tools.core.RAG_tools.storage.factory import (
     get_vector_index_store,
 )
 
-FIXED_TABLES = {"documents", "parses", "chunks", "main_pointers", "ingestion_runs"}
+FIXED_TABLES = frozenset(
+    {"documents", "parses", "chunks", "main_pointers", "ingestion_runs"}
+)
 
 
 def make_handle(collection: str = "coll") -> LanceDBCollectionHandle:
