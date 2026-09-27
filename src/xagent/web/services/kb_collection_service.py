@@ -215,7 +215,7 @@ def _delete_collection_uploaded_files_impl(
 
     if collection_dir is not None:
         # Rows hold the composed or the resolved path; they differ behind a symlink.
-        dirs = sorted({str(collection_dir), str(collection_dir.resolve())})
+        dirs = {str(collection_dir), str(collection_dir.resolve())}
         prefixes = tuple(d + os.sep for d in dirs)
         query = db.query(UploadedFile).filter(
             UploadedFile.user_id == user_id,

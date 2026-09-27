@@ -5,11 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session
 
 from tests.web.api import test_kb_orphan_reference_scale as scale
 from xagent.core.file_storage import get_unscoped_file_storage
 from xagent.web.models.uploaded_file import UploadedFile
 from xagent.web.models.user import User
+from xagent.web.services import kb_collection_service
 from xagent.web.services.managed_file_ref import ManagedFileRef
 
 test_env = scale.test_env
@@ -110,3 +113,27 @@ def test_orphan_rows_in_the_directory_are_still_deleted(
     assert response.status_code == 200, response.text
     assert [_kept(sessions, *row) for row in own] == [(False, False)] * 2
     assert _kept(sessions, *other) == (True, True)
+
+
+def test_prefix_match_escapes_like_wildcards(tmp_path):
+    engine = create_engine("sqlite://")
+    UploadedFile.__table__.create(engine)
+    likes: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture(_conn, _cursor, statement, *_rest):
+        if " LIKE " in statement:
+            likes.append(statement)
+
+    with Session(engine) as db:
+        kb_collection_service._delete_collection_uploaded_files_impl(
+            db,
+            user_id=1,
+            collection_file_ids=set(),
+            remaining_file_ids=set(),
+            collection_dir=tmp_path / "my_kb",
+            after_commit=[],
+        )
+
+    assert likes
+    assert all(s.count(" LIKE ") == s.count(" ESCAPE '/'") for s in likes)
