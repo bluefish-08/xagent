@@ -20,6 +20,8 @@ if TYPE_CHECKING:
         UploadedFileRefreshSnapshot,
     )
 
+    from .storage_shim import KBStorageShimCompatibilityFacade
+
 
 class KBFileCompatibilityFacade:
     """Compatibility boundary for legacy uploaded-file and physical helpers.
@@ -29,6 +31,11 @@ class KBFileCompatibilityFacade:
     unchanged. This facade gives coordinator-owned callers a stable semantic
     entry point while preserving existing public helper behavior.
     """
+
+    def __init__(
+        self, storage_shim: Optional[KBStorageShimCompatibilityFacade] = None
+    ) -> None:
+        self._storage_shim = storage_shim
 
     def upsert_uploaded_file_record(
         self,
@@ -73,7 +80,12 @@ class KBFileCompatibilityFacade:
     def find_referenced_file_ids(self, file_ids: Iterable[str]) -> set[str]:
         from ..storage.factory import get_vector_index_store
 
-        records = get_vector_index_store().list_document_records_by_file_ids(file_ids)
+        store = (
+            self._storage_shim.get_vector_index_store()
+            if self._storage_shim is not None
+            else get_vector_index_store()
+        )
+        records = store.list_document_records_by_file_ids(file_ids)
         return {record.file_id for record in records if record.file_id}
 
     def build_uploaded_filename_map(

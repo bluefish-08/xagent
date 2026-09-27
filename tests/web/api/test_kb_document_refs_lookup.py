@@ -7,9 +7,12 @@ from typing import Any, Iterable
 
 import pytest
 
-from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
+from xagent.core.tools.core.RAG_tools.kb import KBCoordinator, get_kb_coordinator
 from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
     ensure_documents_table,
+)
+from xagent.core.tools.core.RAG_tools.storage.factory import (
+    bind_storage_shim_for_current_context,
 )
 from xagent.providers.vector_store.lancedb import get_connection_from_env
 from xagent.web.api import kb as kb_module
@@ -63,6 +66,24 @@ def test_referenced_file_ids_come_from_the_bound_vector_store(monkeypatch):
 
     assert referenced == {"f-1", "f-2"}
     assert store.calls == [["f-1", "f-2", "f-3"]]
+
+
+def test_referenced_file_ids_read_their_coordinators_store():
+    own = _OtherBackendStore(
+        [SimpleNamespace(doc_id="d-1", file_id="f-1", collection="kb")]
+    )
+    ambient = _OtherBackendStore([])
+    coordinator = KBCoordinator(
+        storage_shim=SimpleNamespace(get_vector_index_store=lambda: own)
+    )
+
+    with bind_storage_shim_for_current_context(
+        SimpleNamespace(get_vector_index_store=lambda: ambient)
+    ):
+        referenced = coordinator.file_compatibility.find_referenced_file_ids(["f-1"])
+
+    assert referenced == {"f-1"}
+    assert ambient.calls == []
 
 
 def test_document_refs_lookup_raises_when_the_store_fails(monkeypatch):
