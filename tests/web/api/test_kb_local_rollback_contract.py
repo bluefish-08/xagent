@@ -392,7 +392,7 @@ async def test_collection_existed_before_still_asks_the_decision(monkeypatch) ->
             {},
             WHOLE[:5],
             "list down",
-            id="remaining-records",
+            id="reference-lookup",
         ),
         pytest.param(
             {

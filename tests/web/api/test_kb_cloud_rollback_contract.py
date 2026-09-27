@@ -173,7 +173,7 @@ async def _rollback(
             False,
             True,
             [FULL_CHAIN[0], "refs:[]", *FULL_CHAIN[3:]],
-            id="no-file-record-still-lists",
+            id="no-file-record-still-looks-up",
         ),
         pytest.param(
             {},

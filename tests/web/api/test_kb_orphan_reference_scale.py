@@ -315,12 +315,15 @@ def test_document_delete_keeps_file_another_owner_references(
 
 
 @pytest.mark.parametrize(
+    "other_owner", [OTHER_TENANT, None], ids=["other-tenant", "unowned"]
+)
+@pytest.mark.parametrize(
     "rollback",
     [kb_module._rollback_failed_ingestion, kb_module._rollback_failed_cloud_ingestion],
     ids=["local", "cloud"],
 )
-async def test_file_rollback_keeps_file_another_tenant_references(
-    test_env, temp_uploads, monkeypatch, rollback
+async def test_file_rollback_keeps_file_another_owner_references(
+    test_env, temp_uploads, monkeypatch, rollback, other_owner
 ):
     _app, _headers, user, sessions = test_env
     path = temp_uploads / f"user_{user.id}" / "demo" / "shared.txt"
@@ -328,7 +331,7 @@ async def test_file_rollback_keeps_file_another_tenant_references(
     _documents().add(
         [
             _doc("demo", "doc-demo", file_id, user.id),
-            _doc("theirs", "doc-theirs", file_id, OTHER_TENANT),
+            _doc("theirs", "doc-theirs", file_id, other_owner),
         ]
     )
     _stub_rollback_leaves(monkeypatch, may_delete=False)
@@ -347,14 +350,19 @@ async def test_file_rollback_keeps_file_another_tenant_references(
     assert path.exists()
 
 
-def test_collection_delete_keeps_file_another_tenant_references(test_env, temp_uploads):
+@pytest.mark.parametrize(
+    "other_owner", [OTHER_TENANT, None], ids=["other-tenant", "unowned"]
+)
+def test_collection_delete_keeps_file_another_owner_references(
+    test_env, temp_uploads, other_owner
+):
     app, headers, user, sessions = test_env
     path = temp_uploads / f"user_{user.id}" / "shared" / "shared.txt"
     file_id = _uploaded(sessions, user.id, path)
     _documents().add(
         [
             _doc("team", "doc-team", file_id, user.id),
-            _doc("theirs", "doc-theirs", file_id, OTHER_TENANT),
+            _doc("theirs", "doc-theirs", file_id, other_owner),
         ]
     )
 
@@ -365,8 +373,9 @@ def test_collection_delete_keeps_file_another_tenant_references(test_env, temp_u
     assert path.exists()
 
 
+@pytest.mark.parametrize("unowned", [False, True], ids=["admin", "unowned"])
 def test_admin_collection_delete_counts_references_from_any_owner(
-    test_env, temp_uploads
+    test_env, temp_uploads, unowned
 ):
     app, headers, user, sessions = test_env
     session = sessions()
@@ -384,7 +393,7 @@ def test_admin_collection_delete_counts_references_from_any_owner(
         [
             _doc("team", "team-kept", kept, OTHER_TENANT),
             _doc("team", "team-orphan", orphan, OTHER_TENANT),
-            _doc("mine", "admin-copy", kept, user.id),
+            _doc("mine", "copy", kept, None if unowned else user.id),
         ]
     )
 
