@@ -26,6 +26,7 @@ from xagent.core.tools.core.RAG_tools.storage.contracts import DocumentRecord
 from xagent.web.api import kb as kb_module
 from xagent.web.models.uploaded_file import UploadedFile
 from xagent.web.services.managed_file_ref import ManagedFileRef
+from xagent.web.services.uploaded_file_store import UploadedFileStore
 
 test_env = kb_dir.test_env
 temp_uploads = kb_dir.temp_uploads
@@ -56,6 +57,16 @@ def _rows_without_bytes(sessions) -> list[str]:
     return sorted(
         name for name, (_, key, _) in _rows(sessions).items() if not storage.exists(key)
     )
+
+
+def _byte_delete_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "xagent.web.api.kb"
+        and r.exc_info
+        and r.getMessage().startswith("Failed to delete file bytes")
+    ]
 
 
 class _MetadataStore:
@@ -134,15 +145,20 @@ def test_cloud_collection_failure_after_file_step_leaves_no_row_without_bytes(
 ) -> None:
     _durable_storage(monkeypatch, tmp_path)
     sessions = test_env[3]
+    seen: dict[str, Any] = {}
 
     class _BrokenStore:
         def list_document_records(self, **_kw):
             raise RuntimeError("lance down")
 
+    def _ingest(**kw):
+        seen.update(_rows(sessions))
+        return _failed()
+
     response = _post_cloud(
         test_env,
         [FILE_A],
-        _failed,
+        _ingest,
         patch("xagent.web.api.kb.get_collection_sync", return_value=object()),
         patch("xagent.web.api.kb.get_vector_index_store", _BrokenStore),
     )
@@ -152,6 +168,7 @@ def test_cloud_collection_failure_after_file_step_leaves_no_row_without_bytes(
         "lance down. Original ingestion error: embedding down"
     )
     assert "a.csv" not in _rows(sessions)
+    assert not get_unscoped_file_storage().exists(seen["a.csv"][1])
 
 
 def test_cloud_failed_row_delete_commit_keeps_row_and_bytes(
@@ -383,7 +400,7 @@ def _delete_collection_api(test_env, documented, *extra):
 
 
 def test_collection_delete_byte_failure_leaves_no_row_without_bytes(
-    test_env, temp_uploads, monkeypatch, tmp_path
+    test_env, temp_uploads, monkeypatch, tmp_path, caplog
 ) -> None:
     _durable_storage(monkeypatch, tmp_path)
     rows = _seed(test_env, temp_uploads, {"one.txt": True, "two.txt": True})
@@ -403,6 +420,9 @@ def test_collection_delete_byte_failure_leaves_no_row_without_bytes(
     assert _rows(test_env[3]) == {}
     storage = get_unscoped_file_storage()
     assert [key for _, key, _ in rows.values() if storage.exists(key)] == failed
+    assert _byte_delete_warnings(caplog) == [
+        f"Failed to delete file bytes for {failed[0]} after commit"
+    ]
 
 
 def test_collection_delete_failed_commit_keeps_every_file_byte(
@@ -462,13 +482,50 @@ def test_run_after_commit_runs_every_delete_and_logs_each_failure(caplog) -> Non
             ran.append(name)
             raise OSError(name)
 
-        return _action
+        return (f"key-{name}", _action)
 
     with pytest.raises(OSError, match="first"):
         kb_module._run_after_commit([_fail("first"), _fail("second")])
 
     assert ran == ["first", "second"]
-    assert len([r for r in caplog.records if r.exc_info]) == 2
+    assert _byte_delete_warnings(caplog) == [
+        "Failed to delete file bytes for key-first after commit",
+        "Failed to delete file bytes for key-second after commit",
+    ]
+
+
+@pytest.mark.parametrize("helper", ["store", "orphan"])
+def test_queued_local_unlink_waits_for_the_commit(
+    helper, test_env, temp_uploads, monkeypatch, tmp_path
+) -> None:
+    _durable_storage(monkeypatch, tmp_path)
+    file_id, key, path = _seed(test_env, temp_uploads, {"x.txt": True})["x.txt"]
+    storage = get_unscoped_file_storage()
+    after_commit: list[Any] = []
+    db = test_env[3]()
+    try:
+        if helper == "store":
+            UploadedFileStore(db).delete(
+                db.query(UploadedFile).one(), after_commit=after_commit
+            )
+        else:
+            kb_module._delete_uploaded_file_if_orphaned(
+                db,
+                file_id=file_id,
+                user_id=int(test_env[2].id),
+                remaining_file_ids=set(),
+                after_commit=after_commit,
+            )
+        assert Path(path).exists()
+        db.commit()
+        assert Path(path).exists() and storage.exists(key)
+        assert sorted(label for label, _ in after_commit) == sorted([key, file_id])
+        kb_module._run_after_commit(after_commit)
+    finally:
+        db.close()
+
+    assert not Path(path).exists()
+    assert not storage.exists(key)
 
 
 def test_cloud_byte_delete_failure_after_commit_reports_incomplete_rollback(

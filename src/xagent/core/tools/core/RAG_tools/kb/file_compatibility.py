@@ -130,7 +130,7 @@ class KBFileCompatibilityFacade:
         file_id: str,
         user_id: Optional[int],
         remaining_file_ids: set[str],
-        after_commit: Optional[List[Callable[[], None]]] = None,
+        after_commit: Optional[List[tuple[str, Callable[[], None]]]] = None,
     ) -> bool:
         from xagent.web.services.kb_file_service import (
             _delete_uploaded_file_if_orphaned_impl,
@@ -182,7 +182,7 @@ class KBFileCompatibilityFacade:
         collection_file_ids: Set[str],
         remaining_file_ids: Set[str],
         collection_dir: Optional[Path],
-        after_commit: List[Callable[[], None]],
+        after_commit: List[tuple[str, Callable[[], None]]],
     ) -> int:
         from xagent.web.services.kb_collection_service import (
             _delete_collection_uploaded_files_impl,

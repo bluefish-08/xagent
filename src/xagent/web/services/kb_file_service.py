@@ -322,9 +322,12 @@ def _delete_uploaded_file_if_orphaned_impl(
     file_id: str,
     user_id: Optional[int],
     remaining_file_ids: set[str],
-    after_commit: Optional[List[Callable[[], None]]] = None,
+    after_commit: Optional[List[tuple[str, Callable[[], None]]]] = None,
 ) -> bool:
-    """Delete uploaded file row and local file when no documents still reference it.
+    """Delete an uploaded file's row and bytes when no documents still reference it.
+
+    Never commits. With ``after_commit``, the durable delete and local unlink are
+    queued for the caller to run after it commits; without it, the bytes go at once.
 
     Args:
         db: Database session.
@@ -373,7 +376,7 @@ def _delete_uploaded_file_if_orphaned_impl(
         if after_commit is None:
             _unlink()
         else:
-            after_commit.append(_unlink)
+            after_commit.append((file_id, _unlink))
 
     UploadedFileStore(db).delete(
         file_record, delete_local=False, after_commit=after_commit
@@ -1066,9 +1069,13 @@ def delete_uploaded_file_if_orphaned(
     file_id: str,
     user_id: Optional[int],
     remaining_file_ids: set[str],
-    after_commit: Optional[List[Callable[[], None]]] = None,
+    after_commit: Optional[List[tuple[str, Callable[[], None]]]] = None,
 ) -> bool:
-    """Delete uploaded file row and local file when no documents still reference it."""
+    """Delete an uploaded file's row and bytes when no documents still reference it.
+
+    Never commits. With ``after_commit``, the durable delete and local unlink are
+    queued for the caller to run after it commits; without it, the bytes go at once.
+    """
     return _get_file_compatibility_facade().delete_uploaded_file_if_orphaned(
         db,
         file_id=file_id,

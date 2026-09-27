@@ -91,7 +91,7 @@ def _install_leaves(
 
     def _orphan(db, *, file_id, user_id, remaining_file_ids, after_commit):
         calls.append("orphan")
-        after_commit.append(lambda: calls.append("bytes:orphan"))
+        after_commit.append((file_id, lambda: calls.append("bytes:orphan")))
 
     def _refs(file_ids, *, user_id, is_admin):
         calls.append(f"refs:{sorted(file_ids)}")

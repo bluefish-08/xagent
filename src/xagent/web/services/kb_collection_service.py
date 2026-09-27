@@ -196,7 +196,7 @@ def _delete_collection_uploaded_files_impl(
     collection_file_ids: Set[str],
     remaining_file_ids: Set[str],
     collection_dir: Optional[Path],
-    after_commit: List[Callable[[], None]],
+    after_commit: List[tuple[str, Callable[[], None]]],
 ) -> int:
     """Delete orphan UploadedFile rows for a collection, with legacy path fallback."""
     deleted_uploaded_files = 0
@@ -436,7 +436,7 @@ def delete_collection_uploaded_files(
     collection_file_ids: Set[str],
     remaining_file_ids: Set[str],
     collection_dir: Optional[Path],
-    after_commit: List[Callable[[], None]],
+    after_commit: List[tuple[str, Callable[[], None]]],
 ) -> int:
     """Delete orphan UploadedFile rows for a collection, with legacy path fallback.
 

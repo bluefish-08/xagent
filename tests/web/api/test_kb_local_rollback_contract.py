@@ -129,7 +129,7 @@ def _install_leaves(
         seen["collection_file_ids"] = collection_file_ids
         seen["collection_dir"] = collection_dir
         _hit("del_coll_files")
-        after_commit.append(lambda: _hit("bytes:coll"))
+        after_commit.append(("coll", lambda: _hit("bytes:coll")))
 
     class _FileStore:
         def __init__(self, db):
@@ -137,7 +137,7 @@ def _install_leaves(
 
         def delete(self, record, *, delete_local, after_commit):
             _hit(f"store.delete:{record.tag}")
-            after_commit.append(lambda: _hit(f"bytes:{record.tag}"))
+            after_commit.append((record.tag, lambda: _hit(f"bytes:{record.tag}")))
 
     async def _metadata(*, collection_name, user):
         _hit("metadata")
@@ -148,7 +148,7 @@ def _install_leaves(
 
     def _orphan(db, *, file_id, user_id, remaining_file_ids, after_commit):
         _hit("orphan")
-        after_commit.append(lambda: _hit("bytes:orphan"))
+        after_commit.append((file_id, lambda: _hit("bytes:orphan")))
 
     def _refs(file_ids, *, user_id, is_admin):
         _hit(f"refs:{sorted(file_ids)}")

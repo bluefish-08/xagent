@@ -1392,14 +1392,16 @@ async def _cleanup_collection_metadata_after_failed_batch_api_ingest(
     )
 
 
-def _run_after_commit(actions: List[Callable[[], None]]) -> None:
+def _run_after_commit(actions: List[tuple[str, Callable[[], None]]]) -> None:
     """Run every queued byte delete, log each failure, then raise the first."""
     first_error: Optional[Exception] = None
-    for action in actions:
+    for label, action in actions:
         try:
             action()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to delete file bytes after commit", exc_info=True)
+            logger.warning(
+                "Failed to delete file bytes for %s after commit", label, exc_info=True
+            )
             first_error = first_error or exc
     if first_error is not None:
         raise first_error
@@ -1436,7 +1438,7 @@ async def _rollback_failed_ingestion(
     def _compensate_file() -> None:
         if uploaded_file_existed_before:
             return
-        after_commit: List[Callable[[], None]] = []
+        after_commit: List[tuple[str, Callable[[], None]]] = []
         if register_created and doc_id:
             remaining_records = _list_document_records_for_file_ids(
                 [file_record_id],
@@ -1520,7 +1522,7 @@ async def _rollback_failed_ingestion(
                 )
                 if file_id
             }
-            after_commit: List[Callable[[], None]] = []
+            after_commit: List[tuple[str, Callable[[], None]]] = []
             delete_collection_uploaded_files(
                 db,
                 user_id=user_id,
@@ -1659,7 +1661,7 @@ async def _rollback_failed_cloud_ingestion(
         }
 
         if file_record_id is not None:
-            after_commit: List[Callable[[], None]] = []
+            after_commit: List[tuple[str, Callable[[], None]]] = []
             _delete_uploaded_file_if_orphaned(
                 db,
                 file_id=file_record_id,
@@ -6618,7 +6620,7 @@ def _perform_kb_collection_delete(
             fallback_user_id=user_id,
         )
         deleted_uploaded_files = 0
-        after_commit: List[Callable[[], None]] = []
+        after_commit: List[tuple[str, Callable[[], None]]] = []
         for owner_id in sorted(mutation_scope.owner_user_ids):
             physical_cleanup = physical_cleanup_by_owner[owner_id]
             physical_cleanup_status = physical_cleanup.status
