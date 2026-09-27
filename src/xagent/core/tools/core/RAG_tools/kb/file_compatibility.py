@@ -71,9 +71,10 @@ class KBFileCompatibilityFacade:
         )
 
     def find_referenced_file_ids(self, file_ids: Iterable[str]) -> set[str]:
-        from xagent.web.services.kb_file_service import _find_referenced_file_ids_impl
+        from ..storage.factory import get_vector_index_store
 
-        return _find_referenced_file_ids_impl(file_ids)
+        records = get_vector_index_store().list_document_records_by_file_ids(file_ids)
+        return {record.file_id for record in records if record.file_id}
 
     def build_uploaded_filename_map(
         self, db: Session, *, user_id: Optional[int], file_ids: List[str]
