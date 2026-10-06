@@ -1,11 +1,12 @@
-"""#514 - the coordinator reaches collection data only through a handle.
+"""#514 - collection data goes through a handle; deployment-wide stats are exempt.
 
 Two complementary guards:
 
 * A structural one over ``coordinator.py``: no method other than context
-  resolution may reach a store, by any of the routes that are reachable from
-  the coordinator -- the shim attribute, its public property, the storage
-  factory, a ``getattr`` by name, or the module-level store accessors.
+  resolution and the deployment-wide batched stats may reach a store, by any
+  of the routes that are reachable from the coordinator -- the shim attribute,
+  its public property, the storage factory, a ``getattr`` by name, or the
+  module-level store accessors.
 * Behavioural ones driving the coordinator with a fake backend handle: one
   representative method from several operation families, proving each routes
   through ``KBHandleProvider.open`` and that the resolved capabilities reach
@@ -51,13 +52,15 @@ STORE_ACCESSORS = frozenset(
     }
 )
 
-# Context resolution owns store lookup; the reset hook and the accessor only
-# forward. Everything else must reach data through a handle.
+# Context resolution owns store lookup (per collection, or per deployment for
+# the batched stats); the reset hook and the accessor only forward. Everything
+# else must reach data through a handle.
 SHIM_ALLOWED_METHODS = frozenset(
     {
         "__init__",
         "storage_shim",
         "get_context",
+        "aggregate_collection_stats_sync",
         "reset_compatibility_caches",
     }
 )

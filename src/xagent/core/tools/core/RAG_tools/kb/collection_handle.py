@@ -285,6 +285,26 @@ class KBHandleProvider:
             "KBHandleProvider"
         )
 
+    def aggregate_collection_stats(
+        self,
+        backend: KBStorageBackend,
+        vector_index_store: VectorIndexStore,
+        *,
+        user_id: int | None,
+        is_admin: bool,
+    ) -> dict[str, dict[str, int]]:
+        """Return per-collection stats for every collection the caller can see.
+
+        One batched call per deployment engine, not one call per collection.
+        """
+        if backend is KBStorageBackend.LANCEDB:
+            return vector_index_store.aggregate_collection_stats(
+                user_id=user_id, is_admin=is_admin
+            )
+        raise ValueError(
+            f"KB storage backend {backend.value!r} is not supported by KBHandleProvider"
+        )
+
     def reset_for_tests(self) -> None:
         """Clear provider-owned caches for test reset.
 
@@ -1039,6 +1059,22 @@ class KBCollectionHandle(ABC):
             - ``"chunks"``    – count of chunk rows
             - ``"embeddings"``– total count of embedding rows across all model
               tables
+        """
+
+    @abstractmethod
+    def count_rows_by_document(
+        self,
+        *,
+        user_id: int | None,
+        is_admin: bool,
+        doc_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Count chunk and embedding rows per document in this collection.
+
+        Maps each ``doc_id`` (only ``doc_id`` when given) to ``{"chunks": n}``
+        plus one ``embeddings_<model_tag>`` entry per model that holds rows for
+        it, counting only rows visible to the caller. Zero counts and documents
+        without chunk or embedding rows are omitted.
         """
 
     @abstractmethod
@@ -3930,6 +3966,47 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             "chunks": chunks,
             "embeddings": embeddings,
         }
+
+    def count_rows_by_document(
+        self,
+        *,
+        user_id: int | None,
+        is_admin: bool,
+        doc_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Count chunk and embedding rows per document from the LanceDB tables.
+
+        Both paths open tables uncached, so rows written by other processes are
+        counted.
+        """
+        store = self.vector_index_store
+        collection = self.context.collection
+        table_names = ["chunks"] + [
+            name for name in store.list_table_names() if name.startswith("embeddings_")
+        ]
+        counts: dict[str, dict[str, int]] = {}
+        for table_name in table_names:
+            if doc_id is None:
+                per_document = store.aggregate_document_counts(
+                    table_name=table_name,
+                    doc_id_column="doc_id",
+                    collection_name=collection,
+                    user_id=user_id,
+                    is_admin=is_admin,
+                )
+            else:
+                batches = store.iter_batches(
+                    table_name=table_name,
+                    columns=["doc_id"],
+                    filters={"collection": collection, "doc_id": doc_id},
+                    user_id=user_id,
+                    is_admin=is_admin,
+                )
+                per_document = {doc_id: sum(batch.num_rows for batch in batches)}
+            for row_doc_id, count in per_document.items():
+                if count:
+                    counts.setdefault(row_doc_id, {})[table_name] = count
+        return counts
 
     def count_documents(self, user_id: int | None, is_admin: bool) -> int:
         """Count documents visible to the given user in this collection.

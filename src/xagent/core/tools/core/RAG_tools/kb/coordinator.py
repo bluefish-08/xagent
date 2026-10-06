@@ -29,6 +29,7 @@ from ..core.schemas import (
     SparseSearchResponse,
 )
 from ..storage.factory import StorageFactory
+from ..storage.vector_backend import get_configured_vector_backend
 from ..utils.user_scope import resolve_user_scope
 from .api_compatibility import KBApiCompatibilityFacade
 from .async_utils import maybe_await
@@ -485,6 +486,40 @@ class KBCoordinator:
             self.delete_document_record(
                 collection, doc_id, user_id=user_id, is_admin=is_admin
             )
+        )
+
+    # --- Statistics ---
+
+    def aggregate_collection_stats_sync(
+        self, *, user_id: int | None, is_admin: bool
+    ) -> dict[str, dict[str, int]]:
+        """Return per-collection stats for the deployment engine in one batch."""
+        return self._handle_provider.aggregate_collection_stats(
+            KBStorageBackend(get_configured_vector_backend().value),
+            self._storage_shim.get_vector_index_store(),
+            user_id=user_id,
+            is_admin=is_admin,
+        )
+
+    def count_rows_by_document_sync(
+        self,
+        collection: str,
+        *,
+        user_id: int | None,
+        is_admin: bool,
+        doc_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Open the collection handle and count rows per document."""
+        handle = self.open_collection_sync(
+            KBContextRequest(
+                collection=collection,
+                user_id=user_id,
+                is_admin=is_admin,
+                hide_missing=True,
+            )
+        )
+        return handle.count_rows_by_document(
+            user_id=user_id, is_admin=is_admin, doc_id=doc_id
         )
 
     # --- Search lifecycle (delegated to the collection handle) ---
