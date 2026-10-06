@@ -276,7 +276,7 @@ def _restore_document_table_rows(
 class KBHandleProvider:
     """Open collection-scoped handles for resolved KB contexts."""
 
-    def open(self, context: KBCollectionContext) -> LanceDBCollectionHandle:
+    def open(self, context: KBCollectionContext) -> KBCollectionHandle:
         """Return a backend-specific handle for the resolved collection context."""
         if context.backend is KBStorageBackend.LANCEDB:
             return LanceDBCollectionHandle(context)
@@ -910,7 +910,6 @@ class KBCollectionHandle(ABC):
     ) -> None:
         """Rename control-plane metadata from this collection's name to ``new_name``.
 
-        Async – this is the **only** async method on ``KBCollectionHandle``.
         Wraps ``await metadata_store.rename_collection(...)`` to update the
         ``collection_config`` and ``collection_metadata`` rows.
 
@@ -1063,6 +1062,178 @@ class KBCollectionHandle(ABC):
         Returns:
             Sorted list of unique doc_id strings.
         """
+
+    # --- Ingestion-status data-plane (#513) ---
+
+    @abstractmethod
+    def write_ingestion_status(
+        self,
+        doc_id: str,
+        *,
+        status: str,
+        message: str | None = None,
+        parse_hash: str | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        """Write ingestion status for a document in this collection."""
+
+    @abstractmethod
+    def load_ingestion_status(
+        self,
+        *,
+        doc_id: str | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Load ingestion status rows for this collection."""
+
+    @abstractmethod
+    def clear_ingestion_status(
+        self, doc_id: str, *, user_id: int | None = None, is_admin: bool = False
+    ) -> None:
+        """Remove the ingestion status row for a document in this collection."""
+
+    @abstractmethod
+    async def write_ingestion_status_async(
+        self,
+        doc_id: str,
+        *,
+        status: str,
+        message: str | None = None,
+        parse_hash: str | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        """Async :meth:`write_ingestion_status`."""
+
+    @abstractmethod
+    async def load_ingestion_status_async(
+        self,
+        *,
+        doc_id: str | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Async :meth:`load_ingestion_status`."""
+
+    @abstractmethod
+    async def clear_ingestion_status_async(
+        self, doc_id: str, *, user_id: int | None = None, is_admin: bool = False
+    ) -> None:
+        """Async :meth:`clear_ingestion_status`."""
+
+    # --- Main-pointer data-plane (#513) ---
+
+    @abstractmethod
+    def get_main_pointer(
+        self, doc_id: str, step_type: str, model_tag: str | None = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return the main pointer for a document stage, or ``None``."""
+
+    @abstractmethod
+    def set_main_pointer(
+        self,
+        doc_id: str,
+        step_type: str,
+        semantic_id: str,
+        technical_id: str,
+        model_tag: str | None = None,
+        operator: str | None = None,
+    ) -> None:
+        """Set or update the main pointer for a document stage."""
+
+    @abstractmethod
+    def list_main_pointers(
+        self, doc_id: str | None = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List main pointers for this collection."""
+
+    @abstractmethod
+    def delete_main_pointer(
+        self, doc_id: str, step_type: str, model_tag: str | None = None
+    ) -> bool:
+        """Delete the main pointer for a document stage; ``True`` if one existed."""
+
+    # --- Version candidates and promotion (#513) ---
+
+    @abstractmethod
+    def list_candidates(
+        self,
+        doc_id: str,
+        step_type: Any,
+        model_tag: Optional[str] = None,
+        state: Optional[str] = None,
+        limit: int = 50,
+        order_by: str = "created_at desc",
+    ) -> Dict[str, Any]:
+        """List version candidates for a document stage in this collection."""
+
+    @abstractmethod
+    def promote_version_main(
+        self,
+        doc_id: str,
+        step_type: Any,
+        selected_id: str,
+        operator: Optional[str] = None,
+        preview_only: bool = False,
+        confirm: bool = False,
+        model_tag: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Promote a candidate version to main for a document stage."""
+
+    # --- Rollback snapshot/restore primitives (#513) ---
+
+    @abstractmethod
+    def capture_status_snapshot(
+        self, doc_id: str, *, user_id: int | None = None, is_admin: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Capture ``doc_id``'s ingestion-status rows (empty list if absent)."""
+
+    @abstractmethod
+    def restore_status_snapshot(
+        self, doc_id: str, snapshot: List[Dict[str, Any]], *, user_id: int | None = None
+    ) -> None:
+        """Rewrite the snapshot's status rows, or clear the row if it is empty."""
+
+    @abstractmethod
+    def clear_status_snapshot(
+        self, doc_id: str, *, user_id: int | None = None, is_admin: bool = True
+    ) -> None:
+        """Clear ``doc_id``'s ingestion-status row after a rollback."""
+
+    @abstractmethod
+    def capture_main_pointer_snapshot(
+        self, doc_id: str, step_type: str, model_tag: str | None = None
+    ) -> KBMainPointerSnapshot:
+        """Capture the current main pointer (``pointer=None`` if absent)."""
+
+    @abstractmethod
+    def restore_main_pointer_snapshot(
+        self, snapshot: KBMainPointerSnapshot, *, operator: str | None = None
+    ) -> bool:
+        """Restore or delete the pointer; ``False`` if the snapshot is incomplete."""
+
+    @abstractmethod
+    def capture_candidate_cleanup_snapshot(
+        self,
+        doc_id: str,
+        scope: str,
+        *,
+        new_parse_hash: str | None = None,
+        old_parse_hash: str | None = None,
+        model_tag: str | None = None,
+        user_id: int | None = None,
+        is_admin: bool | None = None,
+    ) -> KBVersionCandidateCleanupSnapshot:
+        """Preview what candidate cleanup would delete, without deleting."""
+
+    @abstractmethod
+    def restore_candidate_cleanup_snapshot(
+        self,
+        snapshot: KBVersionCandidateCleanupSnapshot,
+        *,
+        cleanup_executed: bool = False,
+    ) -> KBVersionCandidateRollbackResult:
+        """Report whether an executed candidate cleanup can be rolled back."""
 
 
 @dataclass(frozen=True)
@@ -3869,8 +4040,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
     ) -> None:
         """Rename control-plane metadata rows to ``new_name``.
 
-        This is the **only** async method on ``KBCollectionHandle``.  It wraps
-        ``await metadata_store.rename_collection(...)`` which updates the
+        It wraps ``await metadata_store.rename_collection(...)`` which updates the
         ``collection_config`` and ``collection_metadata`` rows.  The coordinator
         calls this directly with ``await`` (no ``asyncio.to_thread`` wrapper
         needed, unlike the two sync rename primitives above).
