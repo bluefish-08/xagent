@@ -23,6 +23,7 @@ from ..core.config import (
     DEFAULT_LANCEDB_SCAN_BATCH_SIZE,
     DEFAULT_VECTOR_STORE_EXTENDED_SCAN_LIMIT,
 )
+from ..core.exceptions import DatabaseOperationError
 from ..core.schemas import (
     CollectionDocumentMetadata,
     CollectionInfo,
@@ -1445,7 +1446,11 @@ def _delete_document_impl(
         )
     except Exception as exc:  # noqa: BLE001
         # The store wraps delete failures; report the root cause as before.
-        cause = exc.__cause__ or exc
+        cause = (
+            exc.__cause__
+            if isinstance(exc, DatabaseOperationError) and exc.__cause__ is not None
+            else exc
+        )
         logger.error(
             "Failed to delete document %s/%s: %s",
             collection,

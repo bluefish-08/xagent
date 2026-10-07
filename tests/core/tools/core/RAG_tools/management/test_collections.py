@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1358,6 +1359,27 @@ def test_delete_document_reports_the_store_error(
     [record] = [r for r in caplog.records if r.getMessage().startswith("Failed to")]
     assert record.getMessage() == "Failed to delete document c/doc: boom"
     assert record.exc_info is not None
+
+
+def test_delete_document_reports_an_unknown_backend_as_is(
+    temp_lancedb_dir: str,
+) -> None:
+    from src.xagent.core.tools.core.RAG_tools.core.schemas import CollectionInfo
+
+    _seed_shared_doc_id("c")
+    asyncio.run(
+        get_metadata_store().save_collection(
+            CollectionInfo(name="c", extra_metadata={"kb_storage": "bogus"})
+        )
+    )
+
+    result = delete_document("c", "doc", user_id=7, is_admin=False)
+
+    assert (result.status, result.message) == (
+        "error",
+        "Failed to delete document: Invalid kb_storage backend 'bogus'; "
+        "choose one of: lancedb",
+    )
 
 
 def test_delete_collection_removes_metadata_table_entry(temp_lancedb_dir: str) -> None:

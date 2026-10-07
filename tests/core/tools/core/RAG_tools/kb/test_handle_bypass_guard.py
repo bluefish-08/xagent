@@ -10,6 +10,7 @@ bypass has to leave it.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[6] / "src" / "xagent"
@@ -36,7 +37,7 @@ ROW_METHODS = frozenset(
 TABLE_METHODS = frozenset(
     """
     count_rows count_rows_async count_rows_or_zero get_vector_dimension
-    iter_batches iter_batches_async
+    get_vector_dimension_async iter_batches iter_batches_async
     """.split()
 )
 RAW_ACCESSORS = frozenset(
@@ -44,51 +45,67 @@ RAW_ACCESSORS = frozenset(
 )
 INFERS_MODEL = "infers the embedding model from embeddings_* tables"
 
-# Existing bypasses; the value says what each one is for.
-ALLOWLIST: dict[str, dict[tuple[str, str], str]] = {
+# Existing bypasses: how often each one occurs and what it is for.
+ALLOWLIST: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
     "xagent/core/tools/core/RAG_tools/management/collections.py": {
         ("_list_collections_impl", "aggregate_collection_stats"): (
-            "collection list stats"
+            1,
+            "collection list stats",
         ),
-        ("_list_documents_impl", "aggregate_document_counts"): "document list counts",
-        ("_list_documents_impl", "list_table_names"): "document list counts",
-        ("_get_document_stats_impl", "aggregate_document_stats"): "document stats",
-        ("_get_document_stats_impl", "count_rows"): "document stats",
-        ("_get_document_stats_impl", "list_table_names"): "document stats",
+        ("_list_documents_impl", "aggregate_document_counts"): (
+            2,
+            "document list counts",
+        ),
+        ("_list_documents_impl", "list_table_names"): (1, "document list counts"),
+        ("_get_document_stats_impl", "aggregate_document_stats"): (
+            1,
+            "document stats",
+        ),
+        ("_get_document_stats_impl", "count_rows"): (2, "document stats"),
+        ("_get_document_stats_impl", "list_table_names"): (1, "document stats"),
     },
     "xagent/core/tools/core/RAG_tools/management/collection_manager.py": {
         ("_rebuild_collection_stats_impl", "aggregate_collection_stats"): (
-            "stats rebuild (tests only)"
+            1,
+            "stats rebuild (tests only)",
         ),
-        ("_rebuild_collection_metadata_impl", "list_table_names"): INFERS_MODEL,
-        ("_rebuild_collection_metadata_impl", "count_rows_or_zero"): INFERS_MODEL,
-        ("_rebuild_collection_metadata_impl", "get_vector_dimension"): INFERS_MODEL,
+        ("_rebuild_collection_metadata_impl", "list_table_names"): (1, INFERS_MODEL),
+        ("_rebuild_collection_metadata_impl", "count_rows_or_zero"): (1, INFERS_MODEL),
+        ("_rebuild_collection_metadata_impl", "get_vector_dimension"): (
+            1,
+            INFERS_MODEL,
+        ),
     },
     "xagent/web/services/kb_file_service.py": {
         ("_aggregate_uploaded_file_statuses_impl", "list_indexed_doc_refs"): (
-            "indexed fallback for legacy files"
+            1,
+            "indexed fallback for legacy files",
         ),
         ("_reconcile_uploaded_files_impl", "cascade_delete"): (
-            "stale-file cleanup (delete_stale=True)"
+            1,
+            "stale-file cleanup (delete_stale=True)",
         ),
     },
     "xagent/core/tools/core/RAG_tools/kb/version_compatibility.py": {
         ("KBVersionCompatibilityFacade.cascade_delete", "cascade_delete"): (
-            "version cleanup"
+            1,
+            "version cleanup",
         ),
     },
     "xagent/core/tools/core/RAG_tools/utils/migration_utils.py": {
         (
             "_infer_embedding_config_from_collection",
             "get_vector_store_raw_connection",
-        ): "model inference at search time",
+        ): (1, "model inference at search time"),
         ("migrate_embeddings_table", "get_vector_store_raw_connection"): (
-            "body of LanceDBVectorIndexStore.migrate_embeddings_table"
+            1,
+            "body of LanceDBVectorIndexStore.migrate_embeddings_table",
         ),
     },
     "xagent/web/app.py": {
         ("startup_event", "list_embeddings_table_names"): (
-            "startup user_id migration check"
+            1,
+            "startup user_id migration check",
         ),
     },
 }
@@ -115,10 +132,10 @@ class _BypassScanner(ast.NodeVisitor):
     def __init__(self) -> None:
         self.scope: list[str] = []
         self.store_names: list[set[str]] = [set()]
-        self.found: set[tuple[str, str]] = set()
+        self.found: Counter[tuple[str, str]] = Counter()
 
     def _record(self, name: str) -> None:
-        self.found.add((".".join(self.scope) or "<module>", name))
+        self.found[(".".join(self.scope) or "<module>", name)] += 1
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.scope.append(node.name)
@@ -181,22 +198,29 @@ class _BypassScanner(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _scan(source: str) -> set[tuple[str, str]]:
+def _scan(source: str) -> Counter[tuple[str, str]]:
     scanner = _BypassScanner()
     scanner.visit(ast.parse(source))
     return scanner.found
 
 
 def test_upper_layers_reach_chunks_and_embeddings_only_through_the_handle() -> None:
-    found = set()
+    found: Counter[tuple[str, str, str]] = Counter()
     for path in sorted(SRC_ROOT.rglob("*.py")):
         relative = path.relative_to(SRC_ROOT.parent).as_posix()
         if not relative.startswith(IMPLEMENTATIONS):
-            found |= {(relative, *hit) for hit in _scan(path.read_text("utf-8"))}
-    allowed = {(path, *hit) for path, hits in ALLOWLIST.items() for hit in hits}
+            for hit, count in _scan(path.read_text("utf-8")).items():
+                found[(relative, *hit)] += count
+    allowed = Counter(
+        {
+            (path, *hit): count
+            for path, hits in ALLOWLIST.items()
+            for hit, (count, _purpose) in hits.items()
+        }
+    )
 
-    assert found - allowed == set(), "new bypass of KBCollectionHandle"
-    assert allowed - found == set(), "fixed bypass still allowlisted"
+    assert found - allowed == Counter(), "new bypass of KBCollectionHandle"
+    assert allowed - found == Counter(), "fixed bypass still allowlisted"
 
 
 def test_scanner_flags_each_bypass_shape() -> None:
@@ -239,15 +263,22 @@ def other_tables_only(facade):
     store.count_rows("documents")
     store.iter_batches(table_name="parses")
     return facade.cascade_delete()
+
+async def each_occurrence(store: VectorIndexStore):
+    store.count_rows("chunks")
+    store.count_rows("chunks")
+    return await store.get_vector_dimension_async("embeddings_m")
 """
 
     assert _scan(source) == {
-        ("direct", "delete_document_data"),
-        ("bound_name", "aggregate_collection_stats"),
-        ("annotated", "count_rows"),
-        ("computed_table", "count_rows_or_zero"),
-        ("context_store", "cascade_delete"),
-        ("Facade.enumerate", "list_embeddings_table_names"),
-        ("closure._compensate", "delete_documents_data"),
-        ("annotated_assignment", "list_indexed_doc_refs"),
+        ("each_occurrence", "count_rows"): 2,
+        ("each_occurrence", "get_vector_dimension_async"): 1,
+        ("direct", "delete_document_data"): 1,
+        ("bound_name", "aggregate_collection_stats"): 1,
+        ("annotated", "count_rows"): 1,
+        ("computed_table", "count_rows_or_zero"): 1,
+        ("context_store", "cascade_delete"): 1,
+        ("Facade.enumerate", "list_embeddings_table_names"): 1,
+        ("closure._compensate", "delete_documents_data"): 1,
+        ("annotated_assignment", "list_indexed_doc_refs"): 1,
     }
