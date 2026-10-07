@@ -288,12 +288,13 @@ def _restore_document_table_rows(
 def deployment_kb_backend() -> KBStorageBackend:
     """Return the KB engine of this deployment.
 
-    A deployment runs one engine for now, so every collection binding equals it.
+    Startup refuses a setting that differs from the deployment's engine record,
+    so the setting is the recorded engine in every process that checked it.
     Raises ``ConfigurationError`` for a known engine that is not implemented.
     """
     backend = get_configured_vector_backend()
     require_implemented_vector_backend(backend)
-    return KBStorageBackend(backend.value)
+    return backend
 
 
 class KBHandleProvider:
