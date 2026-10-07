@@ -1,14 +1,32 @@
 """Behavior contract every ``KBCollectionHandle`` engine must satisfy.
 
 Tests drive the handle only through the abstract interface; an engine joins by
-adding an ``ENGINES`` entry. Async search is out of scope: LanceDB async search
-returns no rows today.
+adding an ``ENGINES`` entry. Not covered here:
+
+- async search: LanceDB async search returns no rows today;
+- untagged main pointers and ``list_main_pointers``: on LanceDB the untagged
+  ``IS NULL`` / ``= ''`` alternatives are passed as a tuple and ANDed, so they
+  never match, and ``list_main_pointers`` raises ``MainPointerError``
+  (#2858);
+- main pointers under tenant deletes: ``main_pointers`` has no owner column, so
+  a tenant-scoped document delete or document cascade on another owner's doc_id
+  removes that owner's pointers (#2859). New engines should not take
+  LanceDB as the reference for either main-pointer item;
+- version candidates, promotion and the candidate-cleanup snapshots: covered on
+  LanceDB by ``test_collection_handle_version.py``;
+- count-based reads right after a parse, chunk or embeddings cascade: LanceDB
+  keeps returning pre-delete values from ``collection_stats``, ``chunk_exists``,
+  ``parse_exists`` (parse cascade) and ``read_chunks_needing_embedding()``'s
+  ``total_count`` (parse or chunk cascade), because ``count_rows`` reads through
+  the cached ``_get_table`` handle and only the document cascade invalidates it
+  (#2860).
 """
 
 from __future__ import annotations
 
+import ast
+import importlib
 import inspect
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +39,6 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
     ParsedParagraph,
     RegisterDocumentRequest,
 )
-from xagent.core.tools.core.RAG_tools.kb import coordinator
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     KBCollectionHandle,
     KBHandleProvider,
@@ -45,6 +62,7 @@ COLLECTION = "contract"
 MODEL = "contract-model"
 TAG = to_model_tag(MODEL)
 PARSE = "ph-1"
+PARSE_V2 = "ph-2"
 CONFIG = "cfg-1"
 VECTORS = {
     "kiwi apple": [1.0, 0.0, 0.0],
@@ -54,14 +72,14 @@ VECTORS = {
 }
 SEARCH_MODES = ("dense", "sparse", "hybrid")
 
-OpenHandle = Callable[[str], KBCollectionHandle]
+OpenHandle = Callable[..., KBCollectionHandle]
 
 
-def _open_lancedb(collection: str) -> KBCollectionHandle:
+def _open_lancedb(collection: str, user_id: int | None = None) -> KBCollectionHandle:
     return KBHandleProvider().open(
         KBCollectionContext(
             collection=collection,
-            user_scope=KBUserScope(user_id=None, is_admin=True),
+            user_scope=KBUserScope(user_id=user_id, is_admin=user_id is None),
             access_mode=KBAccessMode.WRITE,
             allow_create=True,
             hide_missing=True,
@@ -91,6 +109,7 @@ def _write_chunks(
     *,
     user_id: int,
     start: int = 0,
+    parse_hash: str = PARSE,
 ) -> None:
     now = datetime.now(timezone.utc)
     chunks = [
@@ -103,14 +122,19 @@ def _write_chunks(
         }
         for index, text in enumerate(texts, start=start)
     ]
-    handle.write_chunks(doc_id, PARSE, CONFIG, {}, chunks, user_id=user_id)
+    handle.write_chunks(doc_id, parse_hash, CONFIG, {}, chunks, user_id=user_id)
 
 
 def _embed(
-    handle: KBCollectionHandle, doc_id: str, *, user_id: int, limit: int | None = None
+    handle: KBCollectionHandle,
+    doc_id: str,
+    *,
+    user_id: int,
+    limit: int | None = None,
+    parse_hash: str = PARSE,
 ) -> list[ChunkEmbeddingData]:
     pending = handle.read_chunks_needing_embedding(
-        doc_id, PARSE, MODEL, user_id=user_id
+        doc_id, parse_hash, MODEL, user_id=user_id
     ).chunks
     embeddings = [
         ChunkEmbeddingData(
@@ -189,10 +213,62 @@ def _search(
     return {result.chunk_id: result.doc_id for result in response.results}
 
 
-def test_abc_declares_every_handle_method_the_coordinator_calls() -> None:
-    called = set(re.findall(r"\bhandle\.(\w+)", inspect.getsource(coordinator)))
-    assert called
-    assert called - KBCollectionHandle.__abstractmethods__ == set()
+HANDLE_CALLER_MODULES = (
+    "xagent.core.tools.core.RAG_tools.kb.coordinator",
+    "xagent.core.tools.core.RAG_tools.kb.legacy_step_compatibility",
+    "xagent.core.tools.core.RAG_tools.kb.parse_display_compatibility",
+    "xagent.core.tools.core.RAG_tools.kb.vector_storage_compatibility",
+    "xagent.core.tools.core.RAG_tools.chunk.chunk_document",
+    "xagent.core.tools.core.RAG_tools.parse.parse_display",
+    "xagent.core.tools.core.RAG_tools.parse.parse_document",
+)
+HANDLE_OPENERS = {"open_collection", "open_collection_sync", "_open_collection_handle"}
+
+
+def _opens_handle(node: ast.AST) -> bool:
+    if isinstance(node, ast.Await):
+        node = node.value
+    return (
+        isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) in HANDLE_OPENERS
+    )
+
+
+def _handle_attributes(module_name: str) -> set[str]:
+    tree = ast.parse(inspect.getsource(importlib.import_module(module_name)))
+    found: set[str] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = [*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs]
+        handles = {
+            param.arg
+            for param in params
+            if param.annotation is not None
+            and "KBCollectionHandle" in ast.unparse(param.annotation)
+        }
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and (
+                node.value is not None and _opens_handle(node.value)
+            ):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                handles |= {t.id for t in targets if isinstance(t, ast.Name)}
+        for node in ast.walk(func):
+            if isinstance(node, ast.Attribute) and (
+                (isinstance(node.value, ast.Name) and node.value.id in handles)
+                or _opens_handle(node.value)
+            ):
+                found.add(node.attr)
+    return found
+
+
+def test_interface_declares_every_handle_attribute_its_callers_use() -> None:
+    """Supplements mypy, which is the primary check that callers stay on the ABC."""
+    used = set().union(*map(_handle_attributes, HANDLE_CALLER_MODULES))
+    assert used
+    assert {name for name in used if not hasattr(KBCollectionHandle, name)} == set()
 
 
 def test_register_document_is_idempotent_and_owner_scoped(
@@ -486,8 +562,6 @@ async def test_ingestion_status_async_round_trip(open_handle: OpenHandle) -> Non
     assert await handle.load_ingestion_status_async(doc_id="doc-1", user_id=1) == []
 
 
-# Tagged pointers only: on LanceDB, untagged get_main_pointer never matches and
-# list_main_pointers raises, both outside this contract's scope.
 def test_main_pointer_round_trip_and_snapshot(open_handle: OpenHandle) -> None:
     handle = open_handle(COLLECTION)
 
@@ -512,3 +586,187 @@ def test_main_pointer_round_trip_and_snapshot(open_handle: OpenHandle) -> None:
     assert handle.delete_main_pointer("doc-1", "embed", TAG) is True
     assert handle.delete_main_pointer("doc-1", "embed", TAG) is False
     assert technical_id() is None
+
+
+@pytest.fixture
+def two_versions(seeded: KBCollectionHandle) -> KBCollectionHandle:
+    for parse_hash in (PARSE, PARSE_V2):
+        paragraphs = [ParsedParagraph(text=parse_hash)]
+        seeded.write_parse("doc-1", parse_hash, "default", {}, paragraphs, user_id=1)
+    _write_chunks(
+        seeded, "doc-1", ["kiwi grape"], user_id=1, start=5, parse_hash=PARSE_V2
+    )
+    _embed(seeded, "doc-1", user_id=1, parse_hash=PARSE_V2)
+    return seeded
+
+
+def _doc1_rows(handle: KBCollectionHandle) -> tuple[list[str], ...]:
+    versions = (PARSE, PARSE_V2)
+    parses = [
+        p for p in versions if handle.read_parse_paragraphs("doc-1", p, is_admin=True)
+    ]
+    chunks = sorted(
+        chunk["chunk_id"]
+        for p in versions
+        for chunk in handle.read_existing_chunks("doc-1", p, CONFIG, is_admin=True)
+    )
+    vectors = sorted(c for c, d in _search(handle, "dense").items() if d == "doc-1")
+    return parses, chunks, vectors
+
+
+ALL_CHUNKS = ["doc-1-c0", "doc-1-c1", "doc-1-c5"]
+CASCADES = [
+    pytest.param("document", {}, ([], [], []), id="document"),
+    pytest.param(
+        "parse",
+        {"new_parse_hash": PARSE_V2},
+        ([PARSE_V2], ["doc-1-c5"], ["doc-1-c5"]),
+        id="parse",
+    ),
+    pytest.param(
+        "chunk",
+        {"new_parse_hash": PARSE_V2},
+        ([PARSE, PARSE_V2], ["doc-1-c5"], ["doc-1-c5"]),
+        id="chunk",
+    ),
+    pytest.param(
+        "embeddings",
+        {"model_tag": TAG},
+        ([PARSE, PARSE_V2], ALL_CHUNKS, []),
+        id="embed",
+    ),
+]
+DEDICATED_CASCADES = {
+    "document": "cleanup_document_cascade",
+    "parse": "cleanup_parse_cascade",
+    "chunk": "cleanup_chunk_cascade",
+    "embeddings": "cleanup_embed_cascade",
+}
+
+
+def _cascade(
+    handle: KBCollectionHandle, scope: str, via: str, **kwargs: object
+) -> dict[str, int]:
+    if via == "scope":
+        return handle.cleanup_cascade("doc-1", scope, **kwargs)
+    return getattr(handle, DEDICATED_CASCADES[scope])("doc-1", **kwargs)
+
+
+@pytest.mark.parametrize("via", ["dedicated", "scope"])
+@pytest.mark.parametrize(("scope", "kwargs", "expected"), CASCADES)
+def test_cascade_deletes_its_scope_only_when_confirmed(
+    two_versions: KBCollectionHandle,
+    via: str,
+    scope: str,
+    kwargs: dict[str, object],
+    expected: tuple[list[str], ...],
+) -> None:
+    before = _doc1_rows(two_versions)
+    assert before == ([PARSE, PARSE_V2], ALL_CHUNKS, ALL_CHUNKS)
+
+    preview = _cascade(two_versions, scope, via, **kwargs)
+    _cascade(two_versions, scope, via, preview_only=False, **kwargs)
+    assert _doc1_rows(two_versions) == before
+
+    deleted = _cascade(
+        two_versions, scope, via, preview_only=False, confirm=True, **kwargs
+    )
+    assert deleted == preview
+    assert _doc1_rows(two_versions) == expected
+    assert "doc-2-c0" in _search(two_versions, "dense")
+
+
+@pytest.mark.parametrize("via", ["dedicated", "scope"])
+@pytest.mark.parametrize(("scope", "kwargs", "expected"), CASCADES)
+def test_cascade_leaves_other_owners_rows(
+    two_versions: KBCollectionHandle,
+    via: str,
+    scope: str,
+    kwargs: dict[str, object],
+    expected: tuple[list[str], ...],
+) -> None:
+    before = _doc1_rows(two_versions)
+    _cascade(
+        two_versions,
+        scope,
+        via,
+        user_id=2,
+        is_admin=False,
+        preview_only=False,
+        confirm=True,
+        **kwargs,
+    )
+    assert _doc1_rows(two_versions) == before
+
+
+def test_operation_cleanup_deletes_only_the_named_vectors(
+    seeded: KBCollectionHandle, open_handle: OpenHandle
+) -> None:
+    target = {
+        "doc_id": "doc-1",
+        "parse_hash": PARSE,
+        "chunk_ids": ["doc-1-c0"],
+        "model_tag": TAG,
+    }
+    stranger = open_handle(COLLECTION, user_id=2)
+    blocked = stranger.cleanup_embeddings_for_operation(
+        preview_only=False, confirm=True, **target
+    )
+    assert blocked.deleted_count == 0
+
+    preview = seeded.cleanup_embeddings_for_operation(**target)
+    assert (preview.status, preview.deleted_count) == ("planned", 1)
+    assert "doc-1-c0" in _search(seeded, "dense")
+
+    done = seeded.cleanup_embeddings_for_operation(
+        preview_only=False, confirm=True, **target
+    )
+    assert (done.status, done.deleted_count) == ("complete", 1)
+    assert set(_search(seeded, "dense")) == {"doc-1-c1", "doc-2-c0"}
+    assert len(seeded.read_existing_chunks("doc-1", PARSE, CONFIG, user_id=1)) == 2
+
+
+def test_rename_collection_status_moves_only_the_callers_rows(
+    open_handle: OpenHandle,
+) -> None:
+    handle = open_handle(COLLECTION)
+    handle.write_ingestion_status("doc-1", status="running", user_id=1)
+    handle.write_ingestion_status("doc-2", status="running", user_id=2)
+
+    assert handle.rename_collection_status("renamed", 2, False) == []
+
+    def doc_ids(collection: str) -> list[str]:
+        rows = open_handle(collection).load_ingestion_status(is_admin=True)
+        return [row["doc_id"] for row in rows]
+
+    assert doc_ids("renamed") == ["doc-2"]
+    assert doc_ids(COLLECTION) == ["doc-1"]
+
+
+async def test_rename_collection_metadata_moves_only_the_callers_config(
+    open_handle: OpenHandle,
+) -> None:
+    store = get_metadata_store()
+    for owner in (1, 2):
+        await store.save_collection_config(COLLECTION, f'{{"owner": {owner}}}', owner)
+
+    await open_handle(COLLECTION).rename_collection_metadata("renamed", 2, False)
+
+    assert store.list_collection_config_owner_ids(COLLECTION) == {1}
+    assert store.list_collection_config_owner_ids("renamed") == {2}
+    assert await store.get_collection_config("renamed", 2) == '{"owner": 2}'
+
+
+async def test_delete_collection_config_follows_tenant_scope(
+    open_handle: OpenHandle,
+) -> None:
+    store = get_metadata_store()
+    for owner in (1, 2):
+        await store.save_collection_config(COLLECTION, "{}", owner)
+
+    tenant = open_handle(COLLECTION, user_id=2)
+    assert await tenant.delete_collection_config(tenant_only=True) == 1
+    assert store.list_collection_config_owner_ids(COLLECTION) == {1}
+
+    assert await open_handle(COLLECTION).delete_collection_config() == 1
+    assert store.list_collection_config_owner_ids(COLLECTION) == set()

@@ -62,6 +62,7 @@ from ..core.schemas import (
     SearchResult,
     SearchWarning,
     SparseSearchResponse,
+    StepType,
 )
 from ..LanceDB.model_tag_utils import to_model_tag
 from ..LanceDB.schema_manager import (
@@ -1127,7 +1128,12 @@ class KBCollectionHandle(ABC):
     def get_main_pointer(
         self, doc_id: str, step_type: str, model_tag: str | None = None
     ) -> Optional[Dict[str, Any]]:
-        """Return the main pointer for a document stage, or ``None``."""
+        """Return the main pointer for a document stage, or ``None``.
+
+        Known LanceDB deviation (#2858): with ``model_tag=None`` it never
+        matches, since the ``IS NULL`` / ``= ''`` alternatives are passed as a tuple
+        and combined with AND. New engines should not treat that as the reference.
+        """
 
     @abstractmethod
     def set_main_pointer(
@@ -1145,13 +1151,22 @@ class KBCollectionHandle(ABC):
     def list_main_pointers(
         self, doc_id: str | None = None, limit: int = 100
     ) -> List[Dict[str, Any]]:
-        """List main pointers for this collection."""
+        """List main pointers for this collection.
+
+        Known LanceDB deviation (#2858): on lancedb 0.33 it raises
+        ``MainPointerError`` (the empty query builder has no ``count_rows``).
+        """
 
     @abstractmethod
     def delete_main_pointer(
         self, doc_id: str, step_type: str, model_tag: str | None = None
     ) -> bool:
-        """Delete the main pointer for a document stage; ``True`` if one existed."""
+        """Delete the main pointer for a document stage; ``True`` if one existed.
+
+        Known LanceDB deviation (#2858): with ``model_tag=None`` it never
+        matches, for the same reason as :meth:`get_main_pointer`, so it deletes
+        nothing.
+        """
 
     # --- Version candidates and promotion (#513) ---
 
@@ -1159,26 +1174,49 @@ class KBCollectionHandle(ABC):
     def list_candidates(
         self,
         doc_id: str,
-        step_type: Any,
+        step_type: StepType | str,
         model_tag: Optional[str] = None,
         state: Optional[str] = None,
         limit: int = 50,
         order_by: str = "created_at desc",
     ) -> Dict[str, Any]:
-        """List version candidates for a document stage in this collection."""
+        """List version candidates for a document stage in this collection.
+
+        Returns:
+            A ``dict`` with these keys:
+            - ``"candidates"`` – candidate rows after the state filter, sort and limit
+            - ``"total_count"`` – rows matching the state filter, before the limit
+            - ``"returned_count"`` – number of rows in ``"candidates"``
+            - ``"step_type"`` – the resolved step type value
+            - ``"model_tag"`` – the requested model tag
+            - ``"filters"`` – the requested ``state``, ``limit`` and ``order_by``
+        """
 
     @abstractmethod
     def promote_version_main(
         self,
         doc_id: str,
-        step_type: Any,
+        step_type: StepType | str,
         selected_id: str,
         operator: Optional[str] = None,
         preview_only: bool = False,
         confirm: bool = False,
         model_tag: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Promote a candidate version to main for a document stage."""
+        """Promote a candidate version to main for a document stage.
+
+        Returns:
+            A ``dict`` with these keys:
+            - ``"promoted"`` – ``True`` only when the promotion was executed
+            - ``"preview"`` – ``True`` when only a preview was returned
+            - ``"main_pointer"`` – ``step_type``, ``semantic_id``, ``technical_id``
+              and ``model_tag`` of the selected candidate
+            - ``"deleted_counts"`` – per-table counts, planned for a preview and
+              actual after execution
+            - ``"notes"`` – hints such as ``"Requires re-embed"``
+            - ``"message"`` – preview only
+            - ``"operator"`` – executed promotion only
+        """
 
     # --- Rollback snapshot/restore primitives (#513) ---
 
@@ -1226,14 +1264,46 @@ class KBCollectionHandle(ABC):
     ) -> KBVersionCandidateCleanupSnapshot:
         """Preview what candidate cleanup would delete, without deleting."""
 
-    @abstractmethod
     def restore_candidate_cleanup_snapshot(
         self,
         snapshot: KBVersionCandidateCleanupSnapshot,
         *,
         cleanup_executed: bool = False,
     ) -> KBVersionCandidateRollbackResult:
-        """Report whether an executed candidate cleanup can be rolled back."""
+        """Assess rollback feasibility for a candidate-cleanup snapshot.
+
+        When ``cleanup_executed=True`` and the snapshot recorded side effects,
+        returns a result with ``status="incomplete"``, ``restorable=False``,
+        and ``side_effects_may_remain=True`` — the inspectable-incomplete
+        invariant.  Never issues further deletes; the state is left inspectable.
+        """
+        cleanup_counts = dict(snapshot.cleanup_counts)
+        has_candidate_side_effects = any(
+            int(count) > 0 for count in cleanup_counts.values()
+        )
+        if not cleanup_executed or not has_candidate_side_effects:
+            return KBVersionCandidateRollbackResult(
+                collection=snapshot.collection,
+                doc_id=snapshot.doc_id,
+                status="not_needed",
+                restorable=True,
+                cleanup_counts=cleanup_counts,
+            )
+
+        return KBVersionCandidateRollbackResult(
+            collection=snapshot.collection,
+            doc_id=snapshot.doc_id,
+            status="incomplete",
+            skipped=True,
+            restorable=False,
+            reason="candidate_cleanup_not_restorable",
+            cleanup_counts=cleanup_counts,
+            warnings=(
+                "Version candidate cleanup cannot be restored from the handle; "
+                "preserve visible rollback state and report remaining side effects.",
+            ),
+            side_effects_may_remain=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -4426,47 +4496,6 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             model_tag=model_tag,
             user_id=user_id,
             is_admin=is_admin,
-        )
-
-    def restore_candidate_cleanup_snapshot(
-        self,
-        snapshot: "KBVersionCandidateCleanupSnapshot",
-        *,
-        cleanup_executed: bool = False,
-    ) -> "KBVersionCandidateRollbackResult":
-        """Assess rollback feasibility for a candidate-cleanup snapshot.
-
-        When ``cleanup_executed=True`` and the snapshot recorded side effects,
-        returns a result with ``status="incomplete"``, ``restorable=False``,
-        and ``side_effects_may_remain=True`` — the inspectable-incomplete
-        invariant.  Never issues further deletes; the state is left inspectable.
-        """
-        cleanup_counts = dict(snapshot.cleanup_counts)
-        has_candidate_side_effects = any(
-            int(count) > 0 for count in cleanup_counts.values()
-        )
-        if not cleanup_executed or not has_candidate_side_effects:
-            return KBVersionCandidateRollbackResult(
-                collection=snapshot.collection,
-                doc_id=snapshot.doc_id,
-                status="not_needed",
-                restorable=True,
-                cleanup_counts=cleanup_counts,
-            )
-
-        return KBVersionCandidateRollbackResult(
-            collection=snapshot.collection,
-            doc_id=snapshot.doc_id,
-            status="incomplete",
-            skipped=True,
-            restorable=False,
-            reason="candidate_cleanup_not_restorable",
-            cleanup_counts=cleanup_counts,
-            warnings=(
-                "Version candidate cleanup cannot be restored from the handle; "
-                "preserve visible rollback state and report remaining side effects.",
-            ),
-            side_effects_may_remain=True,
         )
 
     async def write_ingestion_status_async(
