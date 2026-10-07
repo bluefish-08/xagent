@@ -46,7 +46,7 @@ from ..management.status import (
 )
 from ..storage.factory import get_metadata_store, get_vector_index_store
 from ..utils.lancedb_query_utils import _safe_count_rows, list_table_names
-from ..utils.string_utils import build_lancedb_filter_expression
+from ..utils.string_utils import build_lancedb_filter_expression, escape_lancedb_string
 from ..utils.user_permissions import UserPermissions
 from ..utils.user_scope import resolve_user_scope
 
@@ -68,6 +68,17 @@ def _resolve_coordinator(coordinator: "KBCoordinator | None") -> "KBCoordinator"
     from ..kb import get_kb_coordinator
 
     return coordinator if coordinator is not None else get_kb_coordinator()
+
+
+def _count_rows_uncached(conn: Any, table_name: str, filter_expr: str) -> int:
+    table = None
+    try:
+        table = conn.open_table(table_name)
+        return _safe_count_rows(table, filter_expr)
+    except Exception:  # noqa: BLE001 - a missing table holds no rows
+        return 0
+    finally:
+        _safe_close_table(table)
 
 
 def _extract_user_id_from_source_path(source_path: Optional[str]) -> Optional[int]:
@@ -1057,39 +1068,33 @@ def _get_document_stats_impl(
     warnings: List[str] = []
 
     try:
-        vector_store = get_vector_index_store()
-        doc_filters = {"collection": collection, "doc_id": doc_id}
-        document_count = sum(
-            batch.num_rows
-            for batch in vector_store.iter_batches(
-                table_name="documents",
-                columns=["doc_id"],
-                filters=doc_filters,
-                is_admin=True,
-            )
+        # Uncached on purpose: a cached table misses rows other processes wrote.
+        conn = get_vector_index_store().get_raw_connection()
+        doc_filter = (
+            f"collection = '{escape_lancedb_string(collection)}' "
+            f"AND doc_id = '{escape_lancedb_string(doc_id)}'"
         )
+        document_count = _count_rows_uncached(conn, "documents", doc_filter)
         document_exists = document_count > 0
-        parse_count = sum(
-            batch.num_rows
-            for batch in vector_store.iter_batches(
-                table_name="parses",
-                columns=["doc_id"],
-                filters=doc_filters,
-                is_admin=True,
-            )
-        )
+        parse_count = _count_rows_uncached(conn, "parses", doc_filter)
 
         resolved_coordinator = _resolve_coordinator(coordinator)
-        # Same scoping as before: totals ignore the caller, per-table counts do not.
+        # Totals ignore the caller; the breakdown is caller-scoped.
         totals = resolved_coordinator.count_rows_by_document_sync(
             collection, user_id=None, is_admin=True, doc_id=doc_id
         ).get(doc_id, {})
-        scoped = resolved_coordinator.count_rows_by_document_sync(
-            collection, user_id=user_id, is_admin=is_admin, doc_id=doc_id
-        ).get(doc_id, {})
+        scoped = (
+            totals
+            if is_admin
+            else resolved_coordinator.count_rows_by_document_sync(
+                collection, user_id=user_id, is_admin=is_admin, doc_id=doc_id
+            ).get(doc_id, {})
+        )
         chunk_count = totals.get("chunks", 0)
         embedding_breakdown = {
-            name: count for name, count in scoped.items() if name != "chunks"
+            name: count
+            for name, count in scoped.items()
+            if name.startswith("embeddings_")
         }
         if model_tag:
             table_name = embeddings_table_name(model_tag)
@@ -1097,7 +1102,9 @@ def _get_document_stats_impl(
             embedding_breakdown = {table_name: embedding_count}
         else:
             embedding_count = sum(
-                count for name, count in totals.items() if name != "chunks"
+                count
+                for name, count in totals.items()
+                if name.startswith("embeddings_")
             )
 
     except Exception as exc:  # noqa: BLE001 - convert to structured failure
@@ -1225,6 +1232,10 @@ def _list_documents_impl(
                 "uploaded_at": None,  # Not available in DocumentRecord
             }
 
+        row_counts = _resolve_coordinator(coordinator).count_rows_by_document_sync(
+            collection, user_id=user_id, is_admin=is_admin
+        )
+
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to list documents: %s", exc, exc_info=True)
         return DocumentListResult(
@@ -1234,10 +1245,6 @@ def _list_documents_impl(
             message=f"Failed to list documents: {exc}",
             warnings=warnings,
         )
-
-    row_counts = _resolve_coordinator(coordinator).count_rows_by_document_sync(
-        collection, user_id=user_id, is_admin=is_admin
-    )
 
     # Load status records
     status_records = {
@@ -1258,7 +1265,7 @@ def _list_documents_impl(
         per_table = row_counts.get(doc_id, {})
         chunk_count = per_table.get("chunks", 0)
         embedding_count = sum(
-            count for name, count in per_table.items() if name != "chunks"
+            count for name, count in per_table.items() if name.startswith("embeddings_")
         )
 
         if status_entry and isinstance(status_entry.get("status"), str):

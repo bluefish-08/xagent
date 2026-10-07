@@ -29,7 +29,6 @@ from ..core.schemas import (
     SparseSearchResponse,
 )
 from ..storage.factory import StorageFactory
-from ..storage.vector_backend import get_configured_vector_backend
 from ..utils.user_scope import resolve_user_scope
 from .api_compatibility import KBApiCompatibilityFacade
 from .async_utils import maybe_await
@@ -135,10 +134,10 @@ class KBCoordinator:
         api_compatibility: KBApiCompatibilityFacade | None = None,
     ) -> None:
         self._storage_factory = storage_factory or StorageFactory.get_factory()
-        self._handle_provider = handle_provider or KBHandleProvider()
         self._storage_shim = storage_shim or KBStorageShimCompatibilityFacade(
             storage_factory=self._storage_factory
         )
+        self._handle_provider = handle_provider or KBHandleProvider(self._storage_shim)
         self._file_compatibility = file_compatibility or KBFileCompatibilityFacade(
             storage_shim=self._storage_shim
         )
@@ -495,10 +494,7 @@ class KBCoordinator:
     ) -> dict[str, dict[str, int]]:
         """Return per-collection stats for the deployment engine in one batch."""
         return self._handle_provider.aggregate_collection_stats(
-            KBStorageBackend(get_configured_vector_backend().value),
-            self._storage_shim.get_vector_index_store(),
-            user_id=user_id,
-            is_admin=is_admin,
+            user_id=user_id, is_admin=is_admin
         )
 
     def count_rows_by_document_sync(
@@ -509,7 +505,11 @@ class KBCoordinator:
         is_admin: bool,
         doc_id: str | None = None,
     ) -> dict[str, dict[str, int]]:
-        """Open the collection handle and count rows per document."""
+        """Open the collection handle and count rows per document.
+
+        The handle follows the collection binding while the list stats follow
+        the deployment engine; with one engine per deployment they are equal.
+        """
         handle = self.open_collection_sync(
             KBContextRequest(
                 collection=collection,

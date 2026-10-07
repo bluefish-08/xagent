@@ -1,19 +1,26 @@
 """Collection and document stats are read through the engine entry points.
 
-LanceDB numbers must stay what the global store reported before; an engine
-whose vectors live outside LanceDB must be able to supply its own counts.
+LanceDB keeps the numbers it reported before (pinned as literal counts and
+against the global aggregate for list stats); an engine whose vectors live
+outside LanceDB must be able to supply its own counts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone
 
+import lancedb
+import pytest
+
+from xagent.core.tools.core.RAG_tools.core.exceptions import ConfigurationError
 from xagent.core.tools.core.RAG_tools.core.schemas import (
     CollectionInfo,
     DocumentProcessingStatus,
 )
 from xagent.core.tools.core.RAG_tools.kb import KBCoordinator, get_kb_coordinator
+from xagent.core.tools.core.RAG_tools.kb.collection_handle import KBHandleProvider
 from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
     embeddings_table_name,
 )
@@ -35,22 +42,37 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _document_row(collection: str, doc_id: str, user_id: int) -> dict:
+    return {
+        "collection": collection,
+        "doc_id": doc_id,
+        "file_id": None,
+        "source_path": f"/uploads/user_{user_id}/{doc_id}.txt",
+        "file_type": "txt",
+        "content_hash": "a" * 64,
+        "uploaded_at": _now(),
+        "title": None,
+        "language": None,
+        "user_id": user_id,
+    }
+
+
+def _parse_row(collection: str, doc_id: str, user_id: int) -> dict:
+    return {
+        "collection": collection,
+        "doc_id": doc_id,
+        "parse_hash": "ph",
+        "parser": "p",
+        "created_at": _now(),
+        "params_json": "{}",
+        "parsed_content": "full text",
+        "user_id": user_id,
+    }
+
+
 def _seed_document(collection: str, doc_id: str, user_id: int) -> None:
     get_vector_index_store().upsert_documents(
-        [
-            {
-                "collection": collection,
-                "doc_id": doc_id,
-                "file_id": None,
-                "source_path": f"/uploads/user_{user_id}/{doc_id}.txt",
-                "file_type": "txt",
-                "content_hash": "a" * 64,
-                "uploaded_at": _now(),
-                "title": None,
-                "language": None,
-                "user_id": user_id,
-            }
-        ]
+        [_document_row(collection, doc_id, user_id)]
     )
 
 
@@ -134,7 +156,7 @@ def test_lancedb_counts_rows_per_document_and_table() -> None:
     assert _count_rows_by_document(user_id=2, is_admin=False, doc_id="d1") == {}
 
 
-def test_lancedb_document_numbers_match_the_global_store() -> None:
+def test_lancedb_document_list_and_detail_numbers() -> None:
     _seed_two_documents()
     store = get_vector_index_store()
 
@@ -154,14 +176,13 @@ def test_lancedb_document_numbers_match_the_global_store() -> None:
 
     # Totals ignore the caller scope, the per-table breakdown does not.
     stats = collections.get_document_stats(KB, "d1", user_id=2, is_admin=False)
-    old = store.aggregate_document_stats(
-        collection_name=KB, doc_id="d1", user_id=2, is_admin=False
-    )
     assert stats.data is not None
-    assert stats.data.document_exists is (old["documents"] > 0)
-    assert stats.data.chunk_count == old["chunks"] == 2
-    assert stats.data.embedding_count == old["embeddings"] == 3
+    assert stats.data.document_exists is True
+    assert (stats.data.chunk_count, stats.data.embedding_count) == (2, 3)
     assert stats.data.embedding_breakdown == {}
+    admin = collections.get_document_stats(KB, "d1", user_id=2, is_admin=True)
+    assert admin.data is not None
+    assert admin.data.embedding_breakdown == {TABLE_A: 2, TABLE_B: 1}
 
     owner = collections.get_document_stats(KB, "d1", user_id=1, is_admin=False)
     assert owner.data is not None
@@ -178,6 +199,13 @@ def test_lancedb_document_numbers_match_the_global_store() -> None:
     assert other.data is not None
     assert other.data.embedding_count == 0
     assert other.data.embedding_breakdown == {TABLE_A: 0}
+    no_table = collections.get_document_stats(
+        KB, "d1", model_tag="model-zzz", user_id=1, is_admin=False
+    )
+    assert no_table.status == "success"
+    assert no_table.data is not None
+    assert no_table.data.embedding_count == 0
+    assert no_table.data.embedding_breakdown == {embeddings_table_name("model-zzz"): 0}
 
 
 def test_lancedb_list_stats_are_one_global_aggregate() -> None:
@@ -188,6 +216,44 @@ def test_lancedb_list_stats_are_one_global_aggregate() -> None:
         assert get_kb_coordinator().aggregate_collection_stats_sync(
             user_id=user_id, is_admin=is_admin
         ) == store.aggregate_collection_stats(user_id=user_id, is_admin=is_admin)
+
+
+@pytest.mark.parametrize("engine", ["milvus", "qdrant"])
+def test_list_stats_reject_an_unimplemented_engine(monkeypatch, engine) -> None:
+    monkeypatch.setenv("XAGENT_VECTOR_BACKEND", engine)
+
+    with pytest.raises(ConfigurationError, match="not implemented"):
+        KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
+
+
+def test_document_stats_see_rows_another_process_wrote() -> None:
+    _seed_document(KB, "d1", 1)
+    get_vector_index_store().upsert_parses([_parse_row(KB, "d1", 1)])
+    before = collections.get_document_stats(KB, "d2", user_id=1, is_admin=False)
+    assert before.data is not None
+    assert (before.data.document_exists, before.data.parse_count) == (False, 0)
+
+    other = lancedb.connect(os.environ["LANCEDB_DIR"])
+    other.open_table("documents").add([_document_row(KB, "d2", 2)])
+    other.open_table("parses").add([_parse_row(KB, "d2", 2)])
+
+    after = collections.get_document_stats(KB, "d2", user_id=1, is_admin=False)
+    assert after.data is not None
+    assert (after.data.document_exists, after.data.parse_count) == (True, 1)
+
+
+def test_list_documents_reports_a_handle_that_cannot_open() -> None:
+    _seed_two_documents()
+    asyncio.run(
+        get_metadata_store().save_collection(
+            CollectionInfo(name=KB, extra_metadata={"kb_storage": "bogus"})
+        )
+    )
+
+    listed = collections.list_documents(KB, user_id=1, is_admin=False)
+
+    assert (listed.status, listed.documents) == ("error", [])
+    assert "bogus" in listed.message
 
 
 class _ExternalVectorsCoordinator:
@@ -203,7 +269,7 @@ class _ExternalVectorsCoordinator:
     def count_rows_by_document_sync(
         self, collection, *, user_id, is_admin, doc_id=None
     ):
-        return {"d1": {"chunks": 2, "embeddings_external": 2}}
+        return {"d1": {"chunks": 2, "embeddings_external": 2, "parses": 1}}
 
 
 def test_list_stats_come_from_the_engine_batch_entry() -> None:
@@ -222,7 +288,7 @@ def test_list_stats_come_from_the_engine_batch_entry() -> None:
     assert (info.chunks, info.embeddings) == (2, 2)
 
 
-def test_document_counts_come_from_the_handle() -> None:
+def test_document_counts_come_from_the_coordinator_entry() -> None:
     _seed_document(KB, "d1", 1)
     _seed_chunk(KB, "d1", "c1", 1)
     _seed_chunk(KB, "d1", "c2", 1)
