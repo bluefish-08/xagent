@@ -1191,6 +1191,8 @@ async def rebuild_collection_stats(
 async def _rebuild_collection_stats_impl(
     collection_name: str,
 ) -> Optional["CollectionInfo"]:
+    from ..kb import get_kb_coordinator
+
     try:
         existing_info: Optional[
             CollectionInfo
@@ -1202,7 +1204,7 @@ async def _rebuild_collection_stats_impl(
     # aggregate_collection_stats is a synchronous LanceDB scan: keep it off the
     # event loop so it cannot stall every other coroutine in the process.
     stats_by_collection = await asyncio.to_thread(
-        get_vector_index_store().aggregate_collection_stats,
+        get_kb_coordinator().aggregate_collection_stats_sync,
         user_id=None,
         is_admin=True,
     )
@@ -1415,6 +1417,7 @@ async def rebuild_collection_metadata() -> None:
 
 async def _rebuild_collection_metadata_impl() -> None:
     """Implementation for rebuild_collection_metadata."""
+    from ..kb.collection_handle import ledger_holds_vectors
     from . import collections
 
     # Get all existing collections (use is_admin=True to bypass user filtering)
@@ -1430,8 +1433,10 @@ async def _rebuild_collection_metadata_impl() -> None:
 
     # Get connection and find embeddings tables
     vector_store = get_vector_index_store()
-    table_names = vector_store.list_table_names()
-    embeddings_tables = [t for t in table_names if t.startswith("embeddings_")]
+    embeddings_tables: list[str] = []
+    if ledger_holds_vectors():
+        table_names = vector_store.list_table_names()
+        embeddings_tables = [t for t in table_names if t.startswith("embeddings_")]
 
     # Build lookup from legacy/new table tags to Hub model IDs.
     hub_tag_to_id: dict[str, tuple[str, Optional[int]]] = {}
@@ -1477,7 +1482,7 @@ async def _rebuild_collection_metadata_impl() -> None:
             embedding_model_id = None
             embedding_dimension = None
 
-            if collection.embeddings > 0:
+            if collection.embeddings > 0 and ledger_holds_vectors():
                 # Find which embeddings table has data for this collection
                 for table_name in embeddings_tables:
                     # Use abstraction layer to count rows

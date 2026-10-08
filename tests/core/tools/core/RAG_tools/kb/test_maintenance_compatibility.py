@@ -536,7 +536,7 @@ async def test_rebuild_collection_stats_treats_null_storage_counts_as_zero(
     """Given nullable aggregate counts, stats rebuild stores zero counts."""
     from xagent.core.tools.core.RAG_tools.core.schemas import CollectionInfo
     from xagent.core.tools.core.RAG_tools.kb import get_kb_coordinator
-    from xagent.core.tools.core.RAG_tools.management import collection_manager
+    from xagent.core.tools.core.RAG_tools.kb.collection_handle import KBHandleProvider
     from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
 
     metadata_store = get_metadata_store()
@@ -571,9 +571,11 @@ async def test_rebuild_collection_stats_treats_null_storage_counts_as_zero(
             }
 
     monkeypatch.setattr(
-        collection_manager,
-        "get_vector_index_store",
-        lambda: _FakeVectorIndexStore(),
+        KBHandleProvider,
+        "aggregate_collection_stats",
+        lambda _provider, **kwargs: _FakeVectorIndexStore().aggregate_collection_stats(
+            **kwargs
+        ),
     )
 
     rebuilt = await facade.rebuild_collection_stats(collection_name)
