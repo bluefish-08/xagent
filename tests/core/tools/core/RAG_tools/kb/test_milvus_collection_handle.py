@@ -88,8 +88,8 @@ FAMILIES = {
     "supports_chunks": """chunk_exists read_existing_chunks write_chunks
         delete_chunk_records snapshot_chunks restore_chunks delete_created_chunks""",
     "supports_embeddings": """read_chunks_needing_embedding write_embeddings
-        delete_embedding_records snapshot_embeddings restore_embeddings
-        delete_created_embeddings cleanup_embeddings_for_operation""",
+        commit_embeddings delete_embedding_records snapshot_embeddings
+        restore_embeddings delete_created_embeddings cleanup_embeddings_for_operation""",
     "supports_search": "validate_query_vector search_dense search_sparse search_hybrid",
     "supports_versions": f"{VERSIONS} {CASCADES}",
     "supports_async_search": ASYNC_SEARCH,
@@ -114,12 +114,21 @@ UNSUPPORTED = {
     )
     for name in names.split()
 }
-PENDING = set(
-    f"""{FAMILIES["supports_embeddings"]} {FAMILIES["supports_search"]}
+IMPLEMENTED = {
+    "collection_stats",
+    "count_rows_by_document",
+    "read_chunks_needing_embedding",
+    "write_embeddings",
+    "commit_embeddings",
+}
+PENDING = (
+    set(
+        f"""{FAMILIES["supports_embeddings"]} {FAMILIES["supports_search"]}
     capture_document_rows restore_document_rows delete_documents_data
     delete_collection_data cleanup_collection_data_after_rollback""".split()
+    )
+    - IMPLEMENTED
 )
-IMPLEMENTED = {"collection_stats", "count_rows_by_document"}
 
 
 @pytest.fixture
@@ -171,8 +180,8 @@ def test_every_interface_method_is_delegated_refused_pending_or_implemented() ->
     assert (len(LEDGER), len(UNSUPPORTED), len(PENDING), len(IMPLEMENTED)) == (
         44,
         12,
-        16,
-        2,
+        14,
+        5,
     )
     assert LEDGER | set(UNSUPPORTED) | PENDING | IMPLEMENTED == interface
     for name in interface:
