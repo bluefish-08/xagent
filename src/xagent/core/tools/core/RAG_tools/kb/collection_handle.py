@@ -22,6 +22,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -110,6 +111,14 @@ from ..utils.lancedb_query_utils import (
 from ..utils.metadata_utils import deserialize_metadata, serialize_metadata
 from ..utils.string_utils import escape_lancedb_string, generate_deterministic_doc_id
 from .kb_ids import get_or_create_kb_id, read_kb_ids
+from .milvus_search import (
+    SEARCH_FIELDS,
+    caller_filter,
+    dense_score,
+    keyword_score,
+    like_pattern,
+    to_result,
+)
 from .models import (
     KBBackendCapabilities,
     KBCollectionContext,
@@ -760,7 +769,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> DenseSearchResponse:
-        """Execute dense vector search for this collection."""
+        """Execute dense vector search for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     @abstractmethod
     async def search_dense_async(
@@ -776,7 +788,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> DenseSearchResponse:
-        """Async dense vector search for this collection."""
+        """Async dense vector search for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     @abstractmethod
     def search_sparse(
@@ -792,7 +807,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> SparseSearchResponse:
-        """Execute sparse (FTS) search for this collection."""
+        """Execute sparse (FTS) search for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     @abstractmethod
     async def search_sparse_async(
@@ -808,7 +826,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> SparseSearchResponse:
-        """Async sparse (FTS) search for this collection."""
+        """Async sparse (FTS) search for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     @abstractmethod
     def search_hybrid(
@@ -826,7 +847,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> HybridSearchResponse:
-        """Execute hybrid (dense + sparse) search with fusion for this collection."""
+        """Execute hybrid (dense + sparse) search with fusion for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     @abstractmethod
     async def search_hybrid_async(
@@ -844,7 +868,10 @@ class KBCollectionHandle(ABC):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> HybridSearchResponse:
-        """Async hybrid (dense + sparse) search with fusion for this collection."""
+        """Async hybrid (dense + sparse) search with fusion for this collection.
+
+        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        """
 
     # --- Parse/chunk cleanup (row only, collection scoped) (#509) ---
 
@@ -3615,8 +3642,8 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             fusion_config=fusion_config,
         )
 
+    @staticmethod
     def _fuse_hybrid(
-        self,
         model_tag: str,
         query_text: str,
         dense_response: DenseSearchResponse,
@@ -5355,6 +5382,8 @@ _MILVUS_TAG_LENGTH = 64
 _MILVUS_ID_LENGTH = 512
 _MILVUS_TEXT_BYTES = 65_535
 _MILVUS_QUERY_BATCH = 10_000
+# Milvus rejects a query whose offset plus limit is above this.
+_MILVUS_QUERY_WINDOW = 16_384
 _MILVUS_NOT_LOADED = 101
 
 
@@ -5599,10 +5628,11 @@ class MilvusCollectionHandle(KBCollectionHandle):
     config and metadata) stays in LanceDB and is served by the injected
     ``ledger`` handle; chunk copies and vectors for search live in Milvus.
     Async search, cascade cleanup, and version candidates and promotion raise
-    ``ConfigurationError``. Stats, embedding writes and the commit use Milvus
-    rows; the other methods that need them raise ``NotImplementedError`` until
-    implemented.
-    ``KBBackendCapabilities.milvus`` reports the same split.
+    ``ConfigurationError``. Stats, embedding writes, the commit and search use
+    Milvus rows; the other methods that need them raise ``NotImplementedError``
+    until implemented.
+    ``KBBackendCapabilities.milvus`` turns a family on only when every method of it
+    is served here.
     """
 
     context: KBCollectionContext
@@ -5916,6 +5946,284 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 filter_params={"kb_id": kb_id, "doc_id": doc_id, "old": old},
             )
 
+    def validate_query_vector(
+        self,
+        query_vector: list[float],
+        *,
+        model_tag: str | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> None:
+        """Check the vector's format; nothing is sent to Milvus."""
+        validate_query_vector_format(query_vector)
+
+    def _search_scope(
+        self, filters: dict[str, Any] | None, user_id: int | None, is_admin: bool
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Return the filter all three paths share and its parameters, or ``None``
+        without a readable kb_id. Caller filters are translated first and may raise."""
+        extra, params = caller_filter(filters)
+        kb_ids = self._kb_ids(user_id, is_admin)
+        if not kb_ids:
+            return None
+        return _visible_filter(kb_ids) + (f" and {extra}" if extra else ""), params
+
+    def _read_model(
+        self, model_tag: str, read: Callable[[str], list[Any]]
+    ) -> list[Any]:
+        """Run ``read`` on the collection of the model id; one not loaded holds nothing."""
+        name = milvus_collection_name(model_tag)
+        with _unloaded_as_empty(name, set()):
+            return read(name)
+        return []
+
+    @staticmethod
+    def _search_failure(
+        code: str, route: str, model_tag: str, error: Exception
+    ) -> SearchWarning:
+        logger.error("%s search failed for %s: %s", route, model_tag, error)
+        return SearchWarning(
+            code=code,
+            message=f"An unexpected error occurred during {route} search: {error}",
+            fallback_action=SearchFallbackAction.PARTIAL_RESULTS,
+            affected_models=[model_tag],
+        )
+
+    def _dense_response(
+        self,
+        model_tag: str,
+        query_vector: list[float],
+        top_k: int,
+        scope: tuple[str, dict[str, Any]] | None,
+        nprobes: int | None,
+        refine_factor: int | None,
+    ) -> DenseSearchResponse:
+        try:
+            hits: list[Any] = []
+            if scope:
+                expr, params = scope
+                hits = self._read_model(
+                    model_tag,
+                    lambda name: self.client.search(
+                        name,
+                        data=[[float(x) for x in query_vector]],
+                        anns_field="dense",
+                        limit=top_k,
+                        search_params={"metric_type": "COSINE"},
+                        filter=expr,
+                        filter_params=params,
+                        output_fields=SEARCH_FIELDS,
+                    )[0],
+                )
+            results = [
+                to_result(hit["entity"], dense_score(hit["distance"]), model_tag)
+                for hit in hits
+            ]
+        except Exception as error:
+            warning = self._search_failure(
+                "DENSE_SEARCH_FAILED", "dense", model_tag, error
+            )
+            return DenseSearchResponse(
+                results=[],
+                total_count=0,
+                status="failed",
+                warnings=[warning],
+                index_status=IndexStatus.NO_INDEX,
+                nprobes=nprobes,
+                refine_factor=refine_factor,
+            )
+        return DenseSearchResponse(
+            results=results,
+            total_count=len(results),
+            index_status=IndexStatus.INDEX_READY,
+            nprobes=nprobes,
+            refine_factor=refine_factor,
+        )
+
+    def _substring_results(
+        self,
+        model_tag: str,
+        term: str,
+        top_k: int,
+        expr: str,
+        params: dict[str, Any],
+    ) -> list[SearchResult]:
+        """Return up to ``top_k`` rows containing ``term``, paged because the pattern
+        over-matches. Keyed by chunk_id: a write between pages can repeat a row."""
+        expr += " and text like {pattern}"
+        params = {**params, "pattern": like_pattern(term)}
+        found: dict[str, SearchResult] = {}
+        for offset in range(0, _MILVUS_QUERY_WINDOW, top_k):
+            size = min(top_k, _MILVUS_QUERY_WINDOW - offset)
+            page = self._read_model(
+                model_tag,
+                lambda name: self.client.query(
+                    name,
+                    filter=expr,
+                    filter_params=params,
+                    output_fields=SEARCH_FIELDS,
+                    limit=size,
+                    offset=offset,
+                ),
+            )
+            found.update(
+                {
+                    row["chunk_id"]: to_result(row, 1.0, model_tag)
+                    for row in page
+                    if term in row["text"]
+                }
+            )
+            if len(found) >= top_k or len(page) < size:
+                break
+        return list(found.values())[:top_k]
+
+    def _keyword_results(
+        self,
+        model_tag: str,
+        query_text: str,
+        top_k: int,
+        expr: str,
+        params: dict[str, Any],
+    ) -> tuple[list[SearchResult], list[SearchWarning]]:
+        hits = self._read_model(
+            model_tag,
+            lambda name: self.client.search(
+                name,
+                data=[query_text],
+                anns_field="sparse",
+                limit=top_k,
+                search_params={"metric_type": "BM25"},
+                filter=expr,
+                filter_params=params,
+                output_fields=SEARCH_FIELDS,
+            )[0],
+        )
+        results = [
+            to_result(hit["entity"], keyword_score(hit["distance"]), model_tag)
+            for hit in hits
+        ]
+        if results:
+            return results, []
+        results = self._substring_results(model_tag, query_text, top_k, expr, params)
+        fallback = SearchWarning(
+            code="FTS_FALLBACK",
+            message="Keyword search returned no matches; used substring search.",
+            fallback_action=SearchFallbackAction.BRUTE_FORCE,
+            affected_models=[model_tag],
+        )
+        return results, [fallback] if results else []
+
+    def _sparse_response(
+        self,
+        model_tag: str,
+        query_text: str,
+        top_k: int,
+        scope: tuple[str, dict[str, Any]] | None,
+    ) -> SparseSearchResponse:
+        try:
+            results, warnings = (
+                ([], [])
+                if scope is None
+                else self._keyword_results(model_tag, query_text, top_k, *scope)
+            )
+        except Exception as error:
+            failure = self._search_failure(
+                "FTS_SEARCH_FAILED", "sparse", model_tag, error
+            )
+            return SparseSearchResponse(
+                results=[],
+                total_count=0,
+                status="failed",
+                warnings=[failure],
+                fts_enabled=True,
+                query_text=query_text,
+            )
+        return SparseSearchResponse(
+            results=results,
+            total_count=len(results),
+            warnings=warnings,
+            fts_enabled=True,
+            query_text=query_text,
+        )
+
+    def search_dense(
+        self,
+        model_tag: str,
+        query_vector: list[float],
+        *,
+        top_k: int = 10,
+        filters: dict[str, Any] | None = None,
+        readonly: bool = False,
+        nprobes: int | None = None,
+        refine_factor: int | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> DenseSearchResponse:
+        """Search the visible rows of the readable kb_ids by cosine similarity.
+
+        ``model_tag`` is the model id the vectors were written with, as the search
+        pipeline passes it. Scores follow LanceDB's L2 scale; ``readonly``,
+        ``nprobes`` and ``refine_factor`` have no effect on the HNSW index.
+        """
+        scope = self._search_scope(filters, user_id, is_admin)
+        return self._dense_response(
+            model_tag, query_vector, top_k, scope, nprobes, refine_factor
+        )
+
+    def search_sparse(
+        self,
+        model_tag: str,
+        query_text: str,
+        *,
+        top_k: int,
+        filters: dict[str, Any] | None = None,
+        readonly: bool = False,
+        nprobes: int | None = None,
+        refine_factor: int | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> SparseSearchResponse:
+        """BM25 search of the same rows; a query with no match falls back to ``LIKE``."""
+        scope = self._search_scope(filters, user_id, is_admin)
+        return self._sparse_response(model_tag, query_text, top_k, scope)
+
+    def search_hybrid(
+        self,
+        model_tag: str,
+        query_text: str,
+        query_vector: list[float],
+        *,
+        top_k: int = 10,
+        filters: dict[str, Any] | None = None,
+        fusion_config: FusionConfig | None = None,
+        readonly: bool = False,
+        nprobes: int | None = None,
+        refine_factor: int | None = None,
+        user_id: int | None = None,
+        is_admin: bool = False,
+    ) -> HybridSearchResponse:
+        """Run the dense and BM25 queries concurrently and fuse them in xagent."""
+        scope = self._search_scope(filters, user_id, is_admin)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            dense = pool.submit(
+                self._dense_response,
+                model_tag,
+                query_vector,
+                top_k * 2,
+                scope,
+                nprobes,
+                refine_factor,
+            )
+            sparse = self._sparse_response(model_tag, query_text, top_k * 2, scope)
+        return LanceDBCollectionHandle._fuse_hybrid(
+            model_tag,
+            query_text,
+            dense.result(),
+            sparse,
+            top_k=top_k,
+            fusion_config=fusion_config or FusionConfig(),
+        )
+
     register_document = _ledger(KBCollectionHandle.register_document)
     load_document = _ledger(KBCollectionHandle.load_document)
     list_documents = _ledger(KBCollectionHandle.list_documents)
@@ -6006,14 +6314,10 @@ class MilvusCollectionHandle(KBCollectionHandle):
 
     capture_document_rows = _pending(KBCollectionHandle.capture_document_rows)
     restore_document_rows = _pending(KBCollectionHandle.restore_document_rows)
-    validate_query_vector = _pending(KBCollectionHandle.validate_query_vector)
     delete_embedding_records = _pending(KBCollectionHandle.delete_embedding_records)
     snapshot_embeddings = _pending(KBCollectionHandle.snapshot_embeddings)
     restore_embeddings = _pending(KBCollectionHandle.restore_embeddings)
     delete_created_embeddings = _pending(KBCollectionHandle.delete_created_embeddings)
-    search_dense = _pending(KBCollectionHandle.search_dense)
-    search_sparse = _pending(KBCollectionHandle.search_sparse)
-    search_hybrid = _pending(KBCollectionHandle.search_hybrid)
     delete_documents_data = _pending(KBCollectionHandle.delete_documents_data)
     delete_collection_data = _pending(KBCollectionHandle.delete_collection_data)
     cleanup_collection_data_after_rollback = _pending(
