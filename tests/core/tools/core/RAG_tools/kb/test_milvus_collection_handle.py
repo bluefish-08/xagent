@@ -1,14 +1,18 @@
 """``MilvusCollectionHandle`` skeleton: dispatch, ledger delegation, refusals,
 capabilities, and the LanceDB-only paths a Milvus deployment skips.
 
-Milvus rows are not written, searched or deleted yet, so nothing here connects
-to Milvus.
+Nothing here connects to Milvus; counts against a server are in
+``test_milvus_storage.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +34,7 @@ from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     LanceDBCollectionHandle,
     MilvusCollectionHandle,
     ledger_holds_vectors,
+    milvus_collection_name,
 )
 from xagent.core.tools.core.RAG_tools.kb.coordinator import KBCoordinator
 from xagent.core.tools.core.RAG_tools.kb.models import (
@@ -42,6 +47,7 @@ from xagent.core.tools.core.RAG_tools.kb.models import (
 )
 from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
     embeddings_table_name,
+    to_model_tag,
 )
 from xagent.core.tools.core.RAG_tools.management import (
     collection_manager,
@@ -107,9 +113,14 @@ UNSUPPORTED = {
 PENDING = set(
     f"""{FAMILIES["supports_embeddings"]} {FAMILIES["supports_search"]}
     capture_document_rows restore_document_rows delete_documents_data
-    delete_collection_data cleanup_collection_data_after_rollback collection_stats
-    count_rows_by_document""".split()
+    delete_collection_data cleanup_collection_data_after_rollback""".split()
 )
+IMPLEMENTED = {"collection_stats", "count_rows_by_document"}
+
+
+@pytest.fixture(autouse=True)
+def no_cached_milvus_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_CLIENTS", {})
 
 
 @pytest.fixture
@@ -151,15 +162,20 @@ async def _call(handle: MilvusCollectionHandle, name: str) -> Any:
     return await result if inspect.isawaitable(result) else result
 
 
-def test_every_interface_method_is_delegated_refused_or_pending() -> None:
+def test_every_interface_method_is_delegated_refused_pending_or_implemented() -> None:
     interface = {
         name
         for name, member in vars(KBCollectionHandle).items()
         if inspect.isfunction(member)
     }
 
-    assert (len(LEDGER), len(UNSUPPORTED), len(PENDING)) == (44, 12, 18)
-    assert LEDGER | set(UNSUPPORTED) | PENDING == interface
+    assert (len(LEDGER), len(UNSUPPORTED), len(PENDING), len(IMPLEMENTED)) == (
+        44,
+        12,
+        16,
+        2,
+    )
+    assert LEDGER | set(UNSUPPORTED) | PENDING | IMPLEMENTED == interface
     for name in interface:
         routed = getattr(MilvusCollectionHandle, name)
         declared = getattr(KBCollectionHandle, name)
@@ -167,7 +183,8 @@ def test_every_interface_method_is_delegated_refused_or_pending() -> None:
             inspect.iscoroutinefunction(declared)
         ), name
         assert routed.__qualname__ == f"MilvusCollectionHandle.{name}"
-        assert routed.__doc__ == declared.__doc__, name
+        if name not in IMPLEMENTED:
+            assert routed.__doc__ == declared.__doc__, name
 
 
 @pytest.mark.parametrize("name", sorted(LEDGER))
@@ -226,6 +243,67 @@ def test_the_client_comes_from_the_connection_manager_on_first_use() -> None:
     connections.get_client_from_env.assert_called_once_with()
 
 
+def test_handles_share_a_client_per_uri_token_and_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MILVUS_URI", "http://milvus.test:19530")
+    monkeypatch.setenv("MILVUS_TOKEN", "token")
+    monkeypatch.setenv("MILVUS_DB_NAME", "db")
+    first, _ledger, connections = _handle()
+    connections.get_client_from_env.side_effect = lambda: object()
+    second = MilvusCollectionHandle(
+        first.context, ledger=MagicMock(), connections=connections
+    )
+
+    assert first.client is second.client
+    assert connections.get_client_from_env.call_count == 1
+    for name, value in (("MILVUS_DB_NAME", "other"), ("MILVUS_TOKEN", "other")):
+        monkeypatch.setenv(name, value)
+        elsewhere = MilvusCollectionHandle(
+            first.context, ledger=MagicMock(), connections=connections
+        )
+        assert elsewhere.client is not first.client
+    assert connections.get_client_from_env.call_count == 3
+
+
+def test_a_cached_client_is_returned_while_another_thread_connects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MILVUS_URI", "http://milvus.test:19530")
+    first, _ledger, _connections = _handle()
+    cached = first.client
+    second, _ledger, _connections = _handle()
+    returned: list[Any] = []
+
+    with collection_handle._MILVUS_CLIENT_LOCK:
+        worker = threading.Thread(target=lambda: returned.append(second.client))
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive()
+    assert returned == [cached]
+
+
+def test_concurrent_first_use_connects_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MILVUS_URI", "http://milvus.test:19530")
+    connections = MagicMock(spec=MilvusConnectionManager)
+    connections.get_client_from_env.side_effect = lambda: (time.sleep(0.05) or object())
+
+    with ThreadPoolExecutor(6) as pool:
+        clients = list(
+            pool.map(lambda _: collection_handle._milvus_client(connections), range(6))
+        )
+
+    assert len({id(client) for client in clients}) == 1
+    connections.get_client_from_env.assert_called_once_with()
+
+
+def test_a_model_id_and_its_tag_name_the_same_milvus_collection() -> None:
+    for model in ("vendor-x/Text-Embedding.v3", "bge-m3"):
+        name = milvus_collection_name(model)
+        assert name == milvus_collection_name(to_model_tag(model))
+        assert re.fullmatch(r"xagent_kb_[a-z0-9_]+", name), name
+
+
 def test_the_provider_dispatches_on_the_engine(milvus_deployment: None) -> None:
     context = _context(KBStorageBackend.MILVUS)
 
@@ -278,11 +356,29 @@ def test_a_lancedb_deployment_refuses_a_milvus_binding(tmp_path: Path) -> None:
     assert ledger.load_ingestion_status(is_admin=True) == []
 
 
-def test_batched_stats_are_pending_on_milvus_and_refused_elsewhere(
+def test_stats_without_kb_ids_never_reach_milvus(
     milvus_deployment: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(NotImplementedError, match="#2867"):
-        KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
+    handle = KBHandleProvider().open(_context(KBStorageBackend.MILVUS))
+    chunk = {"chunk_id": "c", "index": 0, "text": "kiwi", "created_at": None}
+    handle.write_chunks("doc", "ph", "cfg", {}, [chunk])
+    monkeypatch.setattr(
+        MilvusConnectionManager,
+        "get_client_from_env",
+        MagicMock(side_effect=AssertionError("Milvus was reached")),
+    )
+
+    stats = KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
+    assert stats["kb"]["chunks"] == 1 and stats["kb"]["embeddings"] == 0
+    assert handle.collection_stats(None, True)["embeddings"] == 0
+    assert handle.count_rows_by_document(user_id=None, is_admin=True) == {
+        "doc": {"chunks": 1}
+    }
+
+
+def test_batched_stats_refuse_an_unsupported_engine(
+    milvus_deployment: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("XAGENT_VECTOR_BACKEND", "qdrant")
     with pytest.raises(ValueError, match="'qdrant' is not supported"):
         KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
