@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from ..kb import (
         CollectionConfigSnapshot,
         CollectionRollbackMaintenanceResult,
+        KBCoordinator,
         KBMaintenanceCompatibilityFacade,
     )
 
@@ -1190,8 +1191,9 @@ async def rebuild_collection_stats(
 
 async def _rebuild_collection_stats_impl(
     collection_name: str,
+    coordinator: "KBCoordinator | None" = None,
 ) -> Optional["CollectionInfo"]:
-    from ..kb import get_kb_coordinator
+    from .collections import _resolve_coordinator
 
     try:
         existing_info: Optional[
@@ -1204,7 +1206,7 @@ async def _rebuild_collection_stats_impl(
     # aggregate_collection_stats is a synchronous LanceDB scan: keep it off the
     # event loop so it cannot stall every other coroutine in the process.
     stats_by_collection = await asyncio.to_thread(
-        get_kb_coordinator().aggregate_collection_stats_sync,
+        _resolve_coordinator(coordinator).aggregate_collection_stats_sync,
         user_id=None,
         is_admin=True,
     )
@@ -1260,8 +1262,9 @@ def rebuild_collection_stats_sync(
 
 def _rebuild_collection_stats_sync_impl(
     collection_name: str,
+    coordinator: "KBCoordinator | None" = None,
 ) -> Optional["CollectionInfo"]:
-    return _sync_wrapper(_rebuild_collection_stats_impl)(collection_name)
+    return _sync_wrapper(_rebuild_collection_stats_impl)(collection_name, coordinator)
 
 
 def resolve_effective_embedding_model_sync(
@@ -1482,6 +1485,7 @@ async def _rebuild_collection_metadata_impl() -> None:
             embedding_model_id = None
             embedding_dimension = None
 
+            # Redundant at run time; a direct gate the bypass guard can see.
             if collection.embeddings > 0 and ledger_holds_vectors():
                 # Find which embeddings table has data for this collection
                 for table_name in embeddings_tables:

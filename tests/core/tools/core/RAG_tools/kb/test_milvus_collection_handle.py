@@ -161,9 +161,13 @@ def test_every_interface_method_is_delegated_refused_or_pending() -> None:
     assert (len(LEDGER), len(UNSUPPORTED), len(PENDING)) == (44, 12, 18)
     assert LEDGER | set(UNSUPPORTED) | PENDING == interface
     for name in interface:
-        assert inspect.iscoroutinefunction(
-            getattr(MilvusCollectionHandle, name)
-        ) == inspect.iscoroutinefunction(getattr(KBCollectionHandle, name)), name
+        routed = getattr(MilvusCollectionHandle, name)
+        declared = getattr(KBCollectionHandle, name)
+        assert inspect.iscoroutinefunction(routed) == (
+            inspect.iscoroutinefunction(declared)
+        ), name
+        assert routed.__qualname__ == f"MilvusCollectionHandle.{name}"
+        assert routed.__doc__ == declared.__doc__, name
 
 
 @pytest.mark.parametrize("name", sorted(LEDGER))
@@ -272,6 +276,16 @@ def test_a_lancedb_deployment_refuses_a_milvus_binding(tmp_path: Path) -> None:
     ledger = KBHandleProvider().open(_context(KBStorageBackend.LANCEDB))
     assert ledger.count_documents(None, True) == 0
     assert ledger.load_ingestion_status(is_admin=True) == []
+
+
+def test_batched_stats_are_pending_on_milvus_and_refused_elsewhere(
+    milvus_deployment: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(NotImplementedError, match="#2867"):
+        KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
+    monkeypatch.setenv("XAGENT_VECTOR_BACKEND", "qdrant")
+    with pytest.raises(ValueError, match="'qdrant' is not supported"):
+        KBHandleProvider().aggregate_collection_stats(user_id=None, is_admin=True)
 
 
 def test_lancedb_only_paths_follow_the_deployment_engine(

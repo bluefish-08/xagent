@@ -692,9 +692,8 @@ def _reconcile_uploaded_files_impl(
             )
             continue
 
-        # Cascade delete all related data for each (collection, doc_id) pair
-        # Note: We use cascade_delete for complete cleanup across all tables
-        # (parses, chunks, embeddings_*, main_pointers, ingestion_runs, documents)
+        # Delete each (collection, doc_id): LanceDB cascades over every table,
+        # other engines go through the handle's delete_documents_data.
         cascade_deleted = 0
         cascade_error = False
         for doc in docs:

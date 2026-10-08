@@ -352,6 +352,11 @@ class KBHandleProvider:
         if backend is KBStorageBackend.LANCEDB:
             store = self._storage_shim.get_vector_index_store()
             return store.aggregate_collection_stats(user_id=user_id, is_admin=is_admin)
+        if backend is KBStorageBackend.MILVUS:
+            raise NotImplementedError(
+                "Batched collection stats for the milvus KB engine are not "
+                "implemented yet (#2867)"
+            )
         raise ValueError(
             f"KB storage backend {backend.value!r} is not supported by KBHandleProvider"
         )
@@ -5240,6 +5245,8 @@ def _route(method: _Method, call: Callable[..., Any]) -> _Method:
     else:
         routed = call
     routed.__name__ = method.__name__
+    routed.__qualname__ = f"MilvusCollectionHandle.{method.__name__}"
+    routed.__doc__ = method.__doc__
     return cast(_Method, routed)
 
 
