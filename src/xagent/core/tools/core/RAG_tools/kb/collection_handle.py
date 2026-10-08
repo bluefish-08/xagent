@@ -22,10 +22,11 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timezone
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, NoReturn, Optional, TypeVar, cast
 
@@ -166,6 +167,32 @@ def _safe_optional_str(value: Any) -> str | None:
     except Exception:  # noqa: BLE001
         pass
     return str(value)
+
+
+def _chunk_for_embedding(chunk_dict: dict[str, Any]) -> ChunkForEmbedding:
+    """Build the embedding input of one ledger ``chunks`` row."""
+    page_number_value = chunk_dict.get("page_number")
+    # A missing page number can arrive as None or as a pandas/LanceDB
+    # NaN sentinel (NaN != NaN); both mean "no page", not page 1.
+    if page_number_value is not None and page_number_value == page_number_value:
+        page_num = _safe_int_value(page_number_value, default=1)
+        page_number = page_num if page_num > 0 else None
+    else:
+        page_number = None
+
+    return ChunkForEmbedding(
+        doc_id=chunk_dict["doc_id"],
+        chunk_id=chunk_dict["chunk_id"],
+        parse_hash=chunk_dict["parse_hash"],
+        index=_safe_int_value(chunk_dict.get("index"), default=0),
+        text=chunk_dict["text"],
+        chunk_hash=chunk_dict["chunk_hash"],
+        page_number=page_number,
+        section=_safe_optional_str(chunk_dict.get("section")),
+        anchor=_safe_optional_str(chunk_dict.get("anchor")),
+        json_path=_safe_optional_str(chunk_dict.get("json_path")),
+        metadata=deserialize_metadata(chunk_dict.get("metadata")),
+    )
 
 
 def validate_query_vector_format(query_vector: list[float]) -> None:
@@ -658,9 +685,11 @@ class KBCollectionHandle(ABC):
     ) -> None:
         """Make the vectors written for ``(doc_id, parse_hash)`` searchable.
 
-        Called once after the last batch and before the ledger status is
-        updated. An engine that writes rows invisible makes them visible here;
-        one that writes searchable rows does nothing.
+        Called after the last batch and before the ledger status is updated, and
+        also when a rerun finds nothing pending (a crash after the writes), so a
+        call may follow no write at all: implementations must be idempotent. An
+        engine that writes rows invisible makes them visible here; one that writes
+        searchable rows does nothing.
         """
 
     @abstractmethod
@@ -2249,36 +2278,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                 chunk_id = chunk_dict["chunk_id"]
                 if chunk_id in embedded_chunk_ids:
                     continue
-                metadata = deserialize_metadata(chunk_dict.get("metadata"))
-                index = _safe_int_value(chunk_dict.get("index"), default=0)
-
-                page_number_value = chunk_dict.get("page_number")
-                # A missing page number can arrive as None or as a pandas/LanceDB
-                # NaN sentinel (NaN != NaN); both mean "no page", not page 1.
-                if (
-                    page_number_value is not None
-                    and page_number_value == page_number_value
-                ):
-                    page_num = _safe_int_value(page_number_value, default=1)
-                    page_number = page_num if page_num > 0 else None
-                else:
-                    page_number = None
-
-                pending_chunks.append(
-                    ChunkForEmbedding(
-                        doc_id=chunk_dict["doc_id"],
-                        chunk_id=chunk_id,
-                        parse_hash=chunk_dict["parse_hash"],
-                        index=index,
-                        text=chunk_dict["text"],
-                        chunk_hash=chunk_dict["chunk_hash"],
-                        page_number=page_number,
-                        section=_safe_optional_str(chunk_dict.get("section")),
-                        anchor=_safe_optional_str(chunk_dict.get("anchor")),
-                        json_path=_safe_optional_str(chunk_dict.get("json_path")),
-                        metadata=metadata,
-                    )
-                )
+                pending_chunks.append(_chunk_for_embedding(chunk_dict))
 
             return EmbeddingReadResponse(
                 chunks=pending_chunks,
@@ -5293,6 +5293,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
 
 
 _Method = TypeVar("_Method", bound=Callable[..., Any])
+_Resolved = TypeVar("_Resolved")
 
 
 def _route(method: _Method, call: Callable[..., Any]) -> _Method:
@@ -5475,7 +5476,7 @@ def _unloaded_as_empty(name: str, not_loaded: set[str]) -> Iterator[None]:
         if getattr(error, "code", None) != _MILVUS_NOT_LOADED:
             raise
         not_loaded.add(name)
-        logger.warning("Milvus collection %s is not loaded; counted as 0 rows", name)
+        logger.warning("Milvus collection %s is not loaded; treated as empty", name)
 
 
 def _visible_filter(kb_ids: list[str]) -> str:
@@ -5543,18 +5544,51 @@ def _embeddings_key(client: Any, name: str) -> str:
     return embeddings_table_name(to_model_tag(model))
 
 
-def _document_rows(client: Any, name: str, kb_id: str, doc_id: str) -> dict[str, bool]:
+def _document_rows(
+    client: Any, name: str, kb_id: str, doc_id: str, *, unloaded_as_empty: bool = False
+) -> dict[str, bool]:
     """Read ``{chunk_id: visible}`` of one document under one kb_id, with Strong."""
     if not client.has_collection(name):
         return {}
-    rows = client.query(
-        name,
-        filter="kb_id == {kb_id} and doc_id == {doc_id}",
-        filter_params={"kb_id": kb_id, "doc_id": doc_id},
-        output_fields=["chunk_id", "visible"],
-        consistency_level="Strong",
-    )
-    return {row["chunk_id"]: row["visible"] for row in rows}
+    with _unloaded_as_empty(name, set()) if unloaded_as_empty else nullcontext():
+        rows = client.query(
+            name,
+            filter="kb_id == {kb_id} and doc_id == {doc_id}",
+            filter_params={"kb_id": kb_id, "doc_id": doc_id},
+            output_fields=["chunk_id", "visible"],
+            consistency_level="Strong",
+        )
+        return {row["chunk_id"]: row["visible"] for row in rows}
+    return {}
+
+
+_INGEST_MEMO: ContextVar[dict[tuple[Any, ...], Any] | None] = ContextVar(
+    "xagent_kb_ingest_memo", default=None
+)
+
+
+@contextmanager
+def ingest_scope() -> Iterator[None]:
+    """Let one ingest's write batches share their collection and kb_id lookups.
+
+    Handles are opened per call, so only a scope around the ingest spans the batches.
+    """
+    token = _INGEST_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INGEST_MEMO.reset(token)
+
+
+def _once_per_ingest(
+    key: tuple[Any, ...], resolve: Callable[[], _Resolved]
+) -> _Resolved:
+    memo = _INGEST_MEMO.get()
+    if memo is None:
+        return resolve()
+    if key not in memo:
+        memo[key] = resolve()
+    return cast(_Resolved, memo[key])
 
 
 @dataclass(frozen=True)
@@ -5643,41 +5677,49 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 row[key] = row.get(key, 0) + count
         return counts
 
-    def _kb_id(self, user_id: int | None) -> str:
-        return get_or_create_kb_id(
-            self.context.vector_index_store.get_raw_connection(),
-            self.context.collection,
-            user_id,
-        )
+    def _kb_id(self, user_id: int | None, *, fresh: bool = False) -> str:
+        def resolve() -> str:
+            return get_or_create_kb_id(
+                self.context.vector_index_store.get_raw_connection(),
+                self.context.collection,
+                user_id,
+            )
 
-    def _require_whole_read(
+        if fresh:
+            return resolve()
+        return _once_per_ingest(("kb_id", self.context.collection, user_id), resolve)
+
+    def _ledger_chunks(
         self,
-        read: int,
         doc_id: str,
         parse_hash: str,
         filters: dict[str, Any] | None,
         user_id: int | None,
         is_admin: bool,
-    ) -> None:
-        # Ledger reads swallow errors and answer with nothing or a part, and a short
-        # read would delete the rest from Milvus. This count raises, and opens the
-        # table anew: the store's cached handle can lag another process's writes.
+        columns: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read the document's ledger chunk rows, failing on a short read.
+
+        Ledger reads swallow errors, and a short read would delete the rest from
+        Milvus. The count raises and opens the table anew: the cached one can lag.
+        """
         store = self.context.vector_index_store
+        query = {
+            "collection": self.context.collection,
+            "doc_id": doc_id,
+            "parse_hash": parse_hash,
+            **(filters or {}),
+        }
         where = store.build_filter_expression(
-            build_filter_from_dict(
-                {
-                    "collection": self.context.collection,
-                    "doc_id": doc_id,
-                    "parse_hash": parse_hash,
-                    **(filters or {}),
-                }
-            ),
-            user_id=user_id,
-            is_admin=is_admin,
+            build_filter_from_dict(query), user_id=user_id, is_admin=is_admin
         )
         table = None
         try:
-            table = store.get_raw_connection().open_table("chunks")
+            conn = store.get_raw_connection()
+            # write_chunks creates the table with the first non-empty chunk set.
+            if "chunks" not in list_table_names(conn):
+                return []
+            table = conn.open_table("chunks")
             counted = _safe_count_rows(table, where, on_error="raise")
         except Exception as error:
             raise DatabaseOperationError(
@@ -5685,10 +5727,25 @@ class MilvusCollectionHandle(KBCollectionHandle):
             ) from error
         finally:
             _safe_close_table(table)
-        if read != counted:
-            raise DatabaseOperationError(
-                f"Read {read} of {counted} ledger chunks of {doc_id}; retry the ingest"
+        if counted == 0:
+            return []
+        rows = [
+            row
+            for batch in store.iter_batches(
+                table_name="chunks",
+                columns=columns,
+                filters=query,
+                user_id=user_id,
+                is_admin=is_admin,
             )
+            for row in batch.to_pylist()
+        ]
+        if len(rows) < counted:
+            raise DatabaseOperationError(
+                f"Read {len(rows)} of {counted} ledger chunks of {doc_id}; "
+                "retry the ingest"
+            )
+        return rows
 
     def read_chunks_needing_embedding(
         self,
@@ -5700,25 +5757,28 @@ class MilvusCollectionHandle(KBCollectionHandle):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> EmbeddingReadResponse:
-        """Return ledger chunks that Milvus holds no row for, visible or not."""
-        ledger = self.ledger.read_chunks_needing_embedding(
-            doc_id,
-            parse_hash,
-            model,
-            filters=filters,
-            user_id=user_id,
-            is_admin=is_admin,
-        )
-        self._require_whole_read(
-            len(ledger.chunks), doc_id, parse_hash, filters, user_id, is_admin
-        )
+        """Return ledger chunks that Milvus holds no row for, visible or not.
+
+        A collection that is not loaded is read as holding none; the write loads it.
+        """
+        if not self.context.collection or not doc_id or not parse_hash or not model:
+            raise DocumentValidationError(
+                "Collection, doc_id, parse_hash, and model are required"
+            )
+        chunks = [
+            _chunk_for_embedding(row)
+            for row in self._ledger_chunks(
+                doc_id, parse_hash, filters, user_id, is_admin
+            )
+        ]
         held = _document_rows(
             self.client,
             milvus_collection_name(model),
             self._kb_id(user_id),
             doc_id,
+            unloaded_as_empty=True,
         )
-        pending = [chunk for chunk in ledger.chunks if chunk.chunk_id not in held]
+        pending = [chunk for chunk in chunks if chunk.chunk_id not in held]
         for chunk in pending:
             if len(chunk.text.encode()) > _MILVUS_TEXT_BYTES:
                 raise DocumentValidationError(
@@ -5726,9 +5786,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
                     "the Milvus text limit; lower the chunk size"
                 )
         return EmbeddingReadResponse(
-            chunks=pending,
-            total_count=ledger.total_count,
-            pending_count=len(pending),
+            chunks=pending, total_count=len(chunks), pending_count=len(pending)
         )
 
     def write_embeddings(
@@ -5749,7 +5807,11 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 raise VectorValidationError(
                     f"Multiple vector dimensions found for model {model}: {dimensions}"
                 )
-            name = ensure_milvus_collection(self.client, model, dimensions.pop())
+            dimension = dimensions.pop()
+            name = _once_per_ingest(
+                ("collection", model, dimension),
+                partial(ensure_milvus_collection, self.client, model, dimension),
+            )
             kb_id = self._kb_id(user_id)
             self.client.upsert(
                 name,
@@ -5795,32 +5857,26 @@ class MilvusCollectionHandle(KBCollectionHandle):
         """
         if commit_gate is not None:
             commit_gate()
-        batches = self.context.vector_index_store.iter_batches(
-            table_name="chunks",
-            columns=["chunk_id"],
-            filters={
-                "collection": self.context.collection,
-                "doc_id": doc_id,
-                "parse_hash": parse_hash,
-            },
-            user_id=user_id,
-            is_admin=is_admin,
-        )
-        chunk_set = {row["chunk_id"] for batch in batches for row in batch.to_pylist()}
-        self._require_whole_read(
-            len(chunk_set), doc_id, parse_hash, None, user_id, is_admin
-        )
-        name, kb_id = milvus_collection_name(model), self._kb_id(user_id)
+        chunk_set = {
+            row["chunk_id"]
+            for row in self._ledger_chunks(
+                doc_id, parse_hash, None, user_id, is_admin, columns=["chunk_id"]
+            )
+        }
+        name = milvus_collection_name(model)
+        # Fresh on purpose: a kb_id that changed since the ingest resolved it
+        # fails the pre-flip check.
+        kb_id = self._kb_id(user_id, fresh=True)
 
         def rows() -> dict[str, bool]:
             return _document_rows(self.client, name, kb_id, doc_id)
 
-        def require(held: dict[str, bool], states: tuple[bool, ...]) -> None:
-            missing = [c for c in chunk_set if held.get(c) not in states]
+        def require(held: dict[str, bool], states: tuple[bool, ...], gap: str) -> None:
+            missing = sorted(c for c in chunk_set if held.get(c) not in states)
             if missing:
                 raise DatabaseOperationError(
-                    f"{len(missing)} of {len(chunk_set)} chunks of {doc_id} are "
-                    "missing or invisible in Milvus after the commit; retry the ingest"
+                    f"{len(missing)} of {len(chunk_set)} chunks of {doc_id} {gap} "
+                    f"(for example {missing[:5]}); retry the ingest"
                 )
 
         def show(held: dict[str, bool]) -> None:
@@ -5833,7 +5889,11 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 )
 
         held = rows()
-        require(held, (False, True))
+        require(
+            held,
+            (False, True),
+            "have no row under this kb_id, so nothing was committed",
+        )
         for attempt in (1, 2):
             try:
                 show(held)
@@ -5845,7 +5905,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
                     ) from error
                 held = rows()
         held = rows()
-        require(held, (True,))
+        require(held, (True,), "are missing or invisible in Milvus after the commit")
         if commit_gate is not None:
             commit_gate()
         old = [chunk_id for chunk_id in held if chunk_id not in chunk_set]

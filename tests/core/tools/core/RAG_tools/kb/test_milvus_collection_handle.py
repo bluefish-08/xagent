@@ -22,6 +22,7 @@ import pytest
 from xagent.core.tools.core.RAG_tools import kb
 from xagent.core.tools.core.RAG_tools.core.exceptions import (
     ConfigurationError,
+    DocumentValidationError,
     VectorValidationError,
 )
 from xagent.core.tools.core.RAG_tools.core.schemas import (
@@ -413,6 +414,111 @@ def test_a_failed_create_with_no_collection_behind_it_is_raised() -> None:
     with pytest.raises(RuntimeError, match="boom"):
         ensure_milvus_collection(client, MODEL, 3)
     client.describe_collection.assert_not_called()
+
+
+def _write(
+    handle: MilvusCollectionHandle, model: str, dimension: int, user: int
+) -> None:
+    handle.write_embeddings(
+        [
+            ChunkEmbeddingData(
+                doc_id="doc",
+                chunk_id="chunk",
+                parse_hash="ph",
+                model=model,
+                vector=[1.0] * dimension,
+                text="text",
+                chunk_hash="h",
+            )
+        ],
+        user_id=user,
+    )
+
+
+def test_an_ingest_scope_resolves_each_collection_and_kb_id_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensured: list[tuple[str, int]] = []
+    owners: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(
+        collection_handle,
+        "ensure_milvus_collection",
+        lambda client, model, dimension: ensured.append((model, dimension))
+        or f"{model}-{dimension}",
+    )
+    monkeypatch.setattr(
+        collection_handle,
+        "get_or_create_kb_id",
+        lambda conn, collection, user_id: owners.append((collection, user_id))
+        or f"{collection}-{user_id}",
+    )
+    handle, _ledger, connections = _handle()
+    other = MilvusCollectionHandle(
+        _context(KBStorageBackend.MILVUS, "other"),
+        ledger=MagicMock(spec=KBCollectionHandle),
+        connections=connections,
+    )
+
+    with collection_handle.ingest_scope():
+        for _ in range(3):
+            _write(handle, "m1", 3, 1)
+        _write(handle, "m2", 3, 1)
+        _write(handle, "m1", 4, 1)
+        _write(handle, "m1", 3, 2)
+        _write(other, "m1", 3, 1)
+
+    assert ensured == [("m1", 3), ("m2", 3), ("m1", 4)]
+    assert owners == [("kb", 1), ("kb", 2), ("other", 1)]
+    upserts = connections.get_shared_client_from_env.return_value.upsert.call_args_list
+    assert [(call.args[0], call.args[1][0]["kb_id"]) for call in upserts] == [
+        ("m1-3", "kb-1"),
+        ("m1-3", "kb-1"),
+        ("m1-3", "kb-1"),
+        ("m2-3", "kb-1"),
+        ("m1-4", "kb-1"),
+        ("m1-3", "kb-2"),
+        ("m1-3", "other-1"),
+    ]
+
+
+def test_each_ingest_scope_starts_empty_and_nothing_outlives_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensured: list[str] = []
+    monkeypatch.setattr(
+        collection_handle,
+        "ensure_milvus_collection",
+        lambda client, model, dimension: ensured.append(model) or model,
+    )
+    monkeypatch.setattr(collection_handle, "get_or_create_kb_id", lambda *args: "kb-id")
+    handle, _ledger, _connections = _handle()
+
+    _write(handle, "m1", 3, 1)
+    with collection_handle.ingest_scope():
+        _write(handle, "m1", 3, 1)
+        _write(handle, "m1", 3, 1)
+        with collection_handle.ingest_scope():
+            _write(handle, "m1", 3, 1)
+        _write(handle, "m1", 3, 1)
+    with collection_handle.ingest_scope():
+        _write(handle, "m1", 3, 1)
+    _write(handle, "m1", 3, 1)
+
+    assert ensured == ["m1"] * 5
+
+
+@pytest.mark.parametrize(
+    ("doc_id", "parse_hash", "model"),
+    [("", "ph", "m"), ("doc", "", "m"), ("doc", "ph", "")],
+)
+def test_the_pending_read_requires_its_identifiers(
+    doc_id: str, parse_hash: str, model: str
+) -> None:
+    handle, ledger, connections = _handle()
+
+    with pytest.raises(DocumentValidationError, match="are required"):
+        handle.read_chunks_needing_embedding(doc_id, parse_hash, model)
+    assert ledger.mock_calls == connections.mock_calls == []
 
 
 @pytest.mark.parametrize("model", ["BAAI/Bge-M3-test", "bge-m3", "Vendor/Model.V2"])

@@ -30,6 +30,7 @@ from xagent.core.tools.core.RAG_tools.kb import collection_handle
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     KBCollectionHandle,
     KBHandleProvider,
+    ensure_milvus_collection,
     milvus_collection_name,
 )
 from xagent.core.tools.core.RAG_tools.kb.kb_ids import get_or_create_kb_id
@@ -129,7 +130,9 @@ def spy(client: Any, monkeypatch: pytest.MonkeyPatch) -> Spy:
 
 
 def _open(
-    user_id: int = 1, store: VectorIndexStore | None = None
+    user_id: int = 1,
+    store: VectorIndexStore | None = None,
+    backend: KBStorageBackend = KBStorageBackend.MILVUS,
 ) -> KBCollectionHandle:
     return KBHandleProvider().open(
         KBCollectionContext(
@@ -142,8 +145,12 @@ def _open(
             vector_index_store=store or get_vector_index_store(),
             ingestion_status_store=get_ingestion_status_store(),
             main_pointer_store=get_main_pointer_store(),
-            backend=KBStorageBackend.MILVUS,
-            capabilities=KBBackendCapabilities.milvus(),
+            backend=backend,
+            capabilities=(
+                KBBackendCapabilities.milvus()
+                if backend is KBStorageBackend.MILVUS
+                else KBBackendCapabilities.lancedb()
+            ),
         )
     )
 
@@ -370,9 +377,14 @@ def test_a_commit_that_finds_a_missing_row_flips_nothing_and_keeps_the_old_batch
     _embed(handle, model)
     _commit(handle, model)
     _chunks(handle, ["x", "y", "z"], parse_hash=NEXT_PARSE)
-    _embed(handle, model, parse_hash=NEXT_PARSE, limit=2)
+    written = _embed(handle, model, parse_hash=NEXT_PARSE, limit=2)
+    (missing,) = {"x", "y", "z"} - set(written)
 
-    with pytest.raises(DatabaseOperationError, match="1 of 3 chunks of doc"):
+    with pytest.raises(
+        DatabaseOperationError,
+        match=rf"1 of 3 chunks of doc have no row under this kb_id, so nothing was "
+        rf"committed \(for example \['{missing}'\]\)",
+    ):
         _commit(handle, model, parse_hash=NEXT_PARSE)
 
     assert _visible(client, model) == {"a"}
@@ -409,7 +421,11 @@ def test_a_flip_that_changes_nothing_fails_the_commit(
     _embed(handle, model)
     spy.swallow = True
 
-    with pytest.raises(DatabaseOperationError, match="2 of 2 chunks of doc"):
+    with pytest.raises(
+        DatabaseOperationError,
+        match=r"2 of 2 chunks of doc are missing or invisible in Milvus after the "
+        r"commit \(for example \['a', 'b'\]\)",
+    ):
         _commit(handle, model)
 
     assert _visible(client, model) == set()
@@ -529,6 +545,63 @@ def test_a_ledger_read_that_stops_early_deletes_nothing(
     assert _visible(client, model) == {"a", "b", "c"}
 
 
+def test_a_chunk_written_between_the_count_and_the_read_is_not_a_short_read(
+    client: Any, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, writer = _open(), _open()
+    _chunks(handle, ["a", "b"])
+    store = get_vector_index_store()
+    read = store.iter_batches
+    written: list[int] = []
+
+    def read_after_a_write(**kwargs: Any) -> Iterator[Any]:
+        if not written:
+            written.append(1)
+            _chunks(writer, ["a", "b", "c"])
+        return read(**kwargs)
+
+    monkeypatch.setattr(store, "iter_batches", read_after_a_write)
+
+    pending = handle.read_chunks_needing_embedding("doc", PARSE, model, user_id=1)
+
+    assert written == [1]
+    assert {chunk.chunk_id for chunk in pending.chunks} == {"a", "b", "c"}
+
+
+@pytest.mark.parametrize(
+    "broken", [("list_tables", "table_names"), ("open_table",)], ids=["list", "open"]
+)
+def test_a_ledger_table_that_cannot_be_listed_or_opened_is_not_a_missing_table(
+    client: Any, model: str, monkeypatch: pytest.MonkeyPatch, broken: tuple[str, ...]
+) -> None:
+    handle = _open()
+    _chunks(handle, ["a", "b", "c"])
+    _embed(handle, model)
+    _commit(handle, model)
+    store = get_vector_index_store()
+    connection = store.get_raw_connection()
+
+    class Unreadable:
+        def __getattr__(self, name: str) -> Any:
+            if name not in broken:
+                return getattr(connection, name)
+
+            def fail(*_: Any, **__: Any) -> Any:
+                raise OSError(f"{name} unreadable")
+
+            return fail
+
+    monkeypatch.setattr(store, "get_raw_connection", lambda: Unreadable())
+
+    with pytest.raises(DatabaseOperationError, match="Cannot count the ledger chunks"):
+        _commit(handle, model)
+    with pytest.raises(DatabaseOperationError, match="Cannot count the ledger chunks"):
+        handle.read_chunks_needing_embedding("doc", PARSE, model, user_id=1)
+
+    monkeypatch.undo()
+    assert _visible(client, model) == {"a", "b", "c"}
+
+
 def test_a_document_is_flipped_in_one_call(client: Any, model: str, spy: Spy) -> None:
     handle = _open()
     ids = [f"c{index:04d}" for index in range(1200)]
@@ -569,12 +642,21 @@ def test_every_milvus_call_is_strong_and_scoped_to_kb_id_and_doc_id(
             }
 
 
-@pytest.mark.parametrize(("size", "accepted"), [(65_535, True), (65_536, False)])
+@pytest.mark.parametrize(
+    ("text", "accepted"),
+    [
+        ("x" * 65_535, True),
+        ("x" * 65_536, False),
+        ("é" * 32_767 + "x", True),
+        ("é" * 32_768, False),
+    ],
+    ids=["ascii-at-limit", "ascii-over", "bytes-at-limit", "bytes-over"],
+)
 def test_text_over_the_milvus_limit_fails_before_anything_is_embedded(
-    client: Any, model: str, size: int, accepted: bool
+    client: Any, model: str, text: str, accepted: bool
 ) -> None:
     handle = _open()
-    _chunks(handle, ["a"], text="x" * size)
+    _chunks(handle, ["a"], text=text)
 
     if accepted:
         _embed(handle, model)
@@ -593,6 +675,90 @@ def test_reading_pending_chunks_logs_no_missing_lancedb_table_warning(
 
     assert _embed(handle, model) == ["a"]
     assert "Failed to query existing embeddings" not in caplog.text
+
+
+def test_chunks_that_lancedb_already_embedded_stay_pending_until_milvus_holds_them(
+    client: Any, model: str
+) -> None:
+    handle = _open()
+    _chunks(handle, ["a", "b", "c"])
+    held = _embed(handle, model, limit=1)
+    _open(backend=KBStorageBackend.LANCEDB).write_embeddings(
+        [
+            ChunkEmbeddingData(
+                doc_id="doc",
+                chunk_id=chunk_id,
+                parse_hash=PARSE,
+                model=model,
+                vector=[1.0, 0.0, 0.0],
+                text=f"kiwi {chunk_id}",
+                chunk_hash="h",
+            )
+            for chunk_id in "abc"
+        ],
+        user_id=1,
+    )
+
+    pending = handle.read_chunks_needing_embedding("doc", PARSE, model, user_id=1)
+
+    assert {chunk.chunk_id for chunk in pending.chunks} == set("abc") - set(held)
+    assert (pending.total_count, pending.pending_count) == (3, 2)
+
+    _embed(handle, model)
+    _commit(handle, model)
+    assert _visible(client, model) == {"a", "b", "c"}
+
+
+def test_a_created_but_unloaded_collection_is_read_as_empty_and_loaded_by_the_write(
+    client: Any, model: str
+) -> None:
+    name = milvus_collection_name(model)
+    ensure_milvus_collection(client, model, 3)
+    client.release_collection(name)
+    handle = _open()
+    _chunks(handle, ["a", "b"])
+
+    assert set(_embed(handle, model)) == {"a", "b"}
+
+    assert client.get_load_state(name)["state"].name == "Loaded"
+    _commit(handle, model)
+    assert _visible(client, model) == {"a", "b"}
+
+
+def test_the_commit_does_not_read_an_unloaded_collection_as_empty(
+    client: Any, model: str
+) -> None:
+    handle = _open()
+    _chunks(handle, ["a"])
+    _embed(handle, model)
+    client.release_collection(milvus_collection_name(model))
+
+    with pytest.raises(Exception, match="not loaded") as raised:
+        _commit(handle, model)
+
+    assert getattr(raised.value, "code", None) == 101
+
+
+def test_a_first_document_with_no_chunks_has_nothing_pending(model: str) -> None:
+    pending = _open().read_chunks_needing_embedding("doc", PARSE, model, user_id=1)
+
+    assert (pending.chunks, pending.total_count, pending.pending_count) == ([], 0, 0)
+
+
+def test_the_commit_error_names_at_most_five_missing_chunks(
+    client: Any, model: str
+) -> None:
+    handle = _open()
+    ids = [f"c{index}" for index in range(8)]
+    _chunks(handle, ids)
+    written = _embed(handle, model, limit=2)
+    missing = sorted(set(ids) - set(written))
+
+    with pytest.raises(DatabaseOperationError, match="6 of 8 chunks of doc") as raised:
+        _commit(handle, model)
+
+    assert str(missing[:5]) in str(raised.value)
+    assert missing[5] not in str(raised.value)
 
 
 class _Embedder(BaseEmbedding):
@@ -775,7 +941,7 @@ def test_a_row_lost_before_the_check_fails_the_import_and_a_rerun_refills_it(
     with monkeypatch.context() as patch:
         patch.setattr(document_ingestion, "commit_vectors_to_db", lose_a_row)
         failed = pipeline.run()
-    assert failed.status == "partial" and "missing" in failed.message
+    assert failed.status == "partial" and "have no row" in failed.message
     assert _status(failed.doc_id) == DocumentProcessingStatus.FAILED.value
     embedded = len(pipeline.embedder.texts)
 
@@ -801,4 +967,44 @@ def test_a_chunk_that_fails_to_embed_fails_the_import_instead_of_leaving_a_gap(
 
     assert result.status == "success"
     assert len(pipeline.embedder.texts) - embedded == 1
+    assert len(_visible(client, pipeline.model)) == result.chunk_count
+
+
+def test_the_batches_of_one_import_share_one_collection_and_kb_id_lookup(
+    client: Any, pipeline: _Import, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ensured: list[int] = []
+    kb_ids: list[int] = []
+    writes: list[int] = []
+    before_commit: list[int] = []
+    ensure = collection_handle.ensure_milvus_collection
+    get_kb_id = collection_handle.get_or_create_kb_id
+    write = document_ingestion.write_vectors_to_db
+    commit = document_ingestion.commit_vectors_to_db
+    monkeypatch.setattr(
+        collection_handle,
+        "ensure_milvus_collection",
+        lambda *args: ensured.append(1) or ensure(*args),
+    )
+    monkeypatch.setattr(
+        collection_handle,
+        "get_or_create_kb_id",
+        lambda *args: kb_ids.append(1) or get_kb_id(*args),
+    )
+    monkeypatch.setattr(
+        document_ingestion,
+        "write_vectors_to_db",
+        lambda **kwargs: writes.append(1) or write(**kwargs),
+    )
+    monkeypatch.setattr(
+        document_ingestion,
+        "commit_vectors_to_db",
+        lambda **kwargs: before_commit.append(len(kb_ids)) or commit(**kwargs),
+    )
+
+    result = pipeline.run()
+
+    assert result.status == "success" and len(writes) == result.chunk_count > 2
+    assert len(ensured) == 1
+    assert before_commit == [1] and len(kb_ids) == 2
     assert len(_visible(client, pipeline.model)) == result.chunk_count
