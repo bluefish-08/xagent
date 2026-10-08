@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ from xagent.core.tools.core.RAG_tools.kb.models import (
     KBStorageBackend,
     KBUserScope,
 )
+from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
+    embeddings_table_name,
+    to_model_tag,
+)
 from xagent.core.tools.core.RAG_tools.storage.factory import (
     get_ingestion_status_store,
     get_main_pointer_store,
@@ -50,7 +55,7 @@ def client() -> Any:
 @pytest.fixture
 def models(client: Any) -> Iterator[tuple[str, str]]:
     suffix = uuid.uuid4().hex[:12]
-    pair = (f"model-a-{suffix}", f"vendor/Model-B-{suffix}")
+    pair = (f"model-a-{suffix}", f"BAAI/Bge-M3-{suffix}")
     yield pair
     for model in pair:
         client.drop_collection(milvus_collection_name(model))
@@ -200,6 +205,67 @@ def test_a_collection_left_unindexed_is_indexed_and_loaded_again(
     assert sorted(client.list_indexes(name)) == ["dense", "doc_id", "sparse", "user_id"]
 
 
+def test_model_ids_that_tag_alike_get_collections_of_their_own(client: Any) -> None:
+    suffix = uuid.uuid4().hex[:12]
+    trio = (f"BAAI/bge-m3-{suffix}", f"baai-bge-m3-{suffix}", f"baai_bge_m3_{suffix}")
+    names = [milvus_collection_name(model) for model in trio]
+    try:
+        for model in trio:
+            ensure_milvus_collection(client, model, DIM)
+
+        assert len(set(names)) == 3
+        recorded = [
+            client.describe_collection(name)["properties"]["xagent.model_id"]
+            for name in names
+        ]
+        assert recorded == list(trio)
+    finally:
+        for name in names:
+            client.drop_collection(name)
+
+
+@pytest.mark.parametrize(
+    "model", ["智谱/GLM 4.5-embedding", "vendor/" + "long-model-name-" * 30]
+)
+def test_any_model_id_names_a_collection_milvus_accepts(
+    client: Any, model: str
+) -> None:
+    name = ensure_milvus_collection(client, model, DIM)
+    try:
+        assert client.get_load_state(name)["state"].name == "Loaded"
+    finally:
+        client.drop_collection(name)
+
+
+def test_a_collection_recorded_for_another_model_is_refused(
+    client: Any, models: tuple[str, str]
+) -> None:
+    name = ensure_milvus_collection(client, models[0], DIM)
+    client.release_collection(name)
+
+    client.alter_collection_properties(name, {"xagent.model_id": "someone/else"})
+    with pytest.raises(VectorValidationError, match=f"{name}.*someone/else"):
+        ensure_milvus_collection(client, models[0], DIM)
+    client.drop_collection_properties(name, ["xagent.model_id"])
+    with pytest.raises(VectorValidationError, match=f"{name}.*model None"):
+        ensure_milvus_collection(client, models[0], DIM)
+    assert client.get_load_state(name)["state"].name == "NotLoad"
+
+
+def test_concurrent_first_callers_agree_on_one_collection(
+    client: Any, models: tuple[str, str]
+) -> None:
+    with ThreadPoolExecutor(6) as pool:
+        names = set(
+            pool.map(
+                lambda _: ensure_milvus_collection(client, models[0], DIM), range(6)
+            )
+        )
+
+    assert names == {milvus_collection_name(models[0])}
+    assert client.get_load_state(names.pop())["state"].name == "Loaded"
+
+
 def test_counts_read_only_visible_rows_of_the_callers_kb_ids(
     client: Any,
     models: tuple[str, str],
@@ -229,8 +295,7 @@ def test_counts_read_only_visible_rows_of_the_callers_kb_ids(
         ],
     )
     _insert(client, model_b, [_row("doc-1-b", mine, "doc-1", 1, visible=True)])
-    a_key = "embeddings_" + model_a.removeprefix("xagent_kb_")
-    b_key = "embeddings_" + model_b.removeprefix("xagent_kb_")
+    a_key, b_key = (embeddings_table_name(to_model_tag(model)) for model in models)
 
     assert kb.collection_stats(None, True) == {
         "documents": 3,
@@ -277,7 +342,7 @@ def test_a_collection_that_is_not_loaded_counts_as_empty(
     _insert(client, loaded, [_row("doc-1-0", mine, "doc-1", 1, visible=True)])
     _insert(client, released, [_row("doc-1-1", mine, "doc-1", 1, visible=True)])
     client.release_collection(released)
-    key = "embeddings_" + loaded.removeprefix("xagent_kb_")
+    key = embeddings_table_name(to_model_tag(models[0]))
     expected = {"doc-1": {"chunks": 2, key: 1}}
 
     assert kb.collection_stats(1, False)["embeddings"] == 1
@@ -317,3 +382,35 @@ def test_collections_without_the_prefix_are_not_counted(
         assert stats["kb"]["embeddings"] == 1
     finally:
         client.drop_collection(stray)
+
+
+def test_counts_page_through_every_batch_of_the_query_iterator(
+    client: Any,
+    models: tuple[str, str],
+    milvus_deployment: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_QUERY_BATCH", 2)
+    kb = _open("kb")
+    _ledger_document(kb, "doc-1", 1, 1, tmp_path)
+    mine = get_or_create_kb_id(get_vector_index_store().get_raw_connection(), "kb", 1)
+    name = ensure_milvus_collection(client, models[0], DIM)
+    _insert(
+        client,
+        name,
+        [
+            *(_row(f"doc-1-{i}", mine, "doc-1", 1, visible=True) for i in range(5)),
+            _row("doc-1-hidden", mine, "doc-1", 1, visible=False),
+            _row("doc-2-0", mine, "doc-2", 1, visible=True),
+            _row("doc-3-0", mine, "doc-3", 1, visible=True),
+            _row("doc-x-0", "elsewhere", "doc-x", 1, visible=True),
+        ],
+    )
+    key = embeddings_table_name(to_model_tag(models[0]))
+
+    assert kb.count_rows_by_document(user_id=1, is_admin=False) == {
+        "doc-1": {"chunks": 1, key: 5},
+        "doc-2": {key: 1},
+        "doc-3": {key: 1},
+    }

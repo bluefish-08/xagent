@@ -61,7 +61,7 @@ def _kb_ids_lock(conn: Any) -> Iterator[None]:
     lock = FileLock(path, timeout=_LOCK_TIMEOUT_SECONDS)
     try:
         lock.acquire()
-    except (Timeout, PermissionError, NotImplementedError) as error:
+    except (Timeout, OSError, NotImplementedError) as error:
         raise DatabaseOperationError(
             f"Cannot lock {path} to create a kb_id: {error!r}"
         ) from error

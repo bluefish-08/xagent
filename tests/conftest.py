@@ -156,7 +156,7 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_real_rag)
 
     if not os.getenv("MILVUS_URI"):
-        if os.getenv("XAGENT_REQUIRE_MILVUS"):
+        if os.getenv("XAGENT_REQUIRE_MILVUS", "0").strip() == "1":
             raise pytest.UsageError(
                 "XAGENT_REQUIRE_MILVUS is set but MILVUS_URI is empty; "
                 "the Milvus tests would all be skipped"

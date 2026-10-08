@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import multiprocessing
 import threading
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
@@ -122,7 +123,17 @@ def test_the_duplicate_error_lists_only_the_duplicated_rows(conn: Any) -> None:
     assert unrelated not in message and "unrelated" not in message
 
 
-@pytest.mark.parametrize("error", [PermissionError("denied"), NotImplementedError()])
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError("denied"),
+        NotImplementedError(),
+        OSError(errno.EROFS, "read-only file system"),
+        OSError(errno.ENOSPC, "no space left on device"),
+        FileNotFoundError(errno.ENOENT, "no such file or directory"),
+    ],
+    ids=["EACCES", "no-locking", "EROFS", "ENOSPC", "ENOENT"],
+)
 def test_a_lock_that_cannot_be_taken_fails_naming_the_lock_file(
     conn: Any, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:

@@ -9,13 +9,14 @@ vector index store.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import inspect
 import json
 import logging
 import numbers
 import os
-import threading
+import re
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -71,7 +72,7 @@ from ..core.schemas import (
     SparseSearchResponse,
     StepType,
 )
-from ..LanceDB.model_tag_utils import to_model_tag
+from ..LanceDB.model_tag_utils import embeddings_table_name, to_model_tag
 from ..LanceDB.schema_manager import (
     _safe_close_table,
     ensure_chunks_table,
@@ -319,9 +320,17 @@ class KBHandleProvider:
     """Open collection-scoped handles for resolved KB contexts."""
 
     def __init__(
-        self, storage_shim: KBStorageShimCompatibilityFacade | None = None
+        self,
+        storage_shim: KBStorageShimCompatibilityFacade | None = None,
+        connections: MilvusConnectionManager | None = None,
     ) -> None:
         self._storage_shim = storage_shim or KBStorageShimCompatibilityFacade()
+        self._connections = connections
+
+    def _milvus_connections(self) -> MilvusConnectionManager:
+        from ......providers.vector_store.milvus import MilvusConnectionManager
+
+        return self._connections or MilvusConnectionManager()
 
     def open(self, context: KBCollectionContext) -> KBCollectionHandle:
         """Return a backend-specific handle for the resolved collection context."""
@@ -334,12 +343,10 @@ class KBHandleProvider:
                     f"Collection {context.collection!r} is bound to the milvus "
                     f"engine, but this deployment runs {deployment.value}"
                 )
-            from ......providers.vector_store.milvus import MilvusConnectionManager
-
             return MilvusCollectionHandle(
                 context,
                 ledger=LanceDBCollectionHandle(context),
-                connections=MilvusConnectionManager(),
+                connections=self._milvus_connections(),
             )
         raise ValueError(
             f"KB storage backend {context.backend.value!r} is not supported by "
@@ -360,19 +367,22 @@ class KBHandleProvider:
             store = self._storage_shim.get_vector_index_store()
             return store.aggregate_collection_stats(user_id=user_id, is_admin=is_admin)
         if backend is KBStorageBackend.MILVUS:
-            from ......providers.vector_store.milvus import MilvusConnectionManager
-
             store = self._storage_shim.get_vector_index_store()
             stats = store.aggregate_collection_stats(user_id=user_id, is_admin=is_admin)
             kb_ids = read_kb_ids(
                 store.get_raw_connection(), user_id=user_id, is_admin=is_admin
             )
-            client = _milvus_client(MilvusConnectionManager()) if kb_ids else None
+            client = (
+                self._milvus_connections().get_shared_client_from_env()
+                if kb_ids
+                else None
+            )
             names = _milvus_collections(client) if kb_ids else []
+            not_loaded: set[str] = set()
             for collection, row in stats.items():
                 owned = kb_ids.get(collection)
                 row["embeddings"] = (
-                    sum(_count_visible_rows(client, names, owned).values())
+                    sum(_count_visible_rows(client, names, owned, not_loaded).values())
                     if owned
                     else 0
                 )
@@ -5308,47 +5318,36 @@ _CASCADE = "cascade cleanup"
 _VERSIONS = "version candidates and promotion"
 
 MILVUS_COLLECTION_PREFIX = "xagent_kb_"
+_MILVUS_MODEL_PROPERTY = "xagent.model_id"
+_MILVUS_TAG_LENGTH = 64
 _MILVUS_ID_LENGTH = 512
 _MILVUS_TEXT_BYTES = 65_535
 _MILVUS_QUERY_BATCH = 10_000
 _MILVUS_NOT_LOADED = 101
-_MILVUS_CLIENT_LOCK = threading.Lock()
-_MILVUS_CLIENTS: dict[tuple[str, ...], Any] = {}
-
-
-def _milvus_client(connections: MilvusConnectionManager) -> Any:
-    # Never closed: close() drops the connection pymilvus shares by alias. The lock
-    # covers only a miss, because pymilvus does not lock the first connect of an alias.
-    key = tuple(
-        (os.getenv(name) or "").strip()
-        for name in ("MILVUS_URI", "MILVUS_TOKEN", "MILVUS_DB_NAME")
-    )
-    client = _MILVUS_CLIENTS.get(key)
-    if client is None:
-        with _MILVUS_CLIENT_LOCK:
-            client = _MILVUS_CLIENTS.get(key)
-            if client is None:
-                client = _MILVUS_CLIENTS[key] = connections.get_client_from_env()
-    return client
 
 
 def milvus_collection_name(model: str) -> str:
-    """Return the Milvus collection holding the rows of an embedding model.
+    """Return the Milvus collection of an embedding model id such as ``BAAI/bge-m3``.
 
-    Accepts the model id or its tag: ``to_model_tag`` is not idempotent for
-    vendor-prefixed ids, but applying it twice is.
+    The hash of the id keeps apart ids whose tags coincide, and a tag does not
+    recover it: pass the id the vectors were written with.
     """
-    return MILVUS_COLLECTION_PREFIX + to_model_tag(to_model_tag(model))
+    model_id = model.strip()
+    tag = re.sub(r"[^A-Za-z0-9_]", "_", to_model_tag(model_id))[:_MILVUS_TAG_LENGTH]
+    digest = hashlib.sha1(model_id.encode(), usedforsecurity=False).hexdigest()
+    return f"{MILVUS_COLLECTION_PREFIX}{tag}_{digest[:8]}"
 
 
 def ensure_milvus_collection(client: Any, model: str, dimension: int) -> str:
     """Create, index and load the Milvus collection of ``model``; return its name.
 
     ``kb_id``, ``text`` and ``dense`` are not nullable, so a partial update of a
-    missing primary key fails instead of inserting a visible ghost row. An existing
-    collection of another ``dimension`` raises ``VectorValidationError``.
+    missing primary key fails instead of inserting a visible ghost row. The model id
+    is recorded as a collection property; an existing collection of another model
+    or ``dimension`` raises ``VectorValidationError``.
     """
-    name = milvus_collection_name(model)
+    model_id = model.strip()
+    name = milvus_collection_name(model_id)
     pymilvus = importlib.import_module("pymilvus")
     if not client.has_collection(name):
         types = pymilvus.DataType
@@ -5383,23 +5382,29 @@ def ensure_milvus_collection(client: Any, model: str, dimension: int) -> str:
             )
         )
         try:
-            client.create_collection(name, schema=schema)
+            client.create_collection(
+                name, schema=schema, properties={_MILVUS_MODEL_PROPERTY: model_id}
+            )
         except Exception:
             if not client.has_collection(name):
                 raise
-    else:
-        existing = next(
-            field["params"]["dim"]
-            for field in client.describe_collection(name)["fields"]
-            if field["name"] == "dense"
+    description = client.describe_collection(name)
+    recorded = (description.get("properties") or {}).get(_MILVUS_MODEL_PROPERTY)
+    if recorded != model_id:
+        raise VectorValidationError(
+            f"Milvus collection {name} holds vectors of model {recorded!r}, "
+            f"not {model_id!r}"
         )
-        if int(existing) != dimension:
-            raise VectorValidationError(
-                f"Milvus collection {name} holds {existing}-dimensional vectors, "
-                f"but {model!r} now produces {dimension}-dimensional ones"
-            )
-        if client.get_load_state(name)["state"].name == "Loaded":
-            return name
+    dense = next((f for f in description["fields"] if f["name"] == "dense"), None)
+    if dense is None:
+        raise VectorValidationError(f"Milvus collection {name} has no dense field")
+    if int(dense["params"]["dim"]) != dimension:
+        raise VectorValidationError(
+            f"Milvus collection {name} holds {dense['params']['dim']}-dimensional "
+            f"vectors, but {model_id!r} now produces {dimension}-dimensional ones"
+        )
+    if client.get_load_state(name)["state"].name == "Loaded":
+        return name
     # A creator that stopped before loading leaves the collection unindexed;
     # creating the same indexes and loading again are both idempotent.
     indexes = client.prepare_index_params()
@@ -5426,17 +5431,19 @@ def _milvus_collections(client: Any) -> list[str]:
 
 
 @contextmanager
-def _unloaded_as_empty(name: str) -> Iterator[None]:
-    """Skip the body with a warning when ``name`` is not loaded (code 101).
+def _unloaded_as_empty(name: str, not_loaded: set[str]) -> Iterator[None]:
+    """Skip the body with one warning when ``name`` is not loaded (code 101).
 
     A new collection is unloaded until its creator loads it; one missing
-    collection must not fail the counts of the others.
+    collection must not fail the counts of the others. ``not_loaded`` spans one
+    call, so callers skip the names in it and the warning is not repeated.
     """
     try:
         yield
     except Exception as error:
         if getattr(error, "code", None) != _MILVUS_NOT_LOADED:
             raise
+        not_loaded.add(name)
         logger.warning("Milvus collection %s is not loaded; counted as 0 rows", name)
 
 
@@ -5446,7 +5453,11 @@ def _visible_filter(kb_ids: list[str]) -> str:
 
 
 def _count_visible_rows(
-    client: Any, names: list[str], kb_ids: list[str], doc_id: str | None = None
+    client: Any,
+    names: list[str],
+    kb_ids: list[str],
+    not_loaded: set[str],
+    doc_id: str | None = None,
 ) -> dict[str, int]:
     """Count visible rows of ``kb_ids`` in each of ``names`` that holds some."""
     expr = _visible_filter(kb_ids)
@@ -5456,7 +5467,9 @@ def _count_visible_rows(
         params["doc_id"] = doc_id
     counts = {}
     for name in names:
-        with _unloaded_as_empty(name):
+        if name in not_loaded:
+            continue
+        with _unloaded_as_empty(name, not_loaded):
             rows = client.query(
                 name, filter=expr, filter_params=params, output_fields=["count(*)"]
             )
@@ -5466,10 +5479,10 @@ def _count_visible_rows(
 
 
 def _visible_rows_by_document(
-    client: Any, name: str, kb_ids: list[str]
+    client: Any, name: str, kb_ids: list[str], not_loaded: set[str]
 ) -> dict[str, int]:
     counts: Counter[str] = Counter()
-    with _unloaded_as_empty(name):
+    with _unloaded_as_empty(name, not_loaded):
         iterator = client.query_iterator(
             name,
             batch_size=_MILVUS_QUERY_BATCH,
@@ -5483,6 +5496,20 @@ def _visible_rows_by_document(
             iterator.close()
         return counts
     return Counter()
+
+
+def _embeddings_key(client: Any, name: str) -> str:
+    """Return the per-document count key of Milvus collection ``name``."""
+    model = (client.describe_collection(name).get("properties") or {}).get(
+        _MILVUS_MODEL_PROPERTY
+    )
+    if model is None:
+        raise VectorValidationError(
+            f"Milvus collection {name} records no {_MILVUS_MODEL_PROPERTY}; "
+            "it was not created by ensure_milvus_collection"
+        )
+    # LanceDB tags a model id twice on write, so its tables carry the second pass.
+    return embeddings_table_name(to_model_tag(model))
 
 
 @dataclass(frozen=True)
@@ -5505,7 +5532,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
     @cached_property
     def client(self) -> Any:
         """Milvus client for ``MILVUS_URI``, created on first use."""
-        return _milvus_client(self.connections)
+        return self.connections.get_shared_client_from_env()
 
     def _kb_ids(self, user_id: int | None, is_admin: bool) -> list[str]:
         collection = self.context.collection
@@ -5520,7 +5547,9 @@ class MilvusCollectionHandle(KBCollectionHandle):
         """Count documents and chunks in the ledger and visible rows in Milvus."""
         kb_ids = self._kb_ids(user_id, is_admin)
         embeddings = (
-            _count_visible_rows(self.client, _milvus_collections(self.client), kb_ids)
+            _count_visible_rows(
+                self.client, _milvus_collections(self.client), kb_ids, set()
+            )
             if kb_ids
             else {}
         )
@@ -5536,7 +5565,8 @@ class MilvusCollectionHandle(KBCollectionHandle):
     ) -> dict[str, dict[str, int]]:
         """Count ledger chunks and visible Milvus rows per document.
 
-        Milvus counts are keyed ``embeddings_<model tag>``, like the LanceDB tables.
+        Milvus counts are keyed like the LanceDB tables, from the model id the
+        Milvus collection records.
         """
         counts = self.ledger.count_rows_by_document(
             user_id=user_id, is_admin=is_admin, doc_id=doc_id
@@ -5545,22 +5575,26 @@ class MilvusCollectionHandle(KBCollectionHandle):
         if not kb_ids:
             return counts
         names = _milvus_collections(self.client)
+        not_loaded: set[str] = set()
         if doc_id is None:
             per_model = {
-                name: _visible_rows_by_document(self.client, name, kb_ids)
+                name: _visible_rows_by_document(self.client, name, kb_ids, not_loaded)
                 for name in names
             }
         else:
             per_model = {
                 name: {doc_id: count}
                 for name, count in _count_visible_rows(
-                    self.client, names, kb_ids, doc_id
+                    self.client, names, kb_ids, not_loaded, doc_id
                 ).items()
             }
         for name, by_document in per_model.items():
-            key = "embeddings_" + name.removeprefix(MILVUS_COLLECTION_PREFIX)
+            if not by_document:
+                continue
+            key = _embeddings_key(self.client, name)
             for row_doc_id, count in by_document.items():
-                counts.setdefault(row_doc_id, {})[key] = count
+                row = counts.setdefault(row_doc_id, {})
+                row[key] = row.get(key, 0) + count
         return counts
 
     register_document = _ledger(KBCollectionHandle.register_document)
