@@ -288,8 +288,9 @@ def _restore_document_table_rows(
 def deployment_kb_backend() -> KBStorageBackend:
     """Return the KB engine of this deployment.
 
-    Startup refuses a setting that differs from the deployment's engine record,
-    so the setting is the recorded engine in every process that checked it.
+    Startup refuses a setting that differs from the recorded or detected engine;
+    where neither can be determined (the LanceDB directory cannot be reached or
+    listed), it only warns, and the setting is used as it is.
     Raises ``ConfigurationError`` for a known engine that is not implemented.
     """
     backend = get_configured_vector_backend()

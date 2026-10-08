@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-import re
 import subprocess
 import sys
 import time
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import lancedb
 import pytest
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from xagent.core.tools.core.RAG_tools.core.exceptions import ConfigurationError
 from xagent.core.tools.core.RAG_tools.core.schemas import CollectionInfo
@@ -158,41 +158,253 @@ def test_a_corrupt_record_is_refused_and_kept(content: bytes) -> None:
     assert _record().read_bytes() == content
 
 
+@pytest.mark.parametrize("lock_file_exists", [False, True])
 @pytest.mark.parametrize(
-    ("record", "table", "refused"),
+    ("record", "table", "fix"),
     [
-        (None, "documents", False),
-        ("lancedb\n", "documents", False),
-        (None, "kb_ids", True),
-        ("milvus\n", "documents", True),
+        (None, "documents", None),
+        ("lancedb\n", "documents", None),
+        (
+            None,
+            "kb_ids",
+            "writable (with flock support), or set XAGENT_VECTOR_BACKEND to milvus.",
+        ),
+        ("milvus\n", "documents", "delete the record file and restart."),
     ],
 )
 def test_a_read_only_directory_still_starts_and_still_refuses(
-    record: str | None, table: str, refused: bool
+    record: str | None, table: str, fix: str | None, lock_file_exists: bool
 ) -> None:
     _seed(table)
     if record is not None:
         _record().write_text(record)
+    if lock_file_exists:
+        _record().with_name(f"{KB_ENGINE_RECORD}.lock").touch()
     _record().parent.chmod(0o555)
     try:
-        if refused:
-            with pytest.raises(ConfigurationError, match="KB engine is milvus"):
+        if fix is not None:
+            with pytest.raises(
+                ConfigurationError, match="KB engine is milvus"
+            ) as raised:
                 lock_deployment_kb_engine()
+            assert str(raised.value).endswith(fix)
         else:
             assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+        assert _record().exists() == (record is not None)
     finally:
         _record().parent.chmod(0o755)
 
 
-def test_a_held_lock_times_out_naming_the_lock_file(
+@pytest.mark.parametrize("lancedb_dir_set", [True, False])
+def test_a_lancedb_directory_that_cannot_be_created_still_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lancedb_dir_set: bool
+) -> None:
+    from xagent.providers.vector_store.lancedb import LanceDBConnectionManager
+
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("XAGENT_STORAGE_ROOT", str(root))
+    monkeypatch.delenv("LANCEDB_PATH", raising=False)
+    if lancedb_dir_set:
+        monkeypatch.setenv("LANCEDB_DIR", str(root / "lancedb"))
+    else:
+        monkeypatch.delenv("LANCEDB_DIR")
+    default_dir = LanceDBConnectionManager.get_default_lancedb_dir
+    default_dir.cache_clear()
+    root.chmod(0o555)
+    try:
+        assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    finally:
+        root.chmod(0o755)
+        default_dir.cache_clear()
+    assert list(root.iterdir()) == []
+
+
+def test_a_missing_lancedb_directory_is_created_and_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LANCEDB_DIR", str(tmp_path / "new" / "lancedb"))
+
+    assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert _record().read_text() == "lancedb\n"
+
+
+@pytest.mark.parametrize(
+    ("kind", "mode"),
+    [
+        ("file", 0o755),
+        ("directory", 0o000),
+        ("directory", 0o311),
+        ("directory", 0o644),
+        ("parent", 0o000),
+    ],
+)
+def test_an_unreachable_lancedb_directory_warns_and_starts(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+    mode: int,
+) -> None:
+    locked = tmp_path / "unreachable"
+    target = locked / "lancedb" if kind == "parent" else locked
+    if kind == "file":
+        target.write_text("x")
+    else:
+        target.mkdir(parents=True)
+    monkeypatch.setenv("LANCEDB_DIR", str(target))
+    locked.chmod(mode)
+    try:
+        with caplog.at_level(logging.WARNING, logger=vector_backend.__name__):
+            assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    finally:
+        locked.chmod(0o755)
+    assert "Cannot reach the LanceDB directory" in caplog.text
+    if kind == "directory":
+        assert list(target.iterdir()) == []
+
+
+def test_a_record_is_never_written_without_the_lock() -> None:
+    lock_path = _record().with_name(f"{KB_ENGINE_RECORD}.lock")
+    lock_path.touch()
+    lock_path.chmod(0o444)
+
+    assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert not _record().exists()
+
+
+def test_an_empty_lancedb_dir_warns_and_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("LANCEDB_DIR", "")
+
+    with caplog.at_level(logging.WARNING, logger=vector_backend.__name__):
+        assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert "LANCEDB_DIR is empty; the KB engine is not checked" in caplog.text
+
+
+def test_an_unreadable_record_is_refused_without_the_delete_hint() -> None:
+    _record().mkdir()
+
+    with pytest.raises(ConfigurationError, match="Cannot read the KB engine") as raised:
+        lock_deployment_kb_engine()
+    assert "delete the record file" not in str(raised.value)
+
+
+@pytest.mark.parametrize("failing", ["connect", "list"])
+def test_a_detection_error_warns_and_starts_without_a_record(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing: str
+) -> None:
+    connects, closed, released = [], [], []
+
+    class Connection:
+        def list_tables(self) -> list[str]:
+            raise RuntimeError("lance listing failed")
+
+        def close(self) -> None:
+            closed.append(1)
+
+    def connect(_: str) -> Connection:
+        connects.append(1)
+        if failing == "connect":
+            raise OSError("connect failed")
+        return Connection()
+
+    class SpyLock(FileLock):
+        def release(self, force: bool = False) -> None:
+            released.append(force)
+            super().release(force)
+
+    monkeypatch.setattr(lancedb, "connect", connect)
+    monkeypatch.setattr(vector_backend, "FileLock", SpyLock)
+
+    with caplog.at_level(logging.WARNING, logger=vector_backend.__name__):
+        assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert "Cannot detect the KB engine" in caplog.text
+    assert connects == [1]
+    assert closed == ([1] if failing == "list" else [])
+    assert released[:1] == [False]
+    assert not _record().exists()
+
+
+def test_detection_closes_every_table_and_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = []
+
+    class Table:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def count_rows(self) -> int:
+            if self.name == "documents":
+                raise OSError("unreadable")
+            return 0
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    class Connection:
+        def list_tables(self) -> list[str]:
+            return ["kb_ids", "documents", "embeddings_a"]
+
+        def open_table(self, name: str) -> Table:
+            return Table(name)
+
+        def close(self) -> None:
+            closed.append("connection")
+
+    monkeypatch.setattr(lancedb, "connect", lambda _: Connection())
+
+    assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert sorted(closed) == ["connection", "documents", "embeddings_a", "kb_ids"]
+
+
+def test_a_held_lock_times_out_with_a_warning_naming_the_lock_file(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(vector_backend, "_LOCK_TIMEOUT_SECONDS", 0.1)
     lock_path = _record().with_name(f"{KB_ENGINE_RECORD}.lock")
 
     with FileLock(str(lock_path)):
-        with pytest.raises(ConfigurationError, match=re.escape(str(lock_path))):
-            lock_deployment_kb_engine()
+        with caplog.at_level(logging.WARNING, logger=vector_backend.__name__):
+            assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert str(lock_path) in caplog.text
+    assert not _record().exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "warning"),
+    [
+        (NotImplementedError("flock is not supported"), "flock is not supported"),
+        (Timeout("lock"), "or the filesystem does not support flock"),
+    ],
+)
+@pytest.mark.parametrize("table", ["documents", "kb_ids"])
+def test_an_unusable_lock_compares_without_a_record(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    warning: str,
+    table: str,
+) -> None:
+    class UnusableLock:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def acquire(self) -> None:
+            raise error
+
+    monkeypatch.setattr(vector_backend, "FileLock", UnusableLock)
+    _seed(table)
+
+    with caplog.at_level(logging.WARNING, logger=vector_backend.__name__):
+        if table == "kb_ids":
+            with pytest.raises(ConfigurationError, match="could not be written"):
+                lock_deployment_kb_engine()
+        else:
+            assert lock_deployment_kb_engine() is KBStorageBackend.LANCEDB
+    assert warning in caplog.text
     assert not _record().exists()
 
 
