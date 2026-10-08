@@ -21,6 +21,7 @@ from xagent.core.tools.core.RAG_tools.core.schemas import (
     IndexStatus,
     SearchFallbackAction,
 )
+from xagent.core.tools.core.RAG_tools.kb import collection_handle
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     KBCollectionHandle,
     MilvusCollectionHandle,
@@ -253,11 +254,13 @@ class FakeClient:
         sparse: list[tuple[str, float]] | None = None,
         rows: list[dict[str, Any]] | None = None,
         pages: list[list[dict[str, Any]]] | None = None,
+        queries_before_failure: int | None = None,
     ) -> None:
         self.dense = dense or []
         self.sparse = sparse or []
         self.rows = rows or []
         self.pages = pages
+        self.queries_before_failure = queries_before_failure
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.barrier: threading.Barrier | None = None
         self.error: Exception | None = None
@@ -291,8 +294,13 @@ class FakeClient:
         self.calls.append(("query", {"name": name, **kwargs}))
         if self.error is not None:
             raise self.error
+        queries = sum(method == "query" for method, _ in self.calls)
+        if self.queries_before_failure is not None and (
+            queries > self.queries_before_failure
+        ):
+            raise RuntimeError("query failed")
         if self.pages is not None:
-            return self.pages[sum(method == "query" for method, _ in self.calls) - 1]
+            return self.pages[queries - 1]
         offset = kwargs["offset"]
         return self.rows[offset : offset + kwargs["limit"]]
 
@@ -476,6 +484,29 @@ def test_hybrid_fuses_two_times_top_k_per_route_and_keeps_route_scores(
         assert top.fts_score == pytest.approx(2.0 / 3.0)
 
 
+def test_hybrid_fuses_with_the_module_function_the_lancedb_handle_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def fuse(*args: Any, **kwargs: Any) -> str:
+        seen.append((args, kwargs))
+        return "fused"
+
+    monkeypatch.setattr(collection_handle, "_fuse_hybrid", fuse)
+    client = FakeClient(dense=[("a", 1.0)], sparse=[("a", 1.0)])
+    handle = _handle(client, monkeypatch, None)
+
+    result = handle.search_hybrid(MODEL, "kiwi", [1.0, 0.0], top_k=2)
+
+    assert result == "fused"
+    ((args, kwargs),) = seen
+    assert args[:2] == (MODEL, "kiwi")
+    assert [r.chunk_id for r in args[2].results] == ["a"]
+    assert [r.chunk_id for r in args[3].results] == ["a"]
+    assert kwargs["top_k"] == 2 and kwargs["fusion_config"] == FusionConfig()
+
+
 def test_hybrid_sends_the_dense_and_keyword_queries_at_the_same_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -545,6 +576,7 @@ def test_a_failing_route_becomes_a_failed_response_not_a_raise(
 def test_a_keyword_miss_falls_back_to_like_and_keeps_only_real_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_FALLBACK_PAGE", 2)
     rows = [client_row(f"x{i}", "aXb") for i in range(4)]
     rows.insert(2, client_row("w1", "say a_b now"))
     rows.append(client_row("w2", "a_b"))
@@ -571,6 +603,7 @@ def test_a_keyword_miss_falls_back_to_like_and_keeps_only_real_matches(
 def test_the_fallback_ends_at_a_short_page_and_without_matches_adds_no_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_FALLBACK_PAGE", 2)
     client = FakeClient(rows=[client_row(f"x{i}", "aXb") for i in range(3)])
     handle = _handle(client, monkeypatch, None)
 
@@ -601,6 +634,7 @@ def test_the_fallback_returns_top_k_rows_when_the_last_page_overshoots(
 def test_the_fallback_keeps_a_row_once_when_pages_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_FALLBACK_PAGE", 2)
     hit, other = client_row("w1", "a_b"), client_row("w2", "a_b")
     pages = [[hit, client_row("x0", "aXb")], [hit, other]]
     handle = _handle(FakeClient(pages=pages), monkeypatch, None)
@@ -629,6 +663,63 @@ def test_a_ledger_failure_while_reading_kb_ids_is_raised_not_answered(
         with pytest.raises(DatabaseOperationError, match="ledger unavailable"):
             search()
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("top_k", "windows"),
+    [
+        (10, [(0, 1_000), (1_000, 1_000), (2_000, 1_000)]),
+        (1_000, [(0, 1_000), (1_000, 1_000), (2_000, 1_000)]),
+        (2_000, [(0, 2_000), (2_000, 2_000)]),
+        (20_000, [(0, 16_384)]),
+    ],
+)
+def test_the_fallback_page_size_is_at_least_a_thousand_and_within_the_window(
+    monkeypatch: pytest.MonkeyPatch, top_k: int, windows: list[tuple[int, int]]
+) -> None:
+    client = FakeClient(rows=[client_row(f"x{i}", "aXb") for i in range(2_500)])
+    handle = _handle(client, monkeypatch, None)
+
+    handle.search_sparse(MODEL, "a_b", top_k=top_k)
+
+    queries = [kw for method, kw in client.calls if method == "query"]
+    assert [(q["offset"], q["limit"]) for q in queries] == windows
+
+
+def test_a_failing_fallback_logs_and_returns_nothing_like_lancedb(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = FakeClient(rows=[client_row("w1", "a_b")], queries_before_failure=0)
+    handle = _handle(client, monkeypatch, None)
+
+    with caplog.at_level("ERROR"):
+        response = handle.search_sparse(MODEL, "a_b", top_k=3)
+
+    assert (response.status, response.results, response.warnings) == (
+        "success",
+        [],
+        [],
+    )
+    assert [r.levelname for r in caplog.records] == ["ERROR"]
+    assert "Substring fallback failed: query failed" in caplog.text
+
+
+def test_a_fallback_that_fails_on_a_later_page_returns_nothing_not_a_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_FALLBACK_PAGE", 2)
+    rows = [client_row("w1", "a_b"), client_row("x0", "aXb"), client_row("w2", "a_b")]
+    client = FakeClient(rows=rows, queries_before_failure=1)
+    handle = _handle(client, monkeypatch, None)
+
+    response = handle.search_sparse(MODEL, "a_b", top_k=3)
+
+    assert (response.status, response.results, response.warnings) == (
+        "success",
+        [],
+        [],
+    )
+    assert [m for m, _ in client.calls].count("query") == 2
 
 
 def test_keyword_hits_skip_the_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

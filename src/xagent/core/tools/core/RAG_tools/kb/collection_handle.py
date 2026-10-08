@@ -353,6 +353,111 @@ def ledger_holds_vectors() -> bool:
     return deployment_kb_backend() is KBStorageBackend.LANCEDB
 
 
+def _fuse_hybrid(
+    model_tag: str,
+    query_text: str,
+    dense_response: DenseSearchResponse,
+    sparse_response: SparseSearchResponse,
+    *,
+    top_k: int,
+    fusion_config: FusionConfig,
+) -> HybridSearchResponse:
+    """Fuse already-fetched dense/sparse responses into a hybrid response.
+
+    Holds every step that runs after the dense/sparse calls in both the sync
+    and async hybrid paths. It consumes already-fetched response objects, so
+    it is purely synchronous and shared by ``search_hybrid`` and
+    ``search_hybrid_async``.
+    """
+    all_warnings: List[SearchWarning] = []
+
+    dense_results = dense_response.results
+    all_warnings.extend(dense_response.warnings)
+
+    sparse_results = sparse_response.results
+    all_warnings.extend(sparse_response.warnings)
+
+    # Get index status and advice from dense search (primary source for index info)
+    index_status = dense_response.index_status
+    index_advice = dense_response.index_advice
+
+    # 3. Preserve original scores and ranks before fusion
+    dense_rank_map: Dict[str, int] = {}
+    sparse_rank_map: Dict[str, int] = {}
+    dense_score_map: Dict[str, float] = {}
+    sparse_score_map: Dict[str, float] = {}
+
+    for rank, result in enumerate(dense_results, start=1):
+        unique_id = (
+            f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
+        )
+        dense_rank_map[unique_id] = rank
+        dense_score_map[unique_id] = result.score
+
+    for rank, result in enumerate(sparse_results, start=1):
+        unique_id = (
+            f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
+        )
+        sparse_rank_map[unique_id] = rank
+        sparse_score_map[unique_id] = result.score
+
+    # 4. Fuse Results
+    logger.info("Fusing results using strategy: %s", fusion_config.strategy.value)
+    fused_results: List[SearchResult] = []
+    if fusion_config.strategy == FusionStrategy.RRF:
+        fused_results = _rrf_fusion(
+            [dense_results, sparse_results], k=fusion_config.rrf_k
+        )
+    elif fusion_config.strategy == FusionStrategy.LINEAR:
+        fused_results = _linear_fusion(
+            dense_results=dense_results,
+            sparse_results=sparse_results,
+            dense_weight=fusion_config.dense_weight,
+            sparse_weight=fusion_config.sparse_weight,
+            normalize_scores=fusion_config.normalize_scores,
+        )
+    else:
+        logger.warning(
+            "Unknown fusion strategy: %s. Defaulting to dense results.",
+            fusion_config.strategy,
+        )
+        fused_results = dense_results
+
+    # 5. Attach original scores and ranks to fused results
+    updated_fused_results: List[SearchResult] = []
+    for result in fused_results:
+        unique_id = (
+            f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
+        )
+        updated_fused_results.append(
+            result.model_copy(
+                update={
+                    "vector_score": dense_score_map.get(unique_id),
+                    "fts_score": sparse_score_map.get(unique_id),
+                    "vector_rank": dense_rank_map.get(unique_id),
+                    "fts_rank": sparse_rank_map.get(unique_id),
+                }
+            )
+        )
+    fused_results = updated_fused_results
+
+    # Limit to top_k after fusion
+    final_results = fused_results[:top_k]
+
+    # 6. Build Response
+    return HybridSearchResponse(
+        results=final_results,
+        total_count=len(final_results),
+        status="success" if not all_warnings else "partial_success",
+        warnings=all_warnings,
+        fusion_config=fusion_config,
+        dense_count=len(dense_results),
+        sparse_count=len(sparse_results),
+        index_status=index_status,
+        index_advice=index_advice,
+    )
+
+
 class KBHandleProvider:
     """Open collection-scoped handles for resolved KB contexts."""
 
@@ -772,6 +877,7 @@ class KBCollectionHandle(ABC):
         """Execute dense vector search for this collection.
 
         ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus raises, not a failed response, on a bad filter or unreadable kb_ids.
         """
 
     @abstractmethod
@@ -790,7 +896,7 @@ class KBCollectionHandle(ABC):
     ) -> DenseSearchResponse:
         """Async dense vector search for this collection.
 
-        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus does not support async search.
         """
 
     @abstractmethod
@@ -810,6 +916,7 @@ class KBCollectionHandle(ABC):
         """Execute sparse (FTS) search for this collection.
 
         ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus raises, not a failed response, on a bad filter or unreadable kb_ids.
         """
 
     @abstractmethod
@@ -828,7 +935,7 @@ class KBCollectionHandle(ABC):
     ) -> SparseSearchResponse:
         """Async sparse (FTS) search for this collection.
 
-        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus does not support async search.
         """
 
     @abstractmethod
@@ -850,6 +957,7 @@ class KBCollectionHandle(ABC):
         """Execute hybrid (dense + sparse) search with fusion for this collection.
 
         ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus raises, not a failed response, on a bad filter or unreadable kb_ids.
         """
 
     @abstractmethod
@@ -870,7 +978,7 @@ class KBCollectionHandle(ABC):
     ) -> HybridSearchResponse:
         """Async hybrid (dense + sparse) search with fusion for this collection.
 
-        ``model_tag`` is the embedding model id; Milvus resolves its collection from it.
+        Milvus does not support async search.
         """
 
     # --- Parse/chunk cleanup (row only, collection scoped) (#509) ---
@@ -3633,112 +3741,13 @@ class LanceDBCollectionHandle(KBCollectionHandle):
         )
 
         # 3-6. Fuse and build the response (shared sync logic).
-        return self._fuse_hybrid(
+        return _fuse_hybrid(
             model_tag,
             query_text,
             dense_response,
             sparse_response,
             top_k=top_k,
             fusion_config=fusion_config,
-        )
-
-    @staticmethod
-    def _fuse_hybrid(
-        model_tag: str,
-        query_text: str,
-        dense_response: DenseSearchResponse,
-        sparse_response: SparseSearchResponse,
-        *,
-        top_k: int,
-        fusion_config: FusionConfig,
-    ) -> HybridSearchResponse:
-        """Fuse already-fetched dense/sparse responses into a hybrid response.
-
-        Holds every step that runs after the dense/sparse calls in both the sync
-        and async hybrid paths. It consumes already-fetched response objects, so
-        it is purely synchronous and shared by ``search_hybrid`` and
-        ``search_hybrid_async``.
-        """
-        all_warnings: List[SearchWarning] = []
-
-        dense_results = dense_response.results
-        all_warnings.extend(dense_response.warnings)
-
-        sparse_results = sparse_response.results
-        all_warnings.extend(sparse_response.warnings)
-
-        # Get index status and advice from dense search (primary source for index info)
-        index_status = dense_response.index_status
-        index_advice = dense_response.index_advice
-
-        # 3. Preserve original scores and ranks before fusion
-        dense_rank_map: Dict[str, int] = {}
-        sparse_rank_map: Dict[str, int] = {}
-        dense_score_map: Dict[str, float] = {}
-        sparse_score_map: Dict[str, float] = {}
-
-        for rank, result in enumerate(dense_results, start=1):
-            unique_id = f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
-            dense_rank_map[unique_id] = rank
-            dense_score_map[unique_id] = result.score
-
-        for rank, result in enumerate(sparse_results, start=1):
-            unique_id = f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
-            sparse_rank_map[unique_id] = rank
-            sparse_score_map[unique_id] = result.score
-
-        # 4. Fuse Results
-        logger.info("Fusing results using strategy: %s", fusion_config.strategy.value)
-        fused_results: List[SearchResult] = []
-        if fusion_config.strategy == FusionStrategy.RRF:
-            fused_results = _rrf_fusion(
-                [dense_results, sparse_results], k=fusion_config.rrf_k
-            )
-        elif fusion_config.strategy == FusionStrategy.LINEAR:
-            fused_results = _linear_fusion(
-                dense_results=dense_results,
-                sparse_results=sparse_results,
-                dense_weight=fusion_config.dense_weight,
-                sparse_weight=fusion_config.sparse_weight,
-                normalize_scores=fusion_config.normalize_scores,
-            )
-        else:
-            logger.warning(
-                "Unknown fusion strategy: %s. Defaulting to dense results.",
-                fusion_config.strategy,
-            )
-            fused_results = dense_results
-
-        # 5. Attach original scores and ranks to fused results
-        updated_fused_results: List[SearchResult] = []
-        for result in fused_results:
-            unique_id = f"{result.doc_id}-{result.chunk_id}-{result.parse_hash}-{result.model_tag}"
-            updated_fused_results.append(
-                result.model_copy(
-                    update={
-                        "vector_score": dense_score_map.get(unique_id),
-                        "fts_score": sparse_score_map.get(unique_id),
-                        "vector_rank": dense_rank_map.get(unique_id),
-                        "fts_rank": sparse_rank_map.get(unique_id),
-                    }
-                )
-            )
-        fused_results = updated_fused_results
-
-        # Limit to top_k after fusion
-        final_results = fused_results[:top_k]
-
-        # 6. Build Response
-        return HybridSearchResponse(
-            results=final_results,
-            total_count=len(final_results),
-            status="success" if not all_warnings else "partial_success",
-            warnings=all_warnings,
-            fusion_config=fusion_config,
-            dense_count=len(dense_results),
-            sparse_count=len(sparse_results),
-            index_status=index_status,
-            index_advice=index_advice,
         )
 
     async def search_hybrid_async(
@@ -3790,7 +3799,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
         )
 
         # 3-6. Fuse and build the response (shared sync logic).
-        return self._fuse_hybrid(
+        return _fuse_hybrid(
             model_tag,
             query_text,
             dense_response,
@@ -5384,6 +5393,7 @@ _MILVUS_TEXT_BYTES = 65_535
 _MILVUS_QUERY_BATCH = 10_000
 # Milvus rejects a query whose offset plus limit is above this.
 _MILVUS_QUERY_WINDOW = 16_384
+_MILVUS_FALLBACK_PAGE = 1_000
 _MILVUS_NOT_LOADED = 101
 
 
@@ -6053,8 +6063,9 @@ class MilvusCollectionHandle(KBCollectionHandle):
         expr += " and text like {pattern}"
         params = {**params, "pattern": like_pattern(term)}
         found: dict[str, SearchResult] = {}
-        for offset in range(0, _MILVUS_QUERY_WINDOW, top_k):
-            size = min(top_k, _MILVUS_QUERY_WINDOW - offset)
+        page_size = max(top_k, _MILVUS_FALLBACK_PAGE)
+        for offset in range(0, _MILVUS_QUERY_WINDOW, page_size):
+            size = min(page_size, _MILVUS_QUERY_WINDOW - offset)
             page = self._read_model(
                 model_tag,
                 lambda name: self.client.query(
@@ -6104,7 +6115,13 @@ class MilvusCollectionHandle(KBCollectionHandle):
         ]
         if results:
             return results, []
-        results = self._substring_results(model_tag, query_text, top_k, expr, params)
+        try:
+            results = self._substring_results(
+                model_tag, query_text, top_k, expr, params
+            )
+        except Exception as error:
+            logger.error("Substring fallback failed: %s", error)
+            return [], []
         fallback = SearchWarning(
             code="FTS_FALLBACK",
             message="Keyword search returned no matches; used substring search.",
@@ -6215,7 +6232,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 refine_factor,
             )
             sparse = self._sparse_response(model_tag, query_text, top_k * 2, scope)
-        return LanceDBCollectionHandle._fuse_hybrid(
+        return _fuse_hybrid(
             model_tag,
             query_text,
             dense.result(),

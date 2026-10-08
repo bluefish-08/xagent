@@ -28,7 +28,6 @@ from xagent.core.tools.core.RAG_tools.kb import collection_handle
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     KBCollectionHandle,
     KBHandleProvider,
-    LanceDBCollectionHandle,
     MilvusCollectionHandle,
     milvus_collection_name,
 )
@@ -331,7 +330,7 @@ def test_hybrid_results_are_the_fusion_of_the_two_routes_with_route_scores(
         model, "kiwi", unit(5), top_k=2, fusion_config=config, **scope
     )
 
-    expected = LanceDBCollectionHandle._fuse_hybrid(
+    expected = collection_handle._fuse_hybrid(
         model, "kiwi", dense, sparse, top_k=2, fusion_config=config
     )
     assert hybrid.results == expected.results
@@ -731,8 +730,9 @@ def test_the_like_pattern_never_misses_a_match_on_random_special_character_texts
 
 
 def test_the_fallback_pages_past_rows_the_pattern_matches_but_the_term_does_not(
-    model: str,
+    model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(collection_handle, "_MILVUS_FALLBACK_PAGE", 3)
     handle = _open()
     assert isinstance(handle, MilvusCollectionHandle)
     _ingest(
