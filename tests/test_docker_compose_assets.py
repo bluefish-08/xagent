@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 import yaml
@@ -50,9 +49,11 @@ def test_milvus_addon_points_every_deployment_process_at_milvus():
         environment = _environment(services[name])
         assert environment["XAGENT_VECTOR_BACKEND"] == "milvus"
         assert environment["MILVUS_URI"] == "http://milvus:19530"
+    for name in ("backend", "worker"):
         assert services[name]["depends_on"] == {
             "milvus": {"condition": "service_healthy"}
         }
+    assert "depends_on" not in services["scheduler"]
 
 
 def test_milvus_addon_services_reach_each_other_by_service_name():
@@ -107,21 +108,3 @@ def test_the_milvus_ci_job_starts_the_addon_that_ships():
     assert ci["jobs"]["pytest-milvus"]["env"]["MILVUS_URI"] == (
         "http://localhost:19530"
     )
-
-
-def test_the_milvus_ci_job_runs_the_modules_that_opt_into_both_engines():
-    ci = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
-    steps = {step["name"]: step for step in ci["jobs"]["pytest-milvus"]["steps"]}
-    listed = set(
-        re.findall(
-            r"tests/web_integration/test_\w+\.py", steps["Run Milvus tests"]["run"]
-        )
-    )
-    opted_in = {
-        f"tests/web_integration/{path.name}"
-        for path in (REPO_ROOT / "tests" / "web_integration").glob("test_*.py")
-        if 'usefixtures("kb_engine")' in path.read_text(encoding="utf-8")
-    }
-
-    assert listed
-    assert listed == opted_in

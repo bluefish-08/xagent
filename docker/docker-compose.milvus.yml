@@ -19,9 +19,6 @@ services:
     environment:
       - XAGENT_VECTOR_BACKEND=milvus
       - MILVUS_URI=http://milvus:19530
-    depends_on:
-      milvus:
-        condition: service_healthy
 
   # Milvus metadata store
   milvus-etcd:

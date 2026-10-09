@@ -1,10 +1,12 @@
 # Milvus as the knowledge-base engine
 
-By default Xagent keeps knowledge-base chunks, vectors and search indexes in LanceDB, on the `xagent_data` volume. The `docker/docker-compose.milvus.yml` add-on starts a Milvus standalone server next to the stack and makes it the knowledge-base engine. Xagent still parses, chunks and embeds documents. Milvus stores the searchable chunk copies and vectors and runs dense, keyword (BM25) and substring search. The LanceDB directory stays as the ledger of documents, parses, ingestion status and chunks.
+By default Xagent keeps knowledge-base chunks, vectors and search indexes in LanceDB, on the `xagent_data` volume (with `docker/docker-compose.sandbox.docker.yml`, on the host directory it binds at `/root/.xagent`, see [Start](#start)). The `docker/docker-compose.milvus.yml` add-on starts a Milvus standalone server next to the stack and makes it the knowledge-base engine. Xagent still parses, chunks and embeds documents. Milvus stores the searchable chunk copies and vectors and runs dense, keyword (BM25) and substring search. The LanceDB directory stays as the ledger of documents, parses, ingestion status and chunks.
 
 Use it on a **new** deployment. A deployment that already holds LanceDB knowledge-base data is refused at startup (see [The engine lock](#the-engine-lock)), and there is no migration between engines.
 
 The images in `docker-compose.yml` must contain the Milvus engine; the `0.8.1` images do not, because that release predates it. With them the add-on starts and Milvus idles, but the first knowledge-base request fails with `Vector backend 'milvus' is not implemented yet`. Use a later release, or build `docker/Dockerfile.backend` from `main` and point `backend`, `worker` and `scheduler` at it.
+
+The release must also include #2963 (or be `main` at or after it). Without it, the Celery worker's first-start engine check opens LanceDB in the prefork parent process and the forked children crash on their first LanceDB access, so the first ingestion fails until `docker compose restart worker`.
 
 ## Start
 
@@ -27,6 +29,18 @@ docker compose \
   up -d
 ```
 
+With `docker/docker-compose.sandbox.docker.yml`, only `backend` bind-mounts `${XAGENT_HOST_STORAGE_ROOT:-/root/.xagent}` at `/root/.xagent`; `worker` and `scheduler` keep `xagent_data`. The LanceDB ledger, the collection ids and the engine record are then in two places, and the backend and the worker see different ones. Bind the same host path into `worker` and `scheduler` with one more `-f` file, which must come after `docker-compose.yml` and is listed on every command:
+
+```yaml
+services:
+  worker: &storage_root
+    volumes:
+      - type: bind
+        source: ${XAGENT_HOST_STORAGE_ROOT:-/root/.xagent}
+        target: /root/.xagent
+  scheduler: *storage_root
+```
+
 The add-on adds three services, the same three containers as the official Milvus v2.6.25 standalone Compose file:
 
 | Service | Image | Volume |
@@ -35,7 +49,7 @@ The add-on adds three services, the same three containers as the official Milvus
 | `milvus-minio` | `milvusdb/minio:RELEASE.2024-12-18T13-15-44Z` | `milvus_minio_data` |
 | `milvus` | `milvusdb/milvus:v2.6.25` | `milvus_data` |
 
-`backend`, `worker` and `scheduler` set `XAGENT_VECTOR_BACKEND=milvus` and `MILVUS_URI=http://milvus:19530`, and wait for `milvus` to be healthy. Nothing is published on the host: Milvus and MinIO (default credentials) are reachable only from the Compose network. To run a Milvus client, use the backend container, which has `pymilvus` and `MILVUS_URI`.
+`backend`, `worker` and `scheduler` set `XAGENT_VECTOR_BACKEND=milvus` and `MILVUS_URI=http://milvus:19530`. `backend` and `worker` also wait for `milvus` to be healthy; `scheduler` only dispatches tasks and never reads the engine, so a slow Milvus does not hold back scheduled triggers. Nothing is published on the host: Milvus and MinIO (default credentials) are reachable only from the Compose network. To run a Milvus client, use the backend container, which has `pymilvus` and `MILVUS_URI`.
 
 Keep the Milvus image at 2.6.13 or later, the supported floor, and below 3.0 (`pymilvus` is pinned below 3.0).
 
@@ -47,7 +61,7 @@ Milvus applies writes in steps of 200 ms. Committing a document, the last step o
 
 ## The engine lock
 
-A deployment uses one engine. The first start records it in `.kb-engine` in the LanceDB data directory (by default `/root/.xagent/data/lancedb` in the backend container, on the `xagent_data` volume; `LANCEDB_DIR` and `LANCEDB_PATH` change it). From then on, the backend, the Celery worker and the agent workers refuse to start when `XAGENT_VECTOR_BACKEND` differs from the record. The scheduler only dispatches tasks and does not check. The refusal names the recorded engine and the setting:
+A deployment uses one engine. The first start records it in `.kb-engine` in the LanceDB data directory (by default `/root/.xagent/data/lancedb` in the backend container, on the `xagent_data` volume or the host directory that the sandbox overlay binds at `/root/.xagent`; `LANCEDB_DIR` and `LANCEDB_PATH` change it). From then on, the backend, the Celery worker and the agent workers refuse to start when `XAGENT_VECTOR_BACKEND` differs from the record. The scheduler only dispatches tasks and does not check. The refusal names the recorded engine and the setting:
 
 ```text
 This deployment's KB engine is lancedb (documents hold data), recorded in /root/.xagent/data/lancedb/.kb-engine, but XAGENT_VECTOR_BACKEND is milvus. To change the engine of an empty deployment, delete the record file and restart.
@@ -79,7 +93,7 @@ Milvus stores each chunk's text in a field of at most 65,535 UTF-8 bytes. An ing
 
 ## Backup and restore
 
-The knowledge-base state is in two places that have to agree: the LanceDB ledger on `xagent_data` (documents, parses, chunks, ingestion status, and the collection ids that Milvus rows are filed under) and the three Milvus volumes (`milvus_etcd_data`, `milvus_minio_data`, `milvus_data`). Back them up together, from the same moment, along with `postgres_data` as described under [Backup](README.md#backup). The simplest consistent copy is a cold one: stop the stack, copy the volumes, start it again.
+The knowledge-base state is in two places that have to agree: the LanceDB ledger (documents, parses, chunks, ingestion status, and the collection ids that Milvus rows are filed under), on `xagent_data` or on the host directory bound at `/root/.xagent` when the sandbox overlay is used, and the three Milvus volumes (`milvus_etcd_data`, `milvus_minio_data`, `milvus_data`). Back them up together, from the same moment, along with `postgres_data` as described under [Backup](README.md#backup). The simplest consistent copy is a cold one: stop the stack, copy the volumes, start it again.
 
 Restoring them to different points in time is not detected or repaired:
 
@@ -98,5 +112,5 @@ Dense search uses the same embeddings as on LanceDB, and hybrid search fuses the
 
 ## Not supported
 
-- Multiple hosts. The LanceDB ledger and the engine record live on the local `xagent_data` volume, which `backend`, `worker` and `scheduler` share, and the add-on starts Milvus in the same Compose project.
+- Multiple hosts. The LanceDB ledger and the engine record live on the local `xagent_data` volume (or the host directory of the sandbox overlay), which `backend`, `worker` and `scheduler` share, and the add-on starts Milvus in the same Compose project.
 - Moving existing knowledge bases between engines. Re-import the documents into a new deployment instead.

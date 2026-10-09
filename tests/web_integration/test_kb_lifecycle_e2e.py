@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.web_integration.http_helpers import eventually, http_detail
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import deployment_kb_backend
 
 pytestmark = [
@@ -27,14 +26,6 @@ pytestmark = [
     pytest.mark.contract_stub,
     pytest.mark.usefixtures("kb_engine"),
 ]
-
-
-def _eventually(check: Callable[[], bool], timeout: float = 15.0) -> None:
-    """Wait out Milvus's Bounded reads, which can lag a write by up to 5 s."""
-    deadline = time.monotonic() + timeout
-    while not check():
-        assert time.monotonic() < deadline, "the search result never settled"
-        time.sleep(0.2)
 
 
 def _log(msg: str) -> None:
@@ -175,11 +166,12 @@ class TestKBLifecycleE2E:
                 },
                 headers=auth_headers,
             )
-            assert response.status_code == 200
+            assert response.status_code == 200, http_detail(response)
+            assert response.json()["status"] == "success", http_detail(response)
             return [hit["text"] for hit in response.json()["results"]]
 
-        _eventually(lambda: bool(found("important information")))
-        _eventually(lambda: bool(found("markdown document")))
+        eventually(lambda: bool(found("important information")))
+        eventually(lambda: bool(found("markdown document")))
         assert found("important information") == [
             "First document with important information about testing."
         ]
@@ -189,7 +181,7 @@ class TestKBLifecycleE2E:
             headers=auth_headers,
         )
         assert delete_response.status_code == 200
-        _eventually(lambda: not found("important information"))
+        eventually(lambda: not found("important information"))
         assert found("markdown document")
 
     @pytest.mark.e2e

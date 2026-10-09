@@ -765,7 +765,7 @@ jobs:
           printf 'services:\n  milvus:\n    ports:\n      - "19530:19530"\n' > "$RUNNER_TEMP/milvus-ports.yml"
           export COMPOSE_FILE="docker-compose.yml:docker/docker-compose.milvus.yml:$RUNNER_TEMP/milvus-ports.yml"
           echo "COMPOSE_FILE=$COMPOSE_FILE" >> "$GITHUB_ENV"
-          grep -h '^    image:' docker/docker-compose.milvus.yml | awk '{print $2}' | xargs .github/scripts/docker-pull-retry.sh
+          docker compose config --images milvus | xargs .github/scripts/docker-pull-retry.sh
           docker compose up -d --wait --wait-timeout 300 milvus
 
       - name: Ensure uv is available
@@ -799,7 +799,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          python3 -m uv run python -m pytest tests/core/tools/core/RAG_tools tests/web/api/test_kb_milvus_rollback.py tests/web_integration/test_kb_lifecycle_e2e.py tests/web_integration/test_kb_file_ingestion_e2e.py tests/web_integration/test_search_functionality_e2e.py tests/web_integration/test_kb_crud_operations_e2e.py tests/web_integration/test_kb_access_control_e2e.py -m milvus -v
+          python3 -m uv run python -m pytest tests/core/tools/core/RAG_tools tests/web/api/test_kb_milvus_rollback.py tests/web_integration -m milvus -v
 
       - name: Show Milvus logs
         if: needs.changes.outputs.code == 'true' && failure()
