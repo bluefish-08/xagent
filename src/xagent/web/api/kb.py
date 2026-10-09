@@ -53,6 +53,7 @@ from ...config import (
 )
 from ...core.file_storage.keys import build_upload_storage_key
 from ...core.tools.core.RAG_tools.core.config import DEFAULT_VECTOR_STORE_SCAN_LIMIT
+from ...core.tools.core.RAG_tools.core.exceptions import DatabaseOperationError
 from ...core.tools.core.RAG_tools.core.parser_registry import (
     get_supported_parsers,
     validate_parser_compatibility,
@@ -1834,12 +1835,18 @@ def _restore_rag_document_snapshot(
     """Restore RAG document rows after a failed refresh of an existing web file."""
     coordinator = get_kb_coordinator()
     for collection_snapshot in snapshot.collections:
-        snapshot.incomplete.extend(
-            (collection_snapshot.collection, doc_id)
-            for doc_id in coordinator.restore_document_rows_sync(
+        marked: list[str] = []
+        try:
+            marked = coordinator.restore_document_rows_sync(
                 collection_snapshot, user_id=user_id, is_admin=is_admin
             )
-        )
+        except DatabaseOperationError as error:
+            marked = error.details.get("marked", [])
+            raise
+        finally:
+            snapshot.incomplete.extend(
+                (collection_snapshot.collection, doc_id) for doc_id in marked
+            )
 
 
 def _list_document_refs_for_uploaded_file(file_id: str) -> List[tuple[str, str]]:

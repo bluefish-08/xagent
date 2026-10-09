@@ -204,6 +204,24 @@ def test_delete_on_a_deployment_without_the_table_deletes_nothing(conn: Any) -> 
     assert delete_kb_ids(conn, "kb", user_id=1, is_admin=False) == 0
 
 
+def test_a_caller_without_a_user_changes_no_row_but_an_admin_reaches_ownerless_rows(
+    conn: Any,
+) -> None:
+    ownerless = get_or_create_kb_id(conn, "kb", None)
+    get_or_create_kb_id(conn, "new", None)
+    mine = get_or_create_kb_id(conn, "kb", 1)
+
+    assert delete_kb_ids(conn, "kb", user_id=None, is_admin=False) == 0
+    assert rename_kb_ids(conn, "kb", "new", user_id=None, is_admin=False) == []
+    assert _owners(conn, "kb") == {None: ownerless, 1: mine}
+
+    renamed = rename_kb_ids(conn, "kb", "new", user_id=None, is_admin=True)
+
+    assert sorted(renamed) == sorted([ownerless, mine])
+    assert _owners(conn, "new") == {None: ownerless, 1: mine}
+    assert conn.open_table(KB_IDS_TABLE).count_rows() == 2
+
+
 def test_a_tenant_rename_moves_only_the_callers_row_and_keeps_its_kb_id(
     conn: Any,
 ) -> None:

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import lancedb
 import pytest
 
 from xagent.core.tools.core.RAG_tools import kb
@@ -49,6 +50,7 @@ from xagent.core.tools.core.RAG_tools.kb.models import (
     KBBackendCapabilities,
     KBCollectionContext,
     KBContextRequest,
+    KBDocumentRowsSnapshot,
     KBStorageBackend,
     KBUserScope,
 )
@@ -56,7 +58,10 @@ from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
     embeddings_table_name,
     to_model_tag,
 )
-from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import KB_IDS_TABLE
+from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
+    KB_IDS_TABLE,
+    ensure_documents_table,
+)
 from xagent.core.tools.core.RAG_tools.management import (
     collection_manager,
     collections,
@@ -315,29 +320,127 @@ def test_an_admin_rename_moves_every_owners_kb_id_and_keeps_the_values() -> None
     assert sorted(_kb_names(None, True)["new"]) == sorted(ids.values())
 
 
+def _write_documents(*owners: int, collection: str = "kb", conn: Any = None) -> None:
+    """Add one document per owner through ``conn`` (the store's by default)."""
+    store_conn = get_vector_index_store().get_raw_connection()
+    ensure_documents_table(store_conn)
+    rows = [
+        {
+            "collection": collection,
+            "doc_id": f"doc-{owner}",
+            "file_id": None,
+            "source_path": f"/uploads/{owner}.txt",
+            "file_type": "txt",
+            "content_hash": "a" * 64,
+            "uploaded_at": datetime.now(timezone.utc),
+            "title": None,
+            "language": None,
+            "user_id": owner,
+        }
+        for owner in owners
+    ]
+    (conn if conn is not None else store_conn).open_table("documents").add(rows)
+
+
+class _FailingCount:
+    def __init__(self, table: Any) -> None:
+        self._table = table
+
+    def count_rows(self, *_: Any) -> int:
+        raise OSError("table is busy")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._table, name)
+
+
+def _fail_the_document_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = get_vector_index_store().get_raw_connection()
+    open_table = conn.open_table
+    monkeypatch.setattr(
+        conn,
+        "open_table",
+        lambda name: (
+            _FailingCount(open_table(name)) if name == "documents" else open_table(name)
+        ),
+    )
+
+
 def test_the_config_rows_and_the_kb_ids_are_deleted_together() -> None:
     handle, ledger, _ = _handle()
     ids = _owners_of_kb(1, 2)
     ledger.delete_collection_config = AsyncMock(return_value=3)
-    ledger.count_documents.return_value = 0
 
     assert asyncio.run(handle.delete_collection_config(tenant_only=True)) == 3
     assert _kb_names(None, True) == {"kb": [ids[2]]}
     ledger.delete_collection_config.assert_awaited_once_with(tenant_only=True)
-    ledger.count_documents.assert_called_once_with(1, False)
 
     assert asyncio.run(handle.delete_collection_config()) == 3
     assert _kb_names(None, True) == {}
-    ledger.count_documents.assert_called_once_with(1, False)
+    ledger.count_documents.assert_not_called()
+
+
+def test_deleting_every_owners_kb_ids_does_not_wait_for_documents() -> None:
+    handle, ledger, _ = _handle()
+    _owners_of_kb(1, 2)
+    ledger.delete_collection_config = AsyncMock(return_value=1)
+    _write_documents(1, 2)
+
+    asyncio.run(handle.delete_collection_config())
+
+    assert _kb_names(None, True) == {}
 
 
 def test_a_caller_whose_documents_remain_keeps_the_kb_id() -> None:
     handle, ledger, _ = _handle()
-    _owners_of_kb(1, 2)
+    ids = _owners_of_kb(1, 2)
     ledger.delete_collection_config = AsyncMock(return_value=1)
-    ledger.count_documents.return_value = 2
+    _write_documents(1, 2)
 
     assert asyncio.run(handle.delete_collection_config(tenant_only=True)) == 1
+
+    assert sorted(_kb_names(None, True)["kb"]) == sorted(ids.values())
+
+
+def test_other_owners_and_other_collections_documents_do_not_keep_the_kb_id() -> None:
+    handle, ledger, _ = _handle()
+    ids = _owners_of_kb(1, 2)
+    ledger.delete_collection_config = AsyncMock(return_value=1)
+    _write_documents(2)
+    _write_documents(1, collection="other")
+
+    asyncio.run(handle.delete_collection_config(tenant_only=True))
+
+    assert _kb_names(None, True) == {"kb": [ids[2]]}
+
+
+def test_a_document_another_connection_wrote_keeps_the_kb_id() -> None:
+    handle, ledger, _ = _handle()
+    ids = _owners_of_kb(1)
+    ledger.delete_collection_config = AsyncMock(return_value=1)
+    _write_documents(2)
+    store = get_vector_index_store()
+    assert store.count_rows("documents", {"collection": "kb"}, 1, False) == 0
+    other = lancedb.connect(store.get_raw_connection().uri)
+
+    _write_documents(1, conn=other)
+    asyncio.run(handle.delete_collection_config(tenant_only=True))
+
+    assert _kb_names(None, True) == {"kb": [ids[1]]}
+
+
+def test_a_failed_document_count_keeps_the_kb_id_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle, ledger, _ = _handle()
+    _owners_of_kb(1, 2)
+    ledger.delete_collection_config = AsyncMock(return_value=1)
+    _write_documents(2)
+    _fail_the_document_count(monkeypatch)
+
+    with pytest.raises(
+        DatabaseOperationError, match="Cannot count the documents of kb.*table is busy"
+    ):
+        asyncio.run(handle.delete_collection_config(tenant_only=True))
 
     assert len(_kb_names(None, True)["kb"]) == 2
 
@@ -350,12 +453,11 @@ def test_an_admin_scope_deletes_only_its_own_kb_id_and_leaves_other_owners() -> 
     )
     ids = _owners_of_kb(1, 2, 7)
     ledger.delete_collection_config = AsyncMock(return_value=0)
-    ledger.count_documents.return_value = 0
+    _write_documents(1, 2)
 
     asyncio.run(handle.delete_collection_config(tenant_only=True))
 
     assert sorted(_kb_names(None, True)["kb"]) == sorted([ids[1], ids[2]])
-    ledger.count_documents.assert_called_once_with(7, False)
 
 
 def test_the_discard_reads_the_kb_id_and_creates_none() -> None:
@@ -409,6 +511,152 @@ def test_two_kb_ids_for_one_owner_fail_a_delete_before_any_store_is_touched() ->
 
     ledger.delete_documents_data.assert_not_called()
     connections.get_shared_client_from_env.assert_not_called()
+
+
+def _restore_snapshot(statuses: dict[str, str]) -> KBDocumentRowsSnapshot:
+    """A snapshot whose documents have the given statuses and one chunk each."""
+    return KBDocumentRowsSnapshot(
+        collection="kb",
+        doc_ids=tuple(statuses),
+        rows_by_table={
+            "ingestion_runs": [
+                {
+                    "collection": "kb",
+                    "doc_id": doc_id,
+                    "status": status,
+                    "message": f"{doc_id} message",
+                    "parse_hash": "p1",
+                    "user_id": 1,
+                }
+                for doc_id, status in statuses.items()
+            ],
+            "chunks": [
+                {
+                    "collection": "kb",
+                    "doc_id": doc_id,
+                    "parse_hash": "p1",
+                    "chunk_id": f"{doc_id}-c",
+                }
+                for doc_id in statuses
+            ],
+        },
+    )
+
+
+def _marked(ledger: MagicMock) -> list[str]:
+    return [call.args[0] for call in ledger.write_ingestion_status.call_args_list]
+
+
+def test_a_restore_marks_only_a_success_or_partially_embedded_status() -> None:
+    handle, ledger, connections = _handle()
+    connections.get_shared_client_from_env.return_value.list_collections.return_value = []
+    snapshot = _restore_snapshot(
+        {
+            "ok": "success",
+            "part": "partially_embedded",
+            "failed": "failed",
+            "chunked": "chunked",
+            "cancelled": "cancelled",
+        }
+    )
+
+    restored = handle.restore_document_rows(snapshot, user_id=1, is_admin=False)
+
+    assert restored == ["ok", "part"] and _marked(ledger) == ["ok", "part"]
+    message = ledger.write_ingestion_status.call_args.kwargs["message"]
+    assert "re-ingest" in message
+
+
+def _failing_client(connections: MagicMock, *, fails_on: str) -> MagicMock:
+    client = connections.get_shared_client_from_env.return_value
+    client.list_collections.return_value = ["xagent_kb_m"]
+    client.has_collection.return_value = True
+
+    def query(name: str, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs["filter_params"]["doc_id"] == fails_on:
+            raise RuntimeError("transient")
+        return []
+
+    client.query.side_effect = query
+    return client
+
+
+def test_a_failed_alignment_marks_the_documents_not_aligned_yet_and_reports_them() -> (
+    None
+):
+    handle, ledger, connections = _handle()
+    _owners_of_kb(1)
+    _failing_client(connections, fails_on="d2")
+    snapshot = _restore_snapshot(
+        {"d1": "success", "d2": "success", "d3": "failed", "d4": "partially_embedded"}
+    )
+
+    with pytest.raises(
+        DatabaseOperationError,
+        match="^Could not align Milvus with the restored chunks: transient",
+    ) as raised:
+        handle.restore_document_rows(snapshot, user_id=1, is_admin=False)
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert raised.value.details == {"marked": ["d1", "d2", "d4"]}
+    assert _marked(ledger) == ["d1", "d2", "d4"]
+
+
+def test_a_failed_mark_is_logged_and_the_others_are_still_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    handle, ledger, connections = _handle()
+    _owners_of_kb(1)
+    _failing_client(connections, fails_on="d2")
+    ledger.write_ingestion_status.side_effect = [None, OSError("disk full"), None]
+    snapshot = _restore_snapshot({"d1": "success", "d2": "success", "d3": "success"})
+
+    with pytest.raises(DatabaseOperationError, match="transient") as raised:
+        handle.restore_document_rows(snapshot, user_id=1, is_admin=False)
+
+    assert raised.value.details == {"marked": ["d1", "d3"]}
+    assert "Could not mark d2 partially embedded: disk full" in caplog.text
+
+
+def test_a_failed_mark_is_reported_as_a_mark_and_the_rest_are_still_marked() -> None:
+    handle, ledger, connections = _handle()
+    _owners_of_kb(1)
+    _failing_client(connections, fails_on="none")
+    ledger.write_ingestion_status.side_effect = [OSError("disk full"), None, None]
+    snapshot = _restore_snapshot({"d1": "success", "d2": "success"})
+
+    with pytest.raises(
+        DatabaseOperationError,
+        match="^Could not mark d1 partially embedded: disk full",
+    ) as raised:
+        handle.restore_document_rows(snapshot, user_id=1, is_admin=False)
+
+    assert raised.value.details == {"marked": ["d1", "d2"]}
+
+
+@pytest.mark.parametrize("method", ["documents", "collection"])
+@pytest.mark.parametrize("failure", ["no model", "describe fails"])
+def test_a_delete_resolves_the_count_keys_before_it_deletes(
+    method: str, failure: str
+) -> None:
+    handle, ledger, connections = _handle()
+    _owners_of_kb(1)
+    client = connections.get_shared_client_from_env.return_value
+    client.list_collections.return_value = ["xagent_kb_m"]
+    if failure == "no model":
+        client.describe_collection.return_value = {"properties": {}}
+    else:
+        client.describe_collection.side_effect = RuntimeError("describe failed")
+
+    with pytest.raises(DatabaseOperationError, match="Cannot resolve the models"):
+        if method == "documents":
+            handle.delete_documents_data(["d"], user_id=1, is_admin=False)
+        else:
+            handle.delete_collection_data(user_id=1, is_admin=False)
+
+    client.delete.assert_not_called()
+    ledger.delete_documents_data.assert_not_called()
+    ledger.delete_collection_data.assert_not_called()
 
 
 def test_the_client_comes_from_the_connection_manager_on_first_use() -> None:
@@ -1048,6 +1296,26 @@ def test_other_errors_and_a_second_unloaded_failure_are_not_retried_blindly(
     with pytest.raises(_Unloaded):
         collection_handle._with_loaded("n", client, _attempts(_Unloaded(), _Unloaded()))
     assert len(ensured) == 1
+
+
+@pytest.mark.parametrize("invisible_only", [False, True])
+def test_a_delete_skips_an_unloaded_collection_only_for_invisible_rows(
+    invisible_only: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(collection_handle, "ensure_milvus_collection", lambda *_: None)
+    client = _described_client({PROPERTY: MODEL})
+    client.delete.side_effect = _Unloaded("not loaded")
+
+    if invisible_only:
+        counts = collection_handle._delete_milvus_rows(
+            client, ["xagent_kb_x"], ["kb"], invisible_only=True
+        )
+        assert counts == {} and "xagent_kb_x is not loaded; skipped" in caplog.text
+    else:
+        with pytest.raises(DatabaseOperationError, match="Cannot delete from Milvus"):
+            collection_handle._delete_milvus_rows(client, ["xagent_kb_x"], ["kb"])
 
 
 def test_a_collection_without_a_recorded_model_is_refused(

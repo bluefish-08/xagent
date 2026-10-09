@@ -440,7 +440,9 @@ def test_a_delete_in_batches_looks_up_the_collections_and_models_once(
     assert faulty.count("delete") == 3 * len(
         collection_handle._milvus_collections(client)
     )
-    assert faulty.count("list_collections") == faulty.count("describe_collection") == 1
+    collections = len(collection_handle._milvus_collections(client))
+    assert faulty.count("list_collections") == 1
+    assert faulty.count("describe_collection") == collections
     assert _visible(client, model) == set()
 
 
@@ -1026,7 +1028,7 @@ def test_a_restore_keeps_vectors_of_older_parse_chunks_the_ledger_still_holds(
     _ingest(handle, model, "doc", ["a", "b"], tmp_path)
     _chunks(handle, "doc", ["c"], parse_hash=NEXT_PARSE)
     handle.write_ingestion_status(
-        "doc", status="failed", parse_hash=NEXT_PARSE, user_id=1
+        "doc", status="success", parse_hash=NEXT_PARSE, user_id=1
     )
     snapshot = _snapshot(handle, ["doc"])
     _chunks(handle, "doc", ["x"], parse_hash="ph-3")

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from xagent.core.tools.core.RAG_tools.core.exceptions import DatabaseOperationError
 from xagent.core.tools.core.RAG_tools.core.schemas import (
     DocumentProcessingStatus,
     IngestionResult,
@@ -44,6 +45,7 @@ from xagent.core.tools.core.RAG_tools.storage.factory import (
     get_metadata_store,
     get_vector_index_store,
 )
+from xagent.providers.vector_store.milvus import MilvusConnectionManager
 from xagent.web.api import kb as kb_module
 from xagent.web.api.kb import (
     _create_document_compensation,
@@ -137,6 +139,39 @@ def test_the_restore_collects_the_documents_the_engine_marked() -> None:
         _restore_rag_document_snapshot(snapshot, user_id=1, is_admin=False)
 
     assert snapshot.incomplete == [("c1", "d1"), ("c3", "d3"), ("c3", "d4")]
+
+
+@pytest.mark.parametrize(
+    ("error", "reported"),
+    [
+        (DatabaseOperationError("boom", details={"marked": ["d2", "d3"]}), True),
+        (RuntimeError("boom"), False),
+    ],
+)
+def test_a_failed_restore_still_reports_the_documents_the_engine_marked(
+    error: Exception, reported: bool
+) -> None:
+    coordinator = MagicMock()
+    coordinator.restore_document_rows_sync.side_effect = [["d1"], error]
+    snapshot = _RagDocumentSnapshot(
+        doc_refs=[],
+        collections=[
+            MagicMock(collection="c1"),
+            MagicMock(collection="c2"),
+            MagicMock(collection="c3"),
+        ],
+    )
+
+    with (
+        patch.object(kb_module, "get_kb_coordinator", return_value=coordinator),
+        pytest.raises(type(error), match="boom"),
+    ):
+        _restore_rag_document_snapshot(snapshot, user_id=1, is_admin=False)
+
+    assert coordinator.restore_document_rows_sync.call_count == 2
+    assert snapshot.incomplete == [("c1", "d1")] + (
+        [("c2", "d2"), ("c2", "d3")] if reported else []
+    )
 
 
 def test_the_status_restore_skips_the_documents_in_keep() -> None:
@@ -387,3 +422,37 @@ def test_a_refresh_that_committed_leaves_the_document_marked_for_reingest(
     status = _status(handle)
     assert status["status"] == DocumentProcessingStatus.PARTIALLY_EMBEDDED.value
     assert status["parse_hash"] == PARSE and "re-ingest" in status["message"]
+
+
+class _FailingQuery:
+    """Forwards every call to a Milvus client except ``query``, which raises."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    def query(self, *_: Any, **__: Any) -> Any:
+        raise RuntimeError("transient")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.client, name)
+
+
+@pytest.mark.milvus
+def test_a_restore_that_fails_while_aligning_milvus_still_leaves_the_document_marked(
+    milvus: Any, model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle = _handle()
+    rollback = _refresh_fixture(handle, model, tmp_path, commit=True)
+    monkeypatch.setattr(
+        MilvusConnectionManager,
+        "get_shared_client_from_env",
+        lambda _self: _FailingQuery(milvus),
+    )
+
+    result = rollback()
+
+    assert not result.rollback_complete and "transient" in str(result.first_error)
+    status = _status(handle)
+    assert status["status"] == DocumentProcessingStatus.PARTIALLY_EMBEDDED.value
+    assert status["parse_hash"] == PARSE and "re-ingest" in status["message"]
+    assert _rows(milvus, model) == {"x": True, "y": True}

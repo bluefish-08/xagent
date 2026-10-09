@@ -101,13 +101,16 @@ def get_or_create_kb_id(conn: Any, collection: str, user_id: int | None) -> str:
         return kb_id
 
 
+def _owner(user_id: int | None) -> str:
+    return "user_id IS NULL" if user_id is None else f"user_id = {int(user_id)}"
+
+
 def _scoped(collection: str, user_id: int | None, is_admin: bool) -> str:
+    """Rows of ``collection`` the caller may change: a caller without a user gets none."""
     where = _collection_filter(collection)
     if is_admin:
         return where
-    return f"{where} AND " + (
-        "user_id IS NULL" if user_id is None else f"user_id = {int(user_id)}"
-    )
+    return f"{where} AND " + ("false" if user_id is None else _owner(user_id))
 
 
 def delete_kb_ids(
@@ -150,7 +153,9 @@ def rename_kb_ids(
             table = conn.open_table(KB_IDS_TABLE)
             try:
                 for row in rows:
-                    table.delete(_scoped(new, row["user_id"], False))
+                    table.delete(
+                        f"{_collection_filter(new)} AND {_owner(row['user_id'])}"
+                    )
             finally:
                 _safe_close_table(table)
             _set_collection(conn, [row["kb_id"] for row in rows], new)

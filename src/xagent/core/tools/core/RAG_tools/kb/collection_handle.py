@@ -5413,6 +5413,10 @@ _CASCADE = "cascade cleanup"
 _VERSIONS = "version candidates and promotion"
 
 MILVUS_COLLECTION_PREFIX = "xagent_kb_"
+_MARKABLE = {
+    DocumentProcessingStatus.SUCCESS.value,
+    DocumentProcessingStatus.PARTIALLY_EMBEDDED.value,
+}
 _MILVUS_MODEL_PROPERTY = "xagent.model_id"
 _MILVUS_TAG_LENGTH = 64
 _MILVUS_ID_LENGTH = 512
@@ -5684,9 +5688,18 @@ def _delete_milvus_rows(
     return counts
 
 
-def _per_model(client: Any, deleted: Counter[str]) -> Counter[str]:
-    keys = {name: _embeddings_key(client, name) for name in deleted if deleted[name]}
-    return Counter({key: deleted[name] for name, key in keys.items()})
+def _model_keys(client: Any, names: list[str]) -> dict[str, str]:
+    """Resolve each collection's count key before anything is deleted."""
+    try:
+        return {name: _embeddings_key(client, name) for name in names}
+    except Exception as error:
+        raise DatabaseOperationError(
+            f"Cannot resolve the models of the Milvus collections: {error}"
+        ) from None
+
+
+def _per_model(keys: dict[str, str], deleted: Counter[str]) -> Counter[str]:
+    return Counter({keys[name]: count for name, count in deleted.items() if count})
 
 
 _INGEST_MEMO: ContextVar[dict[tuple[Any, ...], Any] | None] = ContextVar(
@@ -6393,6 +6406,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
         size = DEFAULT_VECTOR_STORE_DELETE_BATCH_SIZE
         batches = [ids[i : i + size] for i in range(0, len(ids), size)]
         names = _milvus_collections(self.client) if kb_ids else []
+        keys = _model_keys(self.client, names)
         deleted: Counter[str] = Counter()
         for index, batch in enumerate(batches if kb_ids else [], start=1):
             try:
@@ -6410,7 +6424,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
                         "failed_batch_index": index,
                     },
                 ) from None
-        counts = _per_model(self.client, deleted)
+        counts = _per_model(keys, deleted)
         counts.update(
             self.ledger.delete_documents_data(
                 ids, user_id=user_id, is_admin=is_admin, warnings_out=warnings_out
@@ -6431,12 +6445,12 @@ class MilvusCollectionHandle(KBCollectionHandle):
         Milvus delete raises before the ledger and ``kb_ids`` are touched.
         """
         kb_ids = self._kb_ids(user_id, is_admin)
+        names = _milvus_collections(self.client) if kb_ids else []
+        keys = _model_keys(self.client, names)
         deleted = (
-            _delete_milvus_rows(self.client, _milvus_collections(self.client), kb_ids)
-            if kb_ids
-            else Counter()
+            _delete_milvus_rows(self.client, names, kb_ids) if kb_ids else Counter()
         )
-        counts = _per_model(self.client, deleted)
+        counts = _per_model(keys, deleted)
         counts.update(
             self.ledger.delete_collection_data(
                 user_id=user_id, is_admin=is_admin, warnings_out=warnings_out
@@ -6450,15 +6464,34 @@ class MilvusCollectionHandle(KBCollectionHandle):
         """Delete the collection's rows, as :meth:`delete_collection_data`."""
         return self.delete_collection_data(user_id=user_id, is_admin=is_admin)
 
+    def _documents_of(self, user_id: int | None) -> int:
+        """Count the caller's documents on a fresh table; raises when it cannot."""
+        store = self.context.vector_index_store
+        table = None
+        try:
+            conn = store.get_raw_connection()
+            if "documents" not in list_table_names(conn):
+                return 0
+            table = conn.open_table("documents")
+            where = store.build_filter_expression(
+                build_filter_from_dict({"collection": self.context.collection}),
+                user_id=user_id,
+                is_admin=False,
+            )
+            return _safe_count_rows(table, where, on_error="raise")
+        except Exception as error:
+            raise DatabaseOperationError(
+                f"Cannot count the documents of {self.context.collection}: {error}"
+            ) from error
+        finally:
+            _safe_close_table(table)
+
     async def delete_collection_config(self, *, tenant_only: bool = False) -> int:
-        """Delete the config rows, then kb_id rows: ``tenant_only`` only the caller's own, and only once it has no documents left in the ledger."""
+        """Delete the config rows, then kb_id rows: ``tenant_only`` only the caller's own, once a count shows it has no documents left."""
         deleted = await self.ledger.delete_collection_config(tenant_only=tenant_only)
         scope = self.context.user_scope
         if tenant_only:
-            documents = await asyncio.to_thread(
-                self.ledger.count_documents, scope.user_id, False
-            )
-            if documents:
+            if await asyncio.to_thread(self._documents_of, scope.user_id):
                 return deleted
         user_id, is_admin = (scope.user_id, False) if tenant_only else (None, True)
         await asyncio.to_thread(
@@ -6477,7 +6510,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
         is_admin: bool,
         warnings_out: list[str] | None = None,
     ) -> list[str]:
-        """Rename the kb_ids first, then the ledger data; an error or warning undoes them.
+        """Rename the kb_ids first, then the ledger data; an error or warning moves them back.
 
         The kb_id keeps its value, so Milvus rows follow the name without a write.
         """
@@ -6510,7 +6543,10 @@ class MilvusCollectionHandle(KBCollectionHandle):
         Rows whose chunk the restored ledger does not hold are deleted, whether the
         failed run stopped before its commit or after it. A document whose latest
         chunk set (the parse its restored ingestion status records) is then not fully
-        visible is marked partially embedded and returned.
+        visible is marked partially embedded and returned, if its restored status is
+        success or partially embedded. When the alignment or a mark fails, the documents
+        not aligned yet are marked the same way and the error carries every marked
+        document as ``details["marked"]``.
         """
         self.ledger.restore_document_rows(snapshot, user_id=user_id, is_admin=is_admin)
         chunks: dict[tuple[str, str], set[str]] = {}
@@ -6522,38 +6558,11 @@ class MilvusCollectionHandle(KBCollectionHandle):
             row["doc_id"]: row
             for row in snapshot.rows_by_table.get("ingestion_runs", [])
         }
-        kb_ids = self._kb_ids(user_id, is_admin)
-        names = _milvus_collections(self.client)
         marked: list[str] = []
-        for doc_id in snapshot.doc_ids:
-            keep = set().union(
-                *(ids for (doc, _), ids in chunks.items() if doc == doc_id)
-            )
-            visible: set[str] = set()
-            for name in names:
-                for kb_id in kb_ids:
-                    held = _with_loaded(
-                        name,
-                        self.client,
-                        partial(_document_rows, self.client, name, kb_id, doc_id),
-                    )
-                    if stale := sorted(set(held) - keep):
-                        self.client.delete(
-                            name,
-                            filter="kb_id == {kb_id} and doc_id == {doc_id} "
-                            "and chunk_id in {stale}",
-                            filter_params={
-                                "kb_id": kb_id,
-                                "doc_id": doc_id,
-                                "stale": stale,
-                            },
-                        )
-                    visible.update(
-                        c for c, shown in held.items() if shown and c in keep
-                    )
+
+        def mark(doc_id: str) -> None:
             status = statuses.get(doc_id)
-            latest = chunks.get((doc_id, status["parse_hash"])) if status else None
-            if status and latest and not latest <= visible:
+            if status and status["status"] in _MARKABLE:
                 self.ledger.write_ingestion_status(
                     doc_id,
                     status=DocumentProcessingStatus.PARTIALLY_EMBEDDED.value,
@@ -6563,6 +6572,62 @@ class MilvusCollectionHandle(KBCollectionHandle):
                     user_id=status.get("user_id"),
                 )
                 marked.append(doc_id)
+
+        todo = list(snapshot.doc_ids)
+        marking = None
+        try:
+            kb_ids = self._kb_ids(user_id, is_admin)
+            names = _milvus_collections(self.client)
+            while todo:
+                doc_id = todo[0]
+                keep = set().union(
+                    *(ids for (doc, _), ids in chunks.items() if doc == doc_id)
+                )
+                visible: set[str] = set()
+                for name in names:
+                    for kb_id in kb_ids:
+                        held = _with_loaded(
+                            name,
+                            self.client,
+                            partial(_document_rows, self.client, name, kb_id, doc_id),
+                        )
+                        if stale := sorted(set(held) - keep):
+                            self.client.delete(
+                                name,
+                                filter="kb_id == {kb_id} and doc_id == {doc_id} "
+                                "and chunk_id in {stale}",
+                                filter_params={
+                                    "kb_id": kb_id,
+                                    "doc_id": doc_id,
+                                    "stale": stale,
+                                },
+                            )
+                        visible.update(
+                            c for c, shown in held.items() if shown and c in keep
+                        )
+                status = statuses.get(doc_id)
+                latest = chunks.get((doc_id, status["parse_hash"])) if status else None
+                if latest and not latest <= visible:
+                    marking = doc_id
+                    mark(doc_id)
+                    marking = None
+                todo.pop(0)
+        except Exception as error:
+            for doc_id in todo:
+                try:
+                    mark(doc_id)
+                except Exception as mark_error:  # noqa: BLE001 - the alignment error is reported
+                    logger.error(
+                        "Could not mark %s partially embedded: %s", doc_id, mark_error
+                    )
+            step = (
+                f"mark {marking} partially embedded"
+                if marking
+                else "align Milvus with the restored chunks"
+            )
+            raise DatabaseOperationError(
+                f"Could not {step}: {error}", details={"marked": marked}
+            ) from error
         return marked
 
     register_document = _ledger(KBCollectionHandle.register_document)
