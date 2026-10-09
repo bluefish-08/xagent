@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -28,3 +29,99 @@ def test_overlay_requires_a_resolved_compose_project_name():
 
     for service in ("backend", "worker", "scheduler"):
         assert _service_environment(service)["XAGENT_SANDBOX_NAMESPACE"] == expected
+
+
+MILVUS_ADDON = REPO_ROOT / "docker" / "docker-compose.milvus.yml"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def _milvus_services() -> dict[str, dict]:
+    return yaml.safe_load(MILVUS_ADDON.read_text(encoding="utf-8"))["services"]
+
+
+def _environment(service: dict) -> dict[str, str]:
+    return dict(entry.split("=", 1) for entry in service["environment"])
+
+
+def test_milvus_addon_points_every_deployment_process_at_milvus():
+    services = _milvus_services()
+
+    for name in ("backend", "worker", "scheduler"):
+        environment = _environment(services[name])
+        assert environment["XAGENT_VECTOR_BACKEND"] == "milvus"
+        assert environment["MILVUS_URI"] == "http://milvus:19530"
+        assert services[name]["depends_on"] == {
+            "milvus": {"condition": "service_healthy"}
+        }
+
+
+def test_milvus_addon_services_reach_each_other_by_service_name():
+    services = _milvus_services()
+    milvus = services["milvus"]
+    environment = _environment(milvus)
+
+    assert environment["ETCD_ENDPOINTS"] == "milvus-etcd:2379"
+    assert environment["MINIO_ADDRESS"] == "milvus-minio:9000"
+    assert (
+        "-advertise-client-urls=http://milvus-etcd:2379"
+        in (services["milvus-etcd"]["command"])
+    )
+    assert set(milvus["depends_on"]) == {"milvus-etcd", "milvus-minio"}
+    assert all(
+        dependency == {"condition": "service_healthy"}
+        for dependency in milvus["depends_on"].values()
+    )
+
+
+def test_milvus_addon_pins_images_and_publishes_nothing():
+    services = _milvus_services()
+    engine = ("milvus-etcd", "milvus-minio", "milvus")
+
+    assert services["milvus"]["image"] == "milvusdb/milvus:v2.6.25"
+    for name in engine:
+        assert not services[name]["image"].endswith((":latest", ":stable"))
+        assert ":" in services[name]["image"]
+        assert "ports" not in services[name]
+        assert services[name]["networks"] == ["xagent_network"]
+        assert services[name]["healthcheck"]["test"]
+
+
+def test_milvus_addon_keeps_its_data_on_named_volumes():
+    compose = yaml.safe_load(MILVUS_ADDON.read_text(encoding="utf-8"))
+    mounted = {
+        volume.split(":")[0]
+        for name in ("milvus-etcd", "milvus-minio", "milvus")
+        for volume in compose["services"][name]["volumes"]
+    }
+
+    assert mounted == set(compose["volumes"])
+
+
+def test_the_milvus_ci_job_starts_the_addon_that_ships():
+    ci = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    steps = {step["name"]: step for step in ci["jobs"]["pytest-milvus"]["steps"]}
+    start = steps["Start Milvus standalone"]["run"]
+
+    assert 'COMPOSE_FILE="docker-compose.yml:docker/docker-compose.milvus.yml:' in start
+    assert '"19530:19530"' in start
+    assert ci["jobs"]["pytest-milvus"]["env"]["MILVUS_URI"] == (
+        "http://localhost:19530"
+    )
+
+
+def test_the_milvus_ci_job_runs_the_modules_that_opt_into_both_engines():
+    ci = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    steps = {step["name"]: step for step in ci["jobs"]["pytest-milvus"]["steps"]}
+    listed = set(
+        re.findall(
+            r"tests/web_integration/test_\w+\.py", steps["Run Milvus tests"]["run"]
+        )
+    )
+    opted_in = {
+        f"tests/web_integration/{path.name}"
+        for path in (REPO_ROOT / "tests" / "web_integration").glob("test_*.py")
+        if 'usefixtures("kb_engine")' in path.read_text(encoding="utf-8")
+    }
+
+    assert listed
+    assert listed == opted_in

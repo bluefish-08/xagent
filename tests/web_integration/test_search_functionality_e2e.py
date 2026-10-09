@@ -17,7 +17,11 @@ from typing import Generator
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = [pytest.mark.e2e, pytest.mark.contract_stub]
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.contract_stub,
+    pytest.mark.usefixtures("kb_engine"),
+]
 
 
 @pytest.fixture
