@@ -5,6 +5,12 @@ const en = {
     blocked: "Blocked — see the answer for what is needed to continue.",
   },
   sharedStream: { interrupted: "Live updates were interrupted. The displayed answer may be incomplete; saved results will appear when available." },
+  taskInterruption: {
+    paused: "This task was paused by a system interruption. Click resume to continue.",
+    leaseExpired: "This task was paused because the server running it stopped. Click resume to continue.",
+    persistenceFailure: "This task was paused because the database was unavailable. Click resume to continue.",
+    llmUnavailable: "This task was paused because the model provider was unavailable. Click resume to continue.",
+  },
   clientErrors: {
     executionQueueFull: "The team execution queue is full. Please retry shortly.",
     messageProcessingFailed: "The message could not be processed. Please try again.",
@@ -27,6 +33,7 @@ const en = {
     taskAccessDenied: "You do not have access to this task.",
     invalidMessage: "The message format is invalid.",
     messageOutcomeUnknown: "The message may or may not have been applied. Check the conversation before sending it again.",
+    externalTurnInterrupted: "This response was interrupted.",
     uploadTooLarge: "File is too large. Please reduce the upload size and try again.",
     uploadProxyError: "Upload failed before reaching the application. Please check the server upload limit.",
     uploadFailed: "Upload failed. Please try again.",

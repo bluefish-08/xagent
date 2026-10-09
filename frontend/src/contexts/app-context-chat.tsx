@@ -689,6 +689,25 @@ const normalizeTaskRuntimeExtensions = (value: unknown): TaskRuntimeExtensions =
   )
 }
 
+// Why a PAUSED task's run stopped: the server's ``auto_recovery`` view
+// (history task_info) or a ``task_paused`` event's ``interruption_reason``.
+// ``reason`` is an InterruptionReason value (``user_pause`` when the user
+// paused it). Kept only while the task is paused.
+export interface TaskAutoRecovery {
+  reason: string
+}
+
+const normalizeAutoRecovery = (value: unknown): TaskAutoRecovery | undefined =>
+  isJsonRecord(value) && typeof value.reason === "string" && value.reason
+    ? { reason: value.reason }
+    : undefined
+
+// A task's interruption only describes it while it rests paused.
+const clearStaleAutoRecovery = (task: Task | null): Task | null =>
+  task && task.status !== "paused" && task.autoRecovery !== undefined
+    ? { ...task, autoRecovery: undefined }
+    : task
+
 export interface Task {
   id: string
   title: string
@@ -719,6 +738,7 @@ export interface Task {
   runId?: string | null
   stateVersion?: number
   controlState?: TaskControlState
+  autoRecovery?: TaskAutoRecovery
   // Frontend-only, distinct from updatedAt: stamped once by UPDATE_TASK_STATUS
   // when this run actually terminates (completed/failed), cleared when it
   // starts running again, and deliberately preserved across SET_CURRENT_TASK
@@ -928,6 +948,11 @@ const taskFromTaskInfoData = (
   runId: taskData.run_id as string | null | undefined,
   stateVersion: parseInteger(taskData.state_version),
   controlState: taskData.control_state as TaskControlState | undefined,
+  // Only a frame that reports the view (history replay's) may replace or
+  // clear one already held; live task_info frames do not carry it.
+  ...(hasOwn(taskData, "auto_recovery")
+    ? { autoRecovery: normalizeAutoRecovery(taskData.auto_recovery) }
+    : {}),
 })
 
 const getWebSocketErrorCodeField = (message: WebSocketMessage): {
@@ -1047,7 +1072,8 @@ export const projectErrorFrameForDisplay = (
   // The frame's own code decides the wording, and one code has one sentence
   // for every audience. This is the same table the root error channel already
   // uses for its error_code field, extended with the connector-runtime codes
-  // that reach this frame -- not a second vocabulary beside it. It also fixes
+  // and the external-cancel interruption code that reach this frame -- not a
+  // second vocabulary beside it. It also fixes
   // what the relayed sentence could not: on a transport that marks legacy
   // prose untrusted, getWebSocketErrorMessage returns a constant by design
   // (#1938: never render server free text there), so before this the curated
@@ -1056,7 +1082,7 @@ export const projectErrorFrameForDisplay = (
   // selected by code. A code the table does not list keeps the generic
   // prefixed wording.
   const projectedCode = projection ? readClientErrorCode(projection.code) : null
-  const connectorRuntimeBubble = projectedCode
+  const codedBubble = projectedCode
     ? translate(clientErrorTranslationKey(projectedCode))
     : null
   // The dedup identity has to name WHICH occurrence this frame reports, not
@@ -1089,7 +1115,7 @@ export const projectErrorFrameForDisplay = (
     dedupText,
     occurrenceIdentity,
     bubbleContent:
-      connectorRuntimeBubble
+      codedBubble
       ?? `${translate('agent.logs.event.messages.errorPrefix')} ${dedupText}`,
     // A terminal failure IS this turn's result: without the flag the
     // conversation panel (which renders only user / isResult / system-notice
@@ -1264,7 +1290,7 @@ type AppAction =
   | { type: "UPSERT_STREAMING_FINAL_ANSWER"; payload: { messageId: string; executionSequence?: number; delta?: string; content?: string; status?: Message["status"]; timestamp: string } }
   | { type: "SET_CURRENT_TASK"; payload: Task | null }
   | { type: "SET_TASK_RUNTIME_EXTENSIONS"; payload: { taskId: number; extensions: TaskRuntimeExtensions } }
-  | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"]; completionOutcome?: TaskCompletionOutcome; waitingQuestion?: string; waitingInteractions?: Interaction[]; waitingRequestId?: string; runId?: string | null; stateVersion?: number; controlState?: TaskControlState; updatedAt?: string } }
+  | { type: "UPDATE_TASK_STATUS"; payload: { status: Task["status"]; completionOutcome?: TaskCompletionOutcome; waitingQuestion?: string; waitingInteractions?: Interaction[]; waitingRequestId?: string; runId?: string | null; stateVersion?: number; controlState?: TaskControlState; autoRecovery?: TaskAutoRecovery; updatedAt?: string } }
   | { type: "TRIGGER_TASK_UPDATE" }
   | { type: "SET_DAG_EXECUTION"; payload: DAGExecution | null }
   | { type: "RESET_DAG_STATE" }
@@ -1401,7 +1427,7 @@ function projectAppState(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         taskId: action.payload.taskId,
-        currentTask: withDagTerminatedAt(action.payload.task),
+        currentTask: clearStaleAutoRecovery(withDagTerminatedAt(action.payload.task)),
         taskRuntimeExtensions: {},
       }
 
@@ -1650,10 +1676,10 @@ function projectAppState(state: AppState, action: AppAction): AppState {
       // never passes through UPDATE_TASK_STATUS either - withDagTerminatedAt
       // backfills the former and clears the latter so a prior run's
       // dagTerminatedAt can't linger into this one.
-      const currentTask = withDagTerminatedAt(mergedTask && {
+      const currentTask = clearStaleAutoRecovery(withDagTerminatedAt(mergedTask && {
         ...mergedTask,
         completionOutcome: mergedTask.status === "completed" ? mergedTask.completionOutcome : undefined,
-      })
+      }))
 
       return {
         ...state,
@@ -1758,6 +1784,12 @@ function projectAppState(state: AppState, action: AppAction): AppState {
           runId: action.payload.runId ?? state.currentTask.runId,
           stateVersion: action.payload.stateVersion ?? state.currentTask.stateVersion,
           controlState: action.payload.controlState ?? state.currentTask.controlState,
+          // A pause event without a reason (history's reasserted pause, a
+          // live-lease restore, an unknown-input pause) keeps the one already
+          // known; leaving paused clears it.
+          autoRecovery: nextStatus === "paused"
+            ? action.payload.autoRecovery ?? state.currentTask.autoRecovery
+            : undefined,
         },
       }
     }
@@ -6056,8 +6088,10 @@ export function AppProvider({
         break
 
 
-      case "task_paused":
+      case "task_paused": {
         console.trace('Original message:', JSON.stringify(message), 'Handler: handleMessage (task_paused)')
+        const pausedReason = asMessageRecord(message.data).interruption_reason
+          ?? asMessageRecord(message).interruption_reason
         dispatch({
           type: "UPDATE_TASK_STATUS",
           payload: {
@@ -6065,10 +6099,12 @@ export function AppProvider({
             runId: controlEnvelope.runId,
             stateVersion: controlEnvelope.stateVersion,
             controlState: controlEnvelope.controlState || "paused",
+            autoRecovery: normalizeAutoRecovery({ reason: pausedReason }),
           },
         })
         dispatch({ type: "SET_PROCESSING", payload: false })
         break
+      }
 
       case "task_pause_requested":
         if (controlEnvelope.status) {

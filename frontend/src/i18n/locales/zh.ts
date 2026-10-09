@@ -5,6 +5,12 @@ const zh = {
     blocked: "暂时受阻，请查看回复中继续所需的条件。",
   },
   sharedStream: { interrupted: "实时更新已中断，当前显示的回答可能不完整；已保存的完整结果可用后会自动同步。" },
+  taskInterruption: {
+    paused: "任务因系统中断已暂停，可点击“继续”恢复执行。",
+    leaseExpired: "运行任务的服务器已停止，任务因系统中断已暂停，可点击“继续”恢复执行。",
+    persistenceFailure: "数据库暂时不可用，任务因系统中断已暂停，可点击“继续”恢复执行。",
+    llmUnavailable: "模型服务暂时不可用，任务因系统中断已暂停，可点击“继续”恢复执行。",
+  },
   clientErrors: {
     executionQueueFull: "团队执行队列已满，请稍后重试。",
     messageProcessingFailed: "消息处理失败，请重试。",
@@ -27,6 +33,7 @@ const zh = {
     taskAccessDenied: "你无权访问此任务。",
     invalidMessage: "消息格式无效。",
     messageOutcomeUnknown: "该消息是否已成功发送尚不确定，请先查看对话内容后再决定是否重新发送。",
+    externalTurnInterrupted: "此回答已被中断。",
     uploadTooLarge: "文件过大，请减小上传大小后重试。",
     uploadProxyError: "上传请求未到达应用，请检查服务器的上传大小限制。",
     uploadFailed: "上传失败，请重试。",
