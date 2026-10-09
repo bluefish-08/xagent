@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from importlib import import_module
 from typing import Any
 
@@ -58,17 +60,42 @@ def create_celery_app() -> Any:
 celery_app = create_celery_app()
 
 
+_LOCK_KB_ENGINE = """
+from xagent.core.tools.core.RAG_tools.storage.vector_backend import (
+    lock_deployment_kb_engine,
+)
+
+try:
+    lock_deployment_kb_engine()
+except Exception as exc:
+    print(exc)
+    raise SystemExit(3)
+"""
+
+
 @worker_init.connect
 def lock_kb_engine_at_worker_start(**_: Any) -> None:
-    from ...core.tools.core.RAG_tools.storage.vector_backend import (
-        lock_deployment_kb_engine,
-    )
-
-    # Celery logs and swallows an Exception from a signal handler.
+    # A prefork parent that opened LanceDB has pool children that segfault in it.
     try:
-        lock_deployment_kb_engine()
+        proc = subprocess.run(
+            [sys.executable, "-c", _LOCK_KB_ENGINE],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
     except Exception as exc:
-        raise SystemExit(f"Refusing to start the Celery worker: {exc}") from exc
+        detail = f"cannot run the engine check: {exc}"
+    else:
+        if proc.returncode == 0:
+            return
+        lines = (proc.stdout.strip() or proc.stderr.strip()).splitlines()
+        code = proc.returncode
+        how = (
+            f"was killed by signal {-code}" if code < 0 else f"exited with code {code}"
+        )
+        detail = lines[-1] if lines else f"the engine check {how}"
+    # Celery logs and swallows an Exception from a signal handler.
+    raise SystemExit(f"Refusing to start the Celery worker: {detail}")
 
 
 def register_celery_tasks() -> None:
