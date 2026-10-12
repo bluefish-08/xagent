@@ -165,7 +165,7 @@ async def test_agent_kb_service_prepare_collection_sanitizes_without_writing():
         side_effect=ValueError("Collection 'agent url kb' not found")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
 
     with patch(
         "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
@@ -188,7 +188,7 @@ async def test_agent_kb_service_publish_collection_preserves_existing_backend_bi
     metadata_store.save_collection_config = AsyncMock()
     metadata_store.get_collection = AsyncMock(return_value=existing)
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
     ingest_config = IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID)
 
     with patch(
@@ -211,7 +211,7 @@ async def test_agent_kb_service_publish_collection_persists_config():
         side_effect=ValueError("Collection 'agent url kb' not found")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
     ingest_config = IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID)
 
     with patch(
@@ -240,7 +240,7 @@ async def test_agent_kb_service_publish_collection_raises_on_config_save_failure
         side_effect=ValueError("Collection 'agent kb' not found")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
     ingest_config = IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID)
 
     with (
@@ -992,7 +992,7 @@ async def test_agent_publish_keeps_settings_changed_during_the_crawl():
         side_effect=ValueError("Collection 'agent url kb' not found")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
 
     with patch(
         "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
@@ -1259,7 +1259,7 @@ async def test_agent_publish_keeps_settings_when_the_config_read_fails():
         return_value=CollectionInfo(name="agent url kb")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
 
     with patch(
         "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",
@@ -1286,7 +1286,7 @@ async def test_agent_publish_of_a_new_collection_survives_a_config_read_failure(
         side_effect=ValueError("Collection 'agent url kb' not found")
     )
     metadata_store.save_collection = AsyncMock()
-    service = AgentKnowledgeBaseService(user_id=71, is_admin=False)
+    service = AgentKnowledgeBaseService(user_id=71)
 
     with patch(
         "xagent.core.tools.core.RAG_tools.storage.factory.get_metadata_store",

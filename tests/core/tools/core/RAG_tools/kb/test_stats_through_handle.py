@@ -389,3 +389,57 @@ def test_rebuild_unbinds_an_unreported_kb_whose_stored_row_has_no_vectors(
 
     rebuilt = asyncio.run(get_metadata_store().get_collection(KB))
     assert (rebuilt.embedding_model_id, rebuilt.embedding_dimension) == (None, None)
+
+
+def test_rebuild_takes_counts_and_reported_from_one_engine_read(monkeypatch) -> None:
+    _seed_document(KB, "d1", 1)
+    asyncio.run(
+        get_metadata_store().save_collection(
+            CollectionInfo(name=KB, embedding_model_id="model-a", embedding_dimension=2)
+        )
+    )
+    reads = iter(
+        [{}, {KB: {"documents": 1, "parses": 1, "chunks": 1, "embeddings": 3}}]
+    )
+    monkeypatch.setattr(
+        KBCoordinator, "aggregate_collection_stats_sync", lambda self, **kw: next(reads)
+    )
+
+    asyncio.run(rebuild_collection_metadata())
+
+    rebuilt = asyncio.run(get_metadata_store().get_collection(KB))
+    assert (rebuilt.embedding_model_id, rebuilt.embedding_dimension) == ("model-a", 2)
+    assert (rebuilt.documents, rebuilt.chunks, rebuilt.embeddings) == (1, 1, 3)
+
+
+def _validation_error() -> Exception:
+    try:
+        CollectionInfo.model_validate({})
+    except ValueError as e:
+        return e
+    raise AssertionError("expected a validation error")
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("table open failed"), _validation_error()], ids=["io", "corrupt"]
+)
+def test_rebuild_leaves_a_row_it_cannot_read_untouched(monkeypatch, error) -> None:
+    row = CollectionInfo(
+        name=KB, embedding_model_id="model-a", embedding_dimension=8, embeddings=9
+    )
+    store = get_metadata_store()
+    asyncio.run(store.save_collection(row))
+
+    async def _boom(name):
+        raise error
+
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            KBCoordinator, "aggregate_collection_stats_sync", lambda self, **kw: {}
+        )
+        patched.setattr(store, "get_collection", _boom)
+        asyncio.run(rebuild_collection_metadata())
+
+    kept = asyncio.run(store.get_collection(KB))
+    assert (kept.embedding_model_id, kept.embedding_dimension) == ("model-a", 8)
+    assert kept.embeddings == 9

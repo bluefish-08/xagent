@@ -1418,6 +1418,9 @@ async def rebuild_collection_metadata() -> None:
     await _get_maintenance_compatibility_facade().rebuild_collection_metadata()
 
 
+_ENGINE_COUNTS = ("documents", "parses", "chunks", "embeddings")
+
+
 async def _rebuild_collection_metadata_impl() -> None:
     """Implementation for rebuild_collection_metadata."""
     from ..kb.collection_handle import ledger_holds_vectors
@@ -1425,7 +1428,6 @@ async def _rebuild_collection_metadata_impl() -> None:
     from .collections import _resolve_coordinator
 
     # Get all existing collections (use is_admin=True to bypass user filtering)
-    # force_realtime=True to avoid reading stale metadata cache.
     result = await collections.list_collections(is_admin=True, force_realtime=True)
 
     if result.status != "success":
@@ -1435,9 +1437,8 @@ async def _rebuild_collection_metadata_impl() -> None:
     if not result.collections:
         return
 
-    # A collection the engine did not report has unknown counts: a stored row
-    # that still counts vectors is left exactly as it is, one without vectors
-    # keeps its counts and goes through the normal binding rule.
+    # Unreported collections have unknown counts: a stored row with vectors is
+    # left as is, one without keeps its counts and the normal binding rule.
     engine_stats = await asyncio.to_thread(
         _resolve_coordinator(None).aggregate_collection_stats_sync,
         user_id=None,
@@ -1495,10 +1496,27 @@ async def _rebuild_collection_metadata_impl() -> None:
             embedding_model_id = None
             embedding_dimension = None
 
-            if collection.name not in engine_stats:
+            engine = engine_stats.get(collection.name)
+            if engine is not None:
+                # Counts and the reported decision come from this one read.
+                collection = collection.model_copy(
+                    update={
+                        **{k: engine.get(k, 0) for k in _ENGINE_COUNTS},
+                        "processed_documents": engine.get("parses", 0),
+                    }
+                )
+            else:
                 try:
                     stored = await get_metadata_store().get_collection(collection.name)
-                except Exception:  # noqa: BLE001 - no readable row, rebuild it
+                except Exception as e:  # noqa: BLE001 - unknown state, keep the row
+                    # A corrupt row raises pydantic's ValidationError, also a ValueError.
+                    if not (isinstance(e, ValueError) and "not found" in str(e)):
+                        logger.warning(
+                            "Skipping rebuild of '%s': cannot read its row: %s",
+                            collection.name,
+                            e,
+                        )
+                        continue
                     stored = None
                 if stored is not None:
                     if stored.embeddings > 0:

@@ -130,6 +130,7 @@ MILVUS_SKELETON = {
 }
 MILVUS_ROWS = {
     "test_admin_list_counts_follow_rows_not_persisted_counters",
+    "test_admin_list_writes_no_metadata",
     "test_rewriting_embeddings_does_not_duplicate_rows",
     "test_search_returns_only_rows_the_caller_may_see",
     "test_search_never_crosses_collections",
@@ -962,17 +963,36 @@ def test_admin_list_counts_follow_rows_not_persisted_counters(
         processed_documents=99,
     )
     asyncio.run(get_metadata_store().save_collection(stale))
+    seeded.write_parse(
+        "doc-1", PARSE, "default", {}, [ParsedParagraph(text="p")], user_id=1
+    )
 
     def listed() -> tuple[int, int, int, int]:
         result = asyncio.run(list_collections(user_id=None, is_admin=True))
         [info] = [c for c in result.collections if c.name == COLLECTION]
         return info.documents, info.chunks, info.embeddings, info.processed_documents
 
-    _eventually(lambda: _assert_eq(listed(), (2, 3, 3, 0)))
+    _eventually(lambda: _assert_eq(listed(), (2, 3, 3, 1)))
     seeded.delete_documents_data(["doc-1"], user_id=None, is_admin=True)
     _eventually(lambda: _assert_eq(listed(), (1, 1, 1, 0)))
     seeded.delete_documents_data(["doc-2"], user_id=None, is_admin=True)
     _eventually(lambda: _assert_eq(listed(), (0, 0, 0, 0)))
+
+
+def test_admin_list_writes_no_metadata(seeded: KBCollectionHandle) -> None:
+    store = get_metadata_store()
+
+    def admin_list() -> list[str]:
+        result = asyncio.run(list_collections(user_id=None, is_admin=True))
+        return [c.name for c in result.collections]
+
+    assert admin_list() == [COLLECTION]
+    with pytest.raises(ValueError):
+        asyncio.run(store.get_collection(COLLECTION))
+
+    asyncio.run(store.save_collection(CollectionInfo(name=COLLECTION, documents=99)))
+    assert admin_list() == [COLLECTION]
+    assert asyncio.run(store.get_collection(COLLECTION)).documents == 99
 
 
 def _assert_eq(actual: object, expected: object) -> None:

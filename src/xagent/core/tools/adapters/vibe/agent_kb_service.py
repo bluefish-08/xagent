@@ -21,11 +21,10 @@ def _get_tool_compatibility_facade() -> "KBToolCompatibilityFacade":
 
 
 class AgentKnowledgeBaseService:
-    """Shared collection setup/refresh flow for agent-triggered KB creation."""
+    """Shared collection setup flow for agent-triggered KB creation."""
 
-    def __init__(self, user_id: int, is_admin: bool = False) -> None:
+    def __init__(self, user_id: int) -> None:
         self.user_id = user_id
-        self.is_admin = is_admin
 
     async def prepare_collection(self, collection_name: str) -> str:
         """Resolve the target name. Writes nothing, so a failure leaves nothing."""

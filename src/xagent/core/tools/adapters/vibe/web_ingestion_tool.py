@@ -121,10 +121,7 @@ async def _create_knowledge_base_from_url_impl(
         )
 
         ingest_config = IngestionConfig(embedding_model_id=DEFAULT_EMBEDDING_MODEL_ID)
-        kb_service = AgentKnowledgeBaseService(
-            user_id=user_id,
-            is_admin=is_admin,
-        )
+        kb_service = AgentKnowledgeBaseService(user_id=user_id)
         collection_name = await kb_service.prepare_collection(collection_name)
         # The ingest pipeline writes a metadata row of its own; remember whether
         # the collection is ours to clean up if the import produces nothing.
