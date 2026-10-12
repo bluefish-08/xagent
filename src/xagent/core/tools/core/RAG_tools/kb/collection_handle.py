@@ -113,7 +113,9 @@ from ..utils.lancedb_query_utils import (
 )
 from ..utils.metadata_utils import (
     CONTENT_HASH_KEY,
+    content_hash_or_empty,
     deserialize_metadata,
+    recorded_content_hash,
     serialize_metadata,
 )
 from ..utils.string_utils import escape_lancedb_string, generate_deterministic_doc_id
@@ -191,10 +193,19 @@ def _safe_optional_str(value: Any) -> str | None:
     return str(value)
 
 
-def _content_hash_of(document: Any) -> str:
-    """The document's file hash; a missing value or pandas NaN reads as none."""
-    value = getattr(document, "content_hash", None)
-    return value if isinstance(value, str) else ""
+def _parse_content(
+    handle: "KBCollectionHandle",
+    doc_id: str,
+    parse_hash: str,
+    user_id: int | None,
+    is_admin: bool,
+) -> str:
+    """The file content the stored parse was made from; none when it records none."""
+    return recorded_content_hash(
+        handle.read_latest_parse_record(
+            doc_id, parse_hash=parse_hash, user_id=user_id, is_admin=is_admin
+        )
+    )
 
 
 def _made_from(row: dict[str, Any]) -> Any:
@@ -790,8 +801,9 @@ class KBCollectionHandle(ABC):
     ) -> EmbeddingReadResponse:
         """Return chunks that still need an embedding for ``model``.
 
-        Reads the chunks table for ``(doc_id, parse_hash)`` and excludes
-        ``chunk_id``s already present in the ``embeddings_{model_tag}`` table.
+        Reads the chunks of ``(doc_id, parse_hash)`` made from the content the parse
+        recorded (all of them when it records none) and excludes ``chunk_id``s the
+        engine already holds a vector for.
         """
 
     @abstractmethod
@@ -826,20 +838,32 @@ class KBCollectionHandle(ABC):
         Called after the last batch and before the ledger status is updated, and
         also when a rerun finds nothing pending (a crash after the writes), so a
         call may follow no write at all: implementations must be idempotent. An
-        engine that writes rows invisible makes them visible here; one that writes
-        searchable rows does nothing.
+        engine that writes rows invisible makes them visible here. Every engine
+        also retires the document's chunks and vectors made from other content,
+        after its last check that the ingest is still current.
         """
 
+    @abstractmethod
+    def stale_chunks(
+        self, doc_id: str, parse_hash: str, *, user_id: int | None = None
+    ) -> dict[tuple[str, str], list[str]]:
+        """The chunk_ids ``retire_superseded_chunks`` would delete, by chunk key.
+
+        Deletes nothing: a caller that must remove other stores' rows first reads
+        the set here and retires last, so a failed attempt can be retried whole.
+        """
+
+    @abstractmethod
     def retire_superseded_chunks(
-        self, doc_id: str, *, user_id: int | None = None
-    ) -> int:
+        self, doc_id: str, parse_hash: str, *, user_id: int | None = None
+    ) -> list[str]:
         """Delete the document's chunks and vectors made from other file content.
 
-        Keeps every chunk made from the document's current ``content_hash``, whatever
-        its parse or chunk settings; chunks that record no content count as other
-        content. Returns the chunk rows deleted.
+        The content kept is the one ``parse_hash``'s parse recorded; every chunk made
+        from it stays, whatever its parse or chunk settings, and chunks that record
+        no content count as other content. Does nothing when the documents row no
+        longer holds that content (a newer registration). Returns the chunk_ids deleted.
         """
-        return 0
 
     @abstractmethod
     def discard_uncommitted_embeddings(
@@ -2455,7 +2479,7 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                 embedded_chunk_ids = set()
 
             # Only the current content is embedded: retire deletes the rest at commit.
-            current = _content_hash_of(self.load_document(doc_id, is_admin=True))
+            current = _parse_content(self, doc_id, parse_hash, user_id, is_admin)
             pending_chunks: list[ChunkForEmbedding] = []
             for chunk_dict in chunks_data:
                 chunk_id = chunk_dict["chunk_id"]
@@ -2565,19 +2589,23 @@ class LanceDBCollectionHandle(KBCollectionHandle):
         """Retire the chunks and vectors of replaced content; rows are already searchable."""
         if commit_gate is not None:
             commit_gate()
-        self.retire_superseded_chunks(doc_id, user_id=user_id)
+        self.retire_superseded_chunks(doc_id, parse_hash, user_id=user_id)
 
-    def retire_superseded_chunks(
-        self, doc_id: str, *, user_id: int | None = None
-    ) -> int:
+    def stale_chunks(
+        self, doc_id: str, parse_hash: str, *, user_id: int | None = None
+    ) -> dict[tuple[str, str], list[str]]:
+        """The chunk_ids of other content by ``(parse_hash, config_hash)``; deletes nothing."""
+        current = _parse_content(self, doc_id, parse_hash, user_id, True)
         document = self.load_document(doc_id, is_admin=True)
-        current = _content_hash_of(document)
-        if not current:
-            return 0
+        if not current or current != content_hash_or_empty(
+            getattr(document, "content_hash", None)
+        ):
+            return {}
         stale: dict[tuple[str, str], list[str]] = {}
         kept: set[tuple[str, str]] = set()
         for batch in self.vector_index_store.iter_batches(
             table_name="chunks",
+            columns=["chunk_id", "parse_hash", "config_hash", "metadata"],
             filters={"collection": self.context.collection, "doc_id": doc_id},
             user_id=user_id,
             is_admin=True,
@@ -2589,17 +2617,24 @@ class LanceDBCollectionHandle(KBCollectionHandle):
                 else:
                     stale.setdefault(key, []).append(row["chunk_id"])
         # A (parse_hash, config_hash) pair also holding current chunks cannot be deleted by key.
-        stale = {key: ids for key, ids in stale.items() if key not in kept}
+        return {key: ids for key, ids in stale.items() if key not in kept}
+
+    def retire_superseded_chunks(
+        self, doc_id: str, parse_hash: str, *, user_id: int | None = None
+    ) -> list[str]:
         size = DEFAULT_VECTOR_STORE_DELETE_BATCH_SIZE
-        deleted = 0
-        for (parse_hash, config_hash), ids in stale.items():
+        deleted: list[str] = []
+        for (stale_parse, config_hash), ids in self.stale_chunks(
+            doc_id, parse_hash, user_id=user_id
+        ).items():
             for start in range(0, len(ids), size):
                 self.delete_embedding_records(
                     doc_id, chunk_ids=ids[start : start + size], is_admin=True
                 )
-            deleted += self.delete_chunk_records(
-                doc_id, parse_hash=parse_hash, config_hash=config_hash, is_admin=True
+            self.delete_chunk_records(
+                doc_id, parse_hash=stale_parse, config_hash=config_hash, is_admin=True
             )
+            deleted += ids
         return deleted
 
     def discard_uncommitted_embeddings(
@@ -5973,13 +6008,15 @@ class MilvusCollectionHandle(KBCollectionHandle):
             raise DocumentValidationError(
                 "Collection, doc_id, parse_hash, and model are required"
             )
-        rows = self._ledger_chunks(doc_id, parse_hash, filters, user_id, is_admin)
-        current = _content_hash_of(self.ledger.load_document(doc_id, is_admin=True))
-        chunks = [_chunk_for_embedding(row) for row in rows]
+        current = _parse_content(self, doc_id, parse_hash, user_id, is_admin)
         # Only the current content is embedded: retire deletes the rest at commit.
-        wanted = {
-            row["chunk_id"] for row in rows if not current or _made_from(row) == current
-        }
+        chunks = [
+            _chunk_for_embedding(row)
+            for row in self._ledger_chunks(
+                doc_id, parse_hash, filters, user_id, is_admin
+            )
+            if not current or _made_from(row) == current
+        ]
         held = _document_rows(
             self.client,
             milvus_collection_name(model),
@@ -5987,11 +6024,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
             doc_id,
             unloaded_as_empty=True,
         )
-        pending = [
-            chunk
-            for chunk in chunks
-            if chunk.chunk_id not in held and chunk.chunk_id in wanted
-        ]
+        pending = [chunk for chunk in chunks if chunk.chunk_id not in held]
         for chunk in pending:
             if len(chunk.text.encode()) > _MILVUS_TEXT_BYTES:
                 raise DocumentValidationError(
@@ -6061,21 +6094,29 @@ class MilvusCollectionHandle(KBCollectionHandle):
         user_id: int | None = None,
         is_admin: bool = False,
     ) -> None:
-        """Show the document's invisible rows, check the chunk set, drop the old batch.
+        """Show the document's invisible rows, check the chunk set, retire the old content.
 
-        The gate runs before the flip and again before the delete, so a superseded
+        Retiring deletes the old rows here and in every other model's collection,
+        then the ledger's chunks of other content last, so a failed commit retries
+        whole. The gate runs before the flip and again before the delete, so a superseded
         ingest flips nothing and one superseded in between deletes nothing. The
         flip is one partial update per document: writes have a fixed 200 ms
         granularity, so batching would multiply the wait.
         """
         if commit_gate is not None:
             commit_gate()
-        self.ledger.retire_superseded_chunks(doc_id, user_id=user_id)
+        current = _parse_content(self, doc_id, parse_hash, user_id, is_admin)
         chunk_set = {
             row["chunk_id"]
             for row in self._ledger_chunks(
-                doc_id, parse_hash, None, user_id, is_admin, columns=["chunk_id"]
+                doc_id,
+                parse_hash,
+                None,
+                user_id,
+                is_admin,
+                columns=["chunk_id", "metadata"],
             )
+            if not current or _made_from(row) == current
         }
         name = milvus_collection_name(model)
         # Fresh on purpose: a kb_id that changed since the ingest resolved it
@@ -6136,6 +6177,13 @@ class MilvusCollectionHandle(KBCollectionHandle):
             raise
         if commit_gate is not None:
             commit_gate()
+        stale = [
+            chunk_id
+            for ids in self.ledger.stale_chunks(
+                doc_id, parse_hash, user_id=user_id
+            ).values()
+            for chunk_id in ids
+        ]
         old = [chunk_id for chunk_id in held if chunk_id not in chunk_set]
         if old:
             self.client.delete(
@@ -6143,6 +6191,23 @@ class MilvusCollectionHandle(KBCollectionHandle):
                 filter="kb_id == {kb_id} and doc_id == {doc_id} and chunk_id in {old}",
                 filter_params={"kb_id": kb_id, "doc_id": doc_id, "old": old},
             )
+        step = DEFAULT_VECTOR_STORE_DELETE_BATCH_SIZE
+        for other in _milvus_collections(self.client) if stale else []:
+            for start in range(0, len(stale), step):
+                self._delete_ids(other, kb_id, doc_id, stale[start : start + step])
+        # Last: a failed commit above leaves these rows, so the retry finds them again.
+        self.ledger.retire_superseded_chunks(doc_id, parse_hash, user_id=user_id)
+
+    def _delete_ids(self, name: str, kb_id: str, doc_id: str, ids: list[str]) -> None:
+        _with_loaded(
+            name,
+            self.client,
+            lambda: self.client.delete(
+                name,
+                filter="kb_id == {kb_id} and doc_id == {doc_id} and chunk_id in {ids}",
+                filter_params={"kb_id": kb_id, "doc_id": doc_id, "ids": ids},
+            ),
+        )
 
     def validate_query_vector(
         self,
@@ -6721,6 +6786,7 @@ class MilvusCollectionHandle(KBCollectionHandle):
     delete_parse_records = _ledger(KBCollectionHandle.delete_parse_records)
     delete_chunk_records = _ledger(KBCollectionHandle.delete_chunk_records)
     retire_superseded_chunks = _ledger(KBCollectionHandle.retire_superseded_chunks)
+    stale_chunks = _ledger(KBCollectionHandle.stale_chunks)
     snapshot_parse = _ledger(KBCollectionHandle.snapshot_parse)
     restore_parse = _ledger(KBCollectionHandle.restore_parse)
     delete_created_parse = _ledger(KBCollectionHandle.delete_created_parse)

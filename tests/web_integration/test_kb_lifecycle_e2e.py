@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from tests.web_integration.http_helpers import eventually, http_detail
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import deployment_kb_backend
+from xagent.core.tools.core.RAG_tools.storage.factory import get_vector_index_store
 
 pytestmark = [
     pytest.mark.e2e,
@@ -316,10 +317,24 @@ class TestKBLifecycleE2E:
 
         monkeypatch.setattr(stub_embedding_adapter, "encode", recording)
 
+        def chunk_texts() -> list[str]:
+            return [
+                row["text"]
+                for batch in get_vector_index_store().iter_batches(
+                    table_name="chunks",
+                    filters={"collection": "e2e_reupload_revert"},
+                    is_admin=True,
+                )
+                for row in batch.to_pylist()
+            ]
+
+        assert any("quokka" in text for text in chunk_texts())
+
         upload("alpha zebra lantern")
         eventually(lambda: found("zebra"))
         eventually(lambda: not found("quokka"))
         assert not any("quokka" in call for call in encoded)
+        assert not any("quokka" in text for text in chunk_texts())
 
     @pytest.mark.e2e
     @pytest.mark.slow
