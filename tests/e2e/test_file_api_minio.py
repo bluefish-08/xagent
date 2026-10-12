@@ -443,7 +443,7 @@ async def test_create_kb_from_file_tool_restores_durable_only_upload_from_minio(
 
     monkeypatch.setattr(
         "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
-        lambda user_id, is_admin: service,
+        lambda user_id: service,
     )
     monkeypatch.setattr(
         "xagent.core.tools.core.RAG_tools.pipelines.document_ingestion.run_document_ingestion",
