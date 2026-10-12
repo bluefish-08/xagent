@@ -959,6 +959,13 @@ def _counts(handle: KBCollectionHandle) -> tuple[object, ...]:
     )
 
 
+def _assert_counts_are_fresh(handle: KBCollectionHandle, warmed: tuple) -> None:
+    after = _counts(handle)
+    handle.vector_index_store.invalidate_table_cache()
+    assert after == _counts(handle)
+    assert after != warmed
+
+
 @pytest.mark.parametrize(("scope", "kwargs", "expected"), CASCADES)
 def test_counts_follow_rows_after_a_cascade(
     two_versions: KBCollectionHandle,
@@ -968,20 +975,12 @@ def test_counts_follow_rows_after_a_cascade(
 ) -> None:
     warmed = _counts(two_versions)
     _cascade(two_versions, scope, "scope", preview_only=False, confirm=True, **kwargs)
-    after = _counts(two_versions)
-    two_versions.vector_index_store.invalidate_table_cache()
-    assert after == _counts(two_versions)
-    assert after != warmed
-
-
-def _assert_counts_are_fresh(handle: KBCollectionHandle, warmed: tuple) -> None:
-    after = _counts(handle)
-    handle.vector_index_store.invalidate_table_cache()
-    assert after == _counts(handle)
-    assert after != warmed
+    assert _doc1_rows(two_versions) == expected
+    _assert_counts_are_fresh(two_versions, warmed)
 
 
 def test_counts_follow_rows_after_operation_cleanup(tmp_path: Path) -> None:
+    # The table cache exists only in the LanceDB engine.
     handle = ENGINES["lancedb"](COLLECTION)
     _ingest(handle, COLLECTION, "doc-1", ["kiwi apple"], user_id=1, source_dir=tmp_path)
     _ingest(
@@ -1018,5 +1017,53 @@ def test_counts_follow_rows_when_a_cascade_fails_midway(
             confirm=True,
             model_tag=TAG,
         )
+
+    _assert_counts_are_fresh(two_versions, warmed)
+
+
+def test_counts_follow_rows_when_a_document_cascade_fails_midway(
+    two_versions: KBCollectionHandle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    real = lancedb_stores._vis_execute_or_plan_by_predicates
+
+    def delete_then_fail(*args: object, **kwargs: object) -> dict[str, int]:
+        real(*args, **kwargs)
+        raise RuntimeError("later table failed")
+
+    monkeypatch.setattr(
+        lancedb_stores, "_vis_execute_or_plan_by_predicates", delete_then_fail
+    )
+    warmed = _counts(two_versions)
+    with pytest.raises(RuntimeError):
+        _cascade(two_versions, "document", "scope", preview_only=False, confirm=True)
+
+    _assert_counts_are_fresh(two_versions, warmed)
+
+
+def test_counts_follow_rows_when_a_restore_fails_midway(
+    two_versions: KBCollectionHandle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xagent.core.tools.core.RAG_tools.kb import collection_handle
+
+    snapshot = two_versions.capture_document_rows(["doc-1"], user_id=1, is_admin=False)
+    _cascade(two_versions, "document", "scope", preview_only=False, confirm=True)
+    warmed = _counts(two_versions)
+
+    real = collection_handle._restore_document_table_rows
+    calls: list[str] = []
+
+    def restore_then_fail(*args: object, **kwargs: object) -> None:
+        if len(calls) == 2:
+            raise RuntimeError("later table failed")
+        calls.append("restored")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        collection_handle, "_restore_document_table_rows", restore_then_fail
+    )
+    with pytest.raises(RuntimeError):
+        two_versions.restore_document_rows(snapshot, user_id=1, is_admin=False)
 
     _assert_counts_are_fresh(two_versions, warmed)

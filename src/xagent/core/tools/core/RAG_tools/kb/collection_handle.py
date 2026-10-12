@@ -1978,28 +1978,30 @@ class LanceDBCollectionHandle(KBCollectionHandle):
             if name.startswith("embeddings_") and name not in restore_tables:
                 restore_tables.append(name)
 
-        for table_name in restore_tables:
-            table = None
-            try:
-                table = conn.open_table(table_name)
-                _restore_document_table_rows(
-                    table,
-                    table_name=table_name,
-                    snapshot_rows=snapshot.rows_by_table.get(table_name, []),
-                    current_rows=self._read_document_rows(
-                        table, snapshot.doc_ids, user_id=user_id, is_admin=is_admin
-                    ),
-                    user_id=user_id,
-                    is_admin=is_admin,
-                )
-            finally:
-                _safe_close_table(table)
-
-        invalidate_cache = getattr(
-            self.vector_index_store, "invalidate_table_cache", None
-        )
-        if callable(invalidate_cache):
-            invalidate_cache()
+        try:
+            for table_name in restore_tables:
+                table = None
+                try:
+                    table = conn.open_table(table_name)
+                    _restore_document_table_rows(
+                        table,
+                        table_name=table_name,
+                        snapshot_rows=snapshot.rows_by_table.get(table_name, []),
+                        current_rows=self._read_document_rows(
+                            table, snapshot.doc_ids, user_id=user_id, is_admin=is_admin
+                        ),
+                        user_id=user_id,
+                        is_admin=is_admin,
+                    )
+                finally:
+                    _safe_close_table(table)
+        finally:
+            # Earlier tables may already be restored when a later one raises.
+            invalidate_cache = getattr(
+                self.vector_index_store, "invalidate_table_cache", None
+            )
+            if callable(invalidate_cache):
+                invalidate_cache()
         return []
 
     # --- Parse data-plane (#509) ---

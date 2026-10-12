@@ -3339,15 +3339,18 @@ class LanceDBVectorIndexStore(VectorIndexStore):
                 )
             predicates[table_name] = [filter_expr]
 
-        result = _vis_execute_or_plan_by_predicates(
-            conn,
-            predicates,
-            preview_only=preview_only,
-            confirm=confirm,
-            model_tag=None,
-        )
-        if confirm:
-            self.invalidate_table_cache()
+        try:
+            result = _vis_execute_or_plan_by_predicates(
+                conn,
+                predicates,
+                preview_only=preview_only,
+                confirm=confirm,
+                model_tag=None,
+            )
+        finally:
+            # Earlier tables may already be deleted when a later one raises.
+            if confirm:
+                self.invalidate_table_cache()
         return result
 
 
