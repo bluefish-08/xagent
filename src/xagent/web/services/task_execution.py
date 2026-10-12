@@ -39,7 +39,7 @@ import time
 import uuid
 import weakref
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -108,6 +108,7 @@ from .task_lease_service import (
     lock_task_lease_no_commit,
     task_lease_attempt_predicate,
 )
+from .task_settlement_report import SettlementReport
 
 if TYPE_CHECKING:
     from .task_setup_snapshot import TaskSetupSnapshot
@@ -145,7 +146,11 @@ from .db_runtime import (
     propagate_deferred_cancellation,
     run_db_io_cancellation_safe,
 )
-from .execution_result_projection import completion_outcome_for_status
+from .execution_result_projection import (
+    FailedResultPresentation,
+    completion_outcome_for_status,
+    present_failed_result,
+)
 from .file_reference_output_service import (
     reconcile_assistant_file_references,
 )
@@ -1752,12 +1757,14 @@ class _TaskExecutionFinalization:
     chat_response: Any
     waiting_for_control: bool
     terminal_state_committed: bool
-    final_control_snapshot: TaskControlSnapshot | None
     final_task_status: str
     broadcast_meta: dict[str, Any]
     late_result: bool = False
-    # Set when an interruption paused the run: the reason it records.
-    interruption_pause_reason: InterruptionReason | None = None
+    # The committed control identity, plus the recorded reason when an
+    # interruption paused the run.
+    report: SettlementReport = field(default_factory=SettlementReport)
+    error_code: str | None = None
+    error_details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -2007,7 +2014,6 @@ def _finalize_task_execution_result_isolated(
                 chat_response=chat_response,
                 waiting_for_control=False,
                 terminal_state_committed=False,
-                final_control_snapshot=None,
                 final_task_status=pre_run_status.value,
                 broadcast_meta={},
                 late_result=True,
@@ -2038,6 +2044,8 @@ def _finalize_task_execution_result_isolated(
         interruption_pause_reason: InterruptionReason | None = None
         final_control_snapshot: TaskControlSnapshot | None = None
         final_task_status = pre_run_status.value
+        # Set only when this transaction settles the result as FAILED.
+        presentation: FailedResultPresentation | None = None
 
         if task_updated is not None:
             task_agent_config: dict[str, Any] = (
@@ -2171,14 +2179,16 @@ def _finalize_task_execution_result_isolated(
                         completion_outcome_for_status(result, final_status),
                     )
                     if final_status == TaskStatus.FAILED:
-                        diagnostic_error = safe_str(result.get("error")).strip()
+                        presentation = present_failed_result(result)
                         setattr(
                             task_updated,
                             "error_message",
-                            diagnostic_error
+                            presentation.diagnostic_error
                             or safe_str(ai_response).strip()
                             or CLIENT_SAFE_TASK_FAILURE,
                         )
+                        if presentation.visible_text is not None:
+                            ai_response = presentation.visible_text
                     sync_workforce_run_status(
                         finalize_db,
                         task_updated,
@@ -2296,10 +2306,26 @@ def _finalize_task_execution_result_isolated(
             chat_response=chat_response,
             waiting_for_control=waiting_for_control,
             terminal_state_committed=terminal_state_committed,
-            final_control_snapshot=final_control_snapshot,
             final_task_status=final_task_status,
             broadcast_meta=broadcast_meta,
-            interruption_pause_reason=interruption_pause_reason,
+            report=SettlementReport(
+                control_state=(
+                    final_control_snapshot.as_dict()
+                    if final_control_snapshot is not None
+                    else {}
+                ),
+                paused_for=interruption_pause_reason,
+            ),
+            error_code=(
+                presentation.error_code
+                if presentation is not None
+                else result.get("error_code")
+            ),
+            error_details=(
+                presentation.error_details
+                if presentation is not None
+                else result.get("error_details")
+            ),
         )
     finally:
         try:
@@ -2528,7 +2554,6 @@ async def execute_task_background(
             chat_response = finalized.chat_response
             waiting_for_control = finalized.waiting_for_control
             terminal_state_committed = finalized.terminal_state_committed
-            final_control_snapshot = finalized.final_control_snapshot
             final_task_status = finalized.final_task_status
             broadcast_meta = finalized.broadcast_meta
             broadcast_agent_meta = {
@@ -2541,11 +2566,7 @@ async def execute_task_background(
 
             # Note: trace_task_completion is handled by the agent execution logic (e.g., dag_plan_execute.py)
 
-            control_event_state = (
-                final_control_snapshot.as_dict()
-                if final_control_snapshot is not None
-                else {}
-            )
+            control_event_state = finalized.report.control_state
 
             if waiting_for_control:
                 await publish_task_event(
@@ -2570,14 +2591,9 @@ async def execute_task_background(
                     ),
                     task_id,
                 )
-                if finalized.interruption_pause_reason is not None:
-                    from .task_orchestrator import publish_interruption_pause
+                from .task_orchestrator import publish_settlement_pause
 
-                    await publish_interruption_pause(
-                        task_id,
-                        control_event_state,
-                        finalized.interruption_pause_reason,
-                    )
+                await publish_settlement_pause(task_id, finalized.report)
                 logger.info(
                     "Background task %s left %s for v2 control",
                     task_id,
@@ -2601,11 +2617,12 @@ async def execute_task_background(
                     "output": ai_response,
                     "file_outputs": normalized_outputs,
                     "success": result.get("success", False),
-                    # Machine-readable failure classification (e.g. "quota_exceeded")
-                    # plus its structured details, so the client can localise and
-                    # branch instead of parsing the message. Absent for normal turns.
-                    "error_code": result.get("error_code"),
-                    "error_details": result.get("error_details"),
+                    # Machine-readable failure classification (e.g. "quota_exceeded"
+                    # or "model_error") plus its structured details, so the client
+                    # can localise and branch instead of parsing the message. Absent
+                    # for normal turns.
+                    "error_code": finalized.error_code,
+                    "error_details": finalized.error_details,
                     **control_event_state,
                     "type": "task_completed",
                     "chat_response": chat_response
@@ -2915,6 +2932,7 @@ def _finalize_resumed_task(
     """Persist one fenced resumed result in a single worker transaction."""
     from ..models.agent import Agent
     from .chat_history_service import persist_assistant_message_no_commit
+    from .task_orchestrator import sync_trigger_run_status
 
     finalized: dict[str, Any] = {
         "task_title": None,
@@ -2925,11 +2943,14 @@ def _finalize_resumed_task(
         "agent_logo_url": None,
         "final_status": TaskStatus.RUNNING.value,
         "lease_released": False,
-        "control_event_state": {},
+        "report": SettlementReport(),
         "normalized_outputs": [],
         "output": output,
+        # A failed result's presentation replaces these; every other outcome
+        # forwards the result's own coded fields.
+        "error_code": result.get("error_code"),
+        "error_details": result.get("error_details"),
         "late_result": False,
-        "interruption_pause_reason": None,
     }
     if task_lease.run_id is None:
         _settle_prepared_task_file_outputs(
@@ -3005,6 +3026,7 @@ def _finalize_resumed_task(
                 finalized["agent_logo_url"] = cast(Any, agent.logo_url)
 
         interruption: InterruptionDecision | None = None
+        pause_reason: InterruptionReason | None = None
         if result.get("injection_outcome_unknown") and (
             success or status in {"waiting_for_user", "interrupted"}
         ):
@@ -3056,6 +3078,7 @@ def _finalize_resumed_task(
             orm_task.output = output
             orm_task.error_message = None
         elif final_task_status == TaskStatus.FAILED:
+            presentation = present_failed_result(result)
             if task_owner_user_id is not None:
                 persist_assistant_message_no_commit(
                     db,
@@ -3069,10 +3092,15 @@ def _finalize_resumed_task(
             orm_task = cast(Any, task)
             orm_task.output = None
             orm_task.error_message = (
-                str(result.get("error") or "").strip()
-                or output
-                or CLIENT_SAFE_TASK_FAILURE
+                presentation.diagnostic_error or output or CLIENT_SAFE_TASK_FAILURE
             )
+            finalized["output"] = (
+                presentation.visible_text
+                if presentation.visible_text is not None
+                else output
+            )
+            finalized["error_code"] = presentation.error_code
+            finalized["error_details"] = presentation.error_details
 
         if interruption is not None:
             # Projects the workforce run itself for a pause.
@@ -3080,9 +3108,14 @@ def _finalize_resumed_task(
                 sync_workforce_run_status(db, task, final_task_status)
             _apply_result_interruption(db, task, interruption, result)
             if interruption.pause:
-                finalized["interruption_pause_reason"] = interruption.reason
+                pause_reason = interruption.reason
         else:
             sync_workforce_run_status(db, task, final_task_status)
+        if final_task_status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+            # As ``finish_turn`` does for a new run: a trigger run left
+            # RUNNING by a user pause or a wait for the user ends with the
+            # resumed run. A pause leaves it as is, or projects it above.
+            sync_trigger_run_status(db, task, final_task_status)
         lease_released = release_task_lease_no_commit(
             db,
             task_lease,
@@ -3095,9 +3128,7 @@ def _finalize_resumed_task(
         stage_result_fact_no_commit(
             db,
             task,
-            interruption_pause_result()
-            if finalized["interruption_pause_reason"] is not None
-            else result,
+            interruption_pause_result() if pause_reason is not None else result,
         )
         # A lost acknowledgement here is not reconciled yet: the lease is
         # released in this transaction, so only the result fact's witness
@@ -3107,7 +3138,10 @@ def _finalize_resumed_task(
         metadata_committed = True
         finalized["lease_released"] = True
         finalized["final_status"] = final_task_status.value
-        finalized["control_event_state"] = control_snapshot.as_dict()
+        # Filled only now that the commit succeeded.
+        finalized["report"] = SettlementReport(
+            control_state=control_snapshot.as_dict(), paused_for=pause_reason
+        )
         return finalized
     finally:
         try:
@@ -3124,9 +3158,8 @@ def _settle_resumed_task_lease(
     lease: TaskLease,
     *,
     error_message: str | None,
-    terminal_event_state: dict[str, Any] | None = None,
     interruption: InterruptionReason | None = None,
-    paused_for: list[InterruptionReason] | None = None,
+    report: SettlementReport | None = None,
 ) -> bool:
     """Delegate resume cleanup to the shared run/runner-fenced lifecycle."""
     from .assistant_history_safety import CLIENT_SAFE_FAILURE_MESSAGE_TYPE
@@ -3140,14 +3173,13 @@ def _settle_resumed_task_lease(
             error_message=error_message,
             client_error_message=error_message,
             client_message_type=CLIENT_SAFE_FAILURE_MESSAGE_TYPE,
-            terminal_event_state=terminal_event_state,
+            report=report,
         )
     return settle_task_lease_isolated(
         lease,
         error_message=error_message,
-        terminal_event_state=terminal_event_state,
         interruption=interruption,
-        paused_for=paused_for,
+        report=report,
     )
 
 
@@ -3279,7 +3311,6 @@ async def execute_resume_background(
     # Set when a cancellation or lease loss lands after the deferred turn was
     # durably accepted; the handlers below record the acceptance.
     delivery_accepted_unrecorded = False
-    control_event_state: dict[str, Any] = {}
 
     async def notify_deferred_delivery(
         accepted: bool,
@@ -3996,7 +4027,7 @@ async def execute_resume_background(
         agent_logo_url = finalized["agent_logo_url"]
         final_status = finalized["final_status"]
         lease_released = bool(finalized["lease_released"])
-        control_event_state = finalized["control_event_state"]
+        report = finalized["report"]
 
         if delivery_turn_id is not None:
             await run_db_io_cancellation_safe(
@@ -4021,18 +4052,14 @@ async def execute_resume_background(
                         "agent_id": task_agent_id,
                         "agent_name": agent_name,
                         "agent_logo_url": agent_logo_url,
-                        **control_event_state,
+                        **report.control_state,
                     },
                 ),
                 task_id,
             )
-            pause_reason = finalized.get("interruption_pause_reason")
-            if pause_reason is not None:
-                from .task_orchestrator import publish_interruption_pause
+            from .task_orchestrator import publish_settlement_pause
 
-                await publish_interruption_pause(
-                    task_id, control_event_state, pause_reason
-                )
+            await publish_settlement_pause(task_id, report)
             return
 
         from .task_event_display import publish_task_result
@@ -4051,10 +4078,11 @@ async def execute_resume_background(
                 "file_outputs": normalized_outputs,
                 "success": success,
                 # Forward the coded reason so a mid-run quota interrupt on a
-                # resumed run pops the same dialog as the start-gate path.
-                "error_code": result.get("error_code"),
-                "error_details": result.get("error_details"),
-                **control_event_state,
+                # resumed run pops the same dialog as the start-gate path. A
+                # recorded model-provider failure carries "model_error" here.
+                "error_code": finalized.get("error_code"),
+                "error_details": finalized.get("error_details"),
+                **report.control_state,
                 "type": "task_completed",
                 # The owner's socket, not the operator trace: fold the raw
                 # memory availability reason.
@@ -4430,8 +4458,7 @@ async def execute_resume_background(
                                 settlement_error
                                 or _resume_cancel_settlement_error(trusted_task_source)
                             )
-                        terminal_event_state: dict[str, Any] = {}
-                        paused_for: list[InterruptionReason] = []
+                        settlement_report = SettlementReport()
                         if pause_for_input and not explicit_cancel:
                             from .task_orchestrator import pause_unknown_task_lease
 
@@ -4448,7 +4475,6 @@ async def execute_resume_background(
                                 lambda: _settle_resumed_task_lease(
                                     lease,
                                     error_message=settlement_error,
-                                    terminal_event_state=terminal_event_state,
                                     # An explicit cancel is not an
                                     # interruption to resume from.
                                     interruption=(
@@ -4456,18 +4482,18 @@ async def execute_resume_background(
                                         if explicit_cancel
                                         else settlement_interruption
                                     ),
-                                    paused_for=paused_for,
+                                    report=settlement_report,
                                 )
                             )
                         if settled:
                             lease_released = True
-                            if paused_for:
+                            if settlement_report.paused:
                                 from .task_orchestrator import (
-                                    publish_interruption_pause,
+                                    publish_settlement_pause,
                                 )
 
-                                await publish_interruption_pause(
-                                    task_id, terminal_event_state, paused_for[0]
+                                await publish_settlement_pause(
+                                    task_id, settlement_report
                                 )
                             elif broadcast_error_message is not None:
                                 try:
@@ -4479,7 +4505,7 @@ async def execute_resume_background(
                                                 task_id,
                                                 broadcast_error_message,
                                             ),
-                                            **terminal_event_state,
+                                            **settlement_report.control_state,
                                         },
                                         task_id,
                                     )

@@ -86,6 +86,7 @@ const zh = {
     errors: {
       unknown: "未知错误",
       taskFailed: "出了点问题，请重试。",
+      taskIdReference: "任务 ID：{id}",
     },
   },
   voiceInput: {
@@ -1212,6 +1213,13 @@ const zh = {
           authorizationRequiresDelegated: "Authorization 绑定需要开启委托授权。"
         }
       },
+      // Account identifier step before a builtin OAuth popup, for providers
+      // hosted on the customer's own account (oauth-account-dialog.tsx).
+      accountStep: {
+        continue: "继续",
+        invalid: "请只输入账号名：仅可包含字母、数字和连字符（连字符不能在开头或结尾），最长 63 个字符。",
+        retryHint: "尚未连接。如果登录窗口显示了错误，请检查账号名后重试。",
+      },
       dialog: {
         addTitle: "添加 MCP 服务器",
         editTitle: "编辑 MCP 服务器",
@@ -2090,6 +2098,7 @@ const zh = {
         baseUrlHint: "填写任何兼容 OpenAI API 协议的服务地址,例如 vLLM、Together 或自建的本地服务。",
         testConnection: "测试模型连接",
         testSuccess: "连接成功！模型工作正常。",
+        catalogUnavailable: "此兼容端点不提供模型列表。请手动输入模型名称，然后测试模型连接。",
         selectModelWarning: "请选择一个模型",
         activate: "激活",
         defaultModels: "默认模型",
@@ -2114,6 +2123,13 @@ const zh = {
       apiKeyPlaceholderEdit: "留空以保持不变",
       baseUrl: "基础 URL",
       baseUrlPlaceholder: "https://api.openai.com/v1",
+      bedrockEndpointPlaceholder: "https://bedrock-runtime.us-east-1.amazonaws.com",
+      region: "AWS 区域",
+      authMode: "认证方式",
+      bedrockApiKey: "Amazon Bedrock API 密钥",
+      awsCredentialsChain: "AWS 凭证链",
+      awsCredentialsChainAdminOnly: "AWS 凭证链（仅管理员）",
+      awsCredentialsChainAdminRequired: "只有管理员可以保存或测试此凭证链配置。请切换到 API 密钥认证后再更新。",
       abilities: "能力选择",
       description: "描述",
       selectModel: "选择模型名称",
@@ -2143,6 +2159,9 @@ const zh = {
       rerank: "重排序",
     },
     providers: {
+      bedrock: {
+        description: "通过原生 Converse API 使用 Amazon Bedrock 模型。",
+      },
       openai: {
         description: "访问 GPT-4o、GPT-4 Turbo 和 DALL-E 3 模型。推理和创造力的行业标准。",
       },

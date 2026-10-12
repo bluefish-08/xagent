@@ -6,6 +6,7 @@ from ....retry import chat_retry_budget, create_retry_wrapper
 from ...providers import (
     AUTO_MODEL_NAME,
     ROUTER_PROVIDER,
+    bedrock_runtime_auth_mode,
     canonical_provider_name,
     is_auto_router_model,
     is_placeholder_api_key,
@@ -15,6 +16,7 @@ from ...providers import (
 from ..error import retry_on
 from .azure_openai import AzureOpenAILLM
 from .base import BaseLLM
+from .bedrock import BedrockLLM
 from .claude import ClaudeLLM
 from .dashscope import DashScopeLLM
 from .deepseek import DeepSeekLLM
@@ -127,6 +129,18 @@ def create_base_llm(
             model_name=model.model_name,
             api_key=model.api_key,
             base_url=resolve_base_url_for_provider(provider, model.base_url),
+            default_temperature=model.default_temperature,
+            default_max_tokens=model.default_max_tokens,
+            timeout=model.timeout,
+            abilities=model.abilities,
+        )
+    elif provider == "bedrock":
+        llm = BedrockLLM(
+            model_name=model.model_name,
+            region_name=model.bedrock_region,
+            api_key=model.api_key,
+            endpoint_url=model.base_url,
+            auth_mode=bedrock_runtime_auth_mode(model.bedrock_auth_mode),
             default_temperature=model.default_temperature,
             default_max_tokens=model.default_max_tokens,
             timeout=model.timeout,

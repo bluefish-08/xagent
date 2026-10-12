@@ -3,6 +3,9 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+MODEL_ID_MAX_LENGTH = 100
+MODEL_NAME_MAX_LENGTH = 2048
+
 
 class VectorDBType(str, Enum):
     """Supported vector database backend types."""
@@ -75,6 +78,11 @@ class ChatModelConfig(ModelConfig):
     # deployment-owned models keep the default and their environment-based
     # credentials.
     explicit_credentials_only: bool = False
+    # Native Bedrock settings carried through persistence and the runtime
+    # without overloading unrelated AWS environment variables or
+    # process-global bearer-token state.
+    bedrock_region: Optional[str] = None
+    bedrock_auth_mode: str = "auto"
 
 
 class ImageModelConfig(ModelConfig):

@@ -12,22 +12,12 @@ which both engines serve without search. Milvus counts and searches are Bounded,
 a change shows after a moment (``_eventually``). Not covered here:
 
 - async search: LanceDB async search returns no rows today;
-- untagged main pointers and ``list_main_pointers``: on LanceDB the untagged
-  ``IS NULL`` / ``= ''`` alternatives are passed as a tuple and ANDed, so they
-  never match, and ``list_main_pointers`` raises ``MainPointerError``
-  (#2858);
 - main pointers under tenant deletes: ``main_pointers`` has no owner column, so
   a tenant-scoped document delete or document cascade on another owner's doc_id
   removes that owner's pointers (#2859). New engines should not take
-  LanceDB as the reference for either main-pointer item;
+  LanceDB as the reference;
 - version candidates, promotion and the candidate-cleanup snapshots: covered on
-  LanceDB by ``test_collection_handle_version.py``;
-- count-based reads right after a parse, chunk or embeddings cascade: LanceDB
-  keeps returning pre-delete values from ``collection_stats``, ``chunk_exists``,
-  ``parse_exists`` (parse cascade) and ``read_chunks_needing_embedding()``'s
-  ``total_count`` (parse or chunk cascade), because ``count_rows`` reads through
-  the cached ``_get_table`` handle and only the document cascade invalidates it
-  (#2860).
+  LanceDB by ``test_collection_handle_version.py``.
 """
 
 from __future__ import annotations
@@ -123,6 +113,7 @@ MILVUS_SKELETON = {
     "test_ingestion_status_round_trip_and_snapshot",
     "test_ingestion_status_async_round_trip",
     "test_main_pointer_round_trip_and_snapshot",
+    "test_untagged_main_pointer_and_list_main_pointers",
     "test_rename_collection_status_moves_only_the_callers_rows",
     "test_rename_collection_metadata_moves_only_the_callers_config",
     "test_delete_collection_config_follows_tenant_scope",
@@ -150,6 +141,10 @@ MILVUS_ROWS = {
 MILVUS_UNSUPPORTED = {
     "test_cascade_deletes_its_scope_only_when_confirmed",
     "test_cascade_leaves_other_owners_rows",
+    "test_counts_follow_rows_after_a_cascade",
+    "test_counts_follow_rows_when_a_cascade_fails_midway",
+    "test_counts_follow_rows_when_a_document_cascade_fails_midway",
+    "test_counts_follow_rows_when_a_restore_fails_midway",
 }
 
 
@@ -219,13 +214,15 @@ def _write_chunks(
     parse_hash: str = PARSE,
 ) -> None:
     now = datetime.now(timezone.utc)
+    document = handle.load_document(doc_id, is_admin=True)
+    made_from = {"content_hash": document.content_hash} if document else {}
     chunks = [
         {
             "chunk_id": f"{doc_id}-c{index}",
             "index": index,
             "text": text,
             "created_at": now,
-            "metadata": {"page": index + 1},
+            "metadata": {"page": index + 1, **made_from},
         }
         for index, text in enumerate(texts, start=start)
     ]
@@ -456,7 +453,9 @@ def test_chunk_rows_round_trip_in_index_order(seeded: KBCollectionHandle) -> Non
         ("doc-1-c0", "kiwi apple"),
         ("doc-1-c1", "cherry plum"),
     ]
-    assert [c["metadata"] for c in chunks] == [{"page": 1}, {"page": 2}]
+    assert [
+        {k: v for k, v in c["metadata"].items() if k != "content_hash"} for c in chunks
+    ] == [{"page": 1}, {"page": 2}]
 
 
 def test_chunks_needing_embedding_resume_after_partial_write(
@@ -550,7 +549,8 @@ def test_dense_search_ranks_nearest_first_with_unit_scores(
 
     top = response.results[0]
     assert (top.chunk_id, top.doc_id, top.text) == ("doc-1-c1", "doc-1", "cherry plum")
-    assert top.parse_hash == PARSE and top.metadata == {"page": 2}
+    assert top.parse_hash == PARSE
+    assert {k: v for k, v in top.metadata.items() if k != "content_hash"} == {"page": 2}
     scores = [result.score for result in response.results]
     assert scores == sorted(scores, reverse=True)
     assert all(0.0 <= score <= 1.0 for score in scores)
@@ -765,6 +765,36 @@ def test_main_pointer_round_trip_and_snapshot(open_handle: OpenHandle) -> None:
     assert handle.delete_main_pointer("doc-1", "embed", TAG) is True
     assert handle.delete_main_pointer("doc-1", "embed", TAG) is False
     assert technical_id() is None
+
+
+def test_untagged_main_pointer_and_list_main_pointers(open_handle: OpenHandle) -> None:
+    handle = open_handle(COLLECTION)
+
+    handle.set_main_pointer("doc-1", "parse", "v1", "hash-1")
+    handle.set_main_pointer("doc-1", "embed", "v1", "hash-e", TAG)
+    handle.set_main_pointer("doc-2", "parse", "v1", "hash-2")
+
+    pointer = handle.get_main_pointer("doc-1", "parse")
+    assert pointer is not None and pointer["technical_id"] == "hash-1"
+    handle.set_main_pointer("doc-1", "parse", "v2", "hash-3")
+    pointer = handle.get_main_pointer("doc-1", "parse")
+    assert pointer is not None and pointer["technical_id"] == "hash-3"
+    assert handle.get_main_pointer("doc-1", "embed") is None
+
+    listed = handle.list_main_pointers()
+    assert sorted((p["doc_id"], p["step_type"]) for p in listed) == [
+        ("doc-1", "embed"),
+        ("doc-1", "parse"),
+        ("doc-2", "parse"),
+    ]
+    only = handle.list_main_pointers("doc-1")
+    assert {p["doc_id"] for p in only} == {"doc-1"}
+    assert len(handle.list_main_pointers(limit=1)) == 1
+
+    assert handle.delete_main_pointer("doc-1", "embed") is False
+    assert handle.delete_main_pointer("doc-1", "parse") is True
+    assert handle.delete_main_pointer("doc-1", "parse") is False
+    assert handle.get_main_pointer("doc-1", "embed", TAG) is not None
 
 
 @pytest.fixture
@@ -997,3 +1027,130 @@ def test_admin_list_writes_no_metadata(seeded: KBCollectionHandle) -> None:
 
 def _assert_eq(actual: object, expected: object) -> None:
     assert actual == expected
+
+
+def _counts(handle: KBCollectionHandle) -> tuple[object, ...]:
+    stats = handle.collection_stats(None, True)
+    versions = (PARSE, PARSE_V2)
+    return (
+        [handle.parse_exists("doc-1", p, is_admin=True) for p in versions],
+        [handle.chunk_exists("doc-1", p, CONFIG, is_admin=True) for p in versions],
+        [
+            handle.read_chunks_needing_embedding(
+                "doc-1", p, MODEL, is_admin=True
+            ).total_count
+            for p in versions
+        ],
+        stats["chunks"],
+        stats["embeddings"],
+    )
+
+
+def _assert_counts_are_fresh(handle: KBCollectionHandle, warmed: tuple) -> None:
+    after = _counts(handle)
+    handle.vector_index_store.invalidate_table_cache()
+    assert after == _counts(handle)
+    assert after != warmed
+
+
+@pytest.mark.parametrize(("scope", "kwargs", "expected"), CASCADES)
+def test_counts_follow_rows_after_a_cascade(
+    two_versions: KBCollectionHandle,
+    scope: str,
+    kwargs: dict[str, object],
+    expected: tuple[list[str], ...],
+) -> None:
+    warmed = _counts(two_versions)
+    _cascade(two_versions, scope, "scope", preview_only=False, confirm=True, **kwargs)
+    assert _doc1_rows(two_versions) == expected
+    _assert_counts_are_fresh(two_versions, warmed)
+
+
+def test_counts_follow_rows_after_operation_cleanup(tmp_path: Path) -> None:
+    # The table cache exists only in the LanceDB engine.
+    handle = ENGINES["lancedb"](COLLECTION)
+    _ingest(handle, COLLECTION, "doc-1", ["kiwi apple"], user_id=1, source_dir=tmp_path)
+    _ingest(
+        handle, COLLECTION, "doc-1b", ["cherry plum"], user_id=1, source_dir=tmp_path
+    )
+    warmed = _counts(handle)
+
+    handle.cleanup_embeddings_for_operation(
+        doc_id="doc-1", model_tag=TAG, preview_only=False, confirm=True
+    )
+
+    _assert_counts_are_fresh(handle, warmed)
+
+
+def test_counts_follow_rows_when_a_cascade_fails_midway(
+    two_versions: KBCollectionHandle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    real = lancedb_stores._vis_delete_by_predicates
+
+    def delete_then_fail(*args: object, **kwargs: object) -> dict[str, int]:
+        real(*args, **kwargs)
+        raise RuntimeError("later table failed")
+
+    monkeypatch.setattr(lancedb_stores, "_vis_delete_by_predicates", delete_then_fail)
+    warmed = _counts(two_versions)
+    with pytest.raises(RuntimeError):
+        _cascade(
+            two_versions,
+            "embeddings",
+            "scope",
+            preview_only=False,
+            confirm=True,
+            model_tag=TAG,
+        )
+
+    _assert_counts_are_fresh(two_versions, warmed)
+
+
+def test_counts_follow_rows_when_a_document_cascade_fails_midway(
+    two_versions: KBCollectionHandle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xagent.core.tools.core.RAG_tools.storage import lancedb_stores
+
+    real = lancedb_stores._vis_execute_or_plan_by_predicates
+
+    def delete_then_fail(*args: object, **kwargs: object) -> dict[str, int]:
+        real(*args, **kwargs)
+        raise RuntimeError("later table failed")
+
+    monkeypatch.setattr(
+        lancedb_stores, "_vis_execute_or_plan_by_predicates", delete_then_fail
+    )
+    warmed = _counts(two_versions)
+    with pytest.raises(RuntimeError):
+        _cascade(two_versions, "document", "scope", preview_only=False, confirm=True)
+
+    _assert_counts_are_fresh(two_versions, warmed)
+
+
+def test_counts_follow_rows_when_a_restore_fails_midway(
+    two_versions: KBCollectionHandle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xagent.core.tools.core.RAG_tools.kb import collection_handle
+
+    snapshot = two_versions.capture_document_rows(["doc-1"], user_id=1, is_admin=False)
+    _cascade(two_versions, "document", "scope", preview_only=False, confirm=True)
+    warmed = _counts(two_versions)
+
+    real = collection_handle._restore_document_table_rows
+    calls: list[str] = []
+
+    def restore_then_fail(*args: object, **kwargs: object) -> None:
+        if len(calls) == 2:
+            raise RuntimeError("later table failed")
+        calls.append("restored")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        collection_handle, "_restore_document_table_rows", restore_then_fail
+    )
+    with pytest.raises(RuntimeError):
+        two_versions.restore_document_rows(snapshot, user_id=1, is_admin=False)
+
+    _assert_counts_are_fresh(two_versions, warmed)
