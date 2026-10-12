@@ -141,6 +141,8 @@ MILVUS_UNSUPPORTED = {
     "test_cascade_leaves_other_owners_rows",
     "test_counts_follow_rows_after_a_cascade",
     "test_counts_follow_rows_when_a_cascade_fails_midway",
+    "test_counts_follow_rows_when_a_document_cascade_fails_midway",
+    "test_counts_follow_rows_when_a_restore_fails_midway",
 }
 
 
