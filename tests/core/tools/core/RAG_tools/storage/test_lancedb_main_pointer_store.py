@@ -53,3 +53,61 @@ def test_list_main_pointers_with_and_without_doc_id() -> None:
     only = store.list_main_pointers(COLL, doc_id="d2")
     assert [(p["doc_id"], p["model_tag"]) for p in only] == [("d2", "tag-a")]
     assert store.list_main_pointers("other") == []
+
+
+def _add_null_tag_row(doc_id: str, tech: str = "legacy") -> None:
+    from datetime import datetime
+
+    from xagent.core.tools.core.RAG_tools.LanceDB.schema_manager import (
+        ensure_main_pointers_table,
+    )
+    from xagent.core.tools.core.RAG_tools.storage.lancedb_stores import (
+        get_connection_from_env,
+    )
+
+    conn = get_connection_from_env()
+    ensure_main_pointers_table(conn)
+    now = datetime(2026, 1, 1)
+    conn.open_table("main_pointers").add(
+        [
+            {
+                "collection": COLL,
+                "doc_id": doc_id,
+                "step_type": "parse",
+                "model_tag": None,
+                "semantic_id": "legacy-v",
+                "technical_id": tech,
+                "created_at": now,
+                "updated_at": now,
+                "operator": "legacy",
+            }
+        ]
+    )
+
+
+def test_legacy_null_model_tag_row_is_matched_and_deleted() -> None:
+    store = get_main_pointer_store()
+    _add_null_tag_row("legacy")
+
+    pointer = store.get_main_pointer(COLL, "legacy", "parse")
+    assert pointer is not None
+    assert pointer["technical_id"] == "legacy"
+    assert pointer["model_tag"] is None
+    assert [p["doc_id"] for p in store.list_main_pointers(COLL)] == ["legacy"]
+
+    assert store.delete_main_pointer(COLL, "legacy", "parse") is True
+    assert store.get_main_pointer(COLL, "legacy", "parse") is None
+    assert store.delete_main_pointer(COLL, "legacy", "parse") is False
+
+
+def test_set_on_legacy_null_row_is_read_back() -> None:
+    store = get_main_pointer_store()
+    _add_null_tag_row("legacy")
+
+    _set(store, doc_id="legacy", sem="v2", tech="h2")
+
+    pointer = store.get_main_pointer(COLL, "legacy", "parse")
+    assert pointer is not None
+    assert pointer["technical_id"] == "h2"
+    assert store.delete_main_pointer(COLL, "legacy", "parse") is True
+    assert store.get_main_pointer(COLL, "legacy", "parse") is None

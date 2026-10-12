@@ -4848,10 +4848,6 @@ class LanceDBMainPointerStore(MainPointerStore):
                 filters_dict, skip_user_filter=True
             )
 
-            # First check if any pointers exist using efficient count_rows
-            if table.count_rows(filter_expr) == 0:
-                return []
-
             result = table.search().where(filter_expr).limit(limit).to_arrow()
 
             pointers = []
