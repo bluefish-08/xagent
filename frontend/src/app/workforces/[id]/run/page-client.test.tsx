@@ -125,7 +125,7 @@ vi.mock("@/lib/api-wrapper", async () => {
 vi.mock("sonner", () => ({ toast: { error: toastErrorMock, success: vi.fn() } }))
 
 import WorkforceRunPage from "./page-client"
-import type { WorkforceDetail } from "@/types/workforce"
+import type { WorkforceDetail, WorkforceRunHistoryItem } from "@/types/workforce"
 
 const workforceDetail: WorkforceDetail = {
   id: 42,
@@ -141,6 +141,19 @@ const workforceDetail: WorkforceDetail = {
   created_at: null,
   updated_at: null,
 }
+
+const pastRun: WorkforceRunHistoryItem = {
+  id: 9,
+  task_id: 99,
+  status: "completed",
+  is_preview: false,
+  task_title: "Past run title",
+  message: "draft plan",
+  created_at: "2026-07-19T10:00:00Z",
+  completed_at: "2026-07-19T10:03:00Z",
+}
+
+const runResponse = { workforce_run_id: 5, task_id: 99, status: "running", redirect_url: "/task/99" }
 
 function emptyJsonResponse(): Response {
   return new Response(JSON.stringify([]), {
@@ -164,6 +177,13 @@ function routeUploadResponse(fileId: string) {
   )
 }
 
+async function renderRunPage() {
+  getWorkforceMock.mockResolvedValueOnce(workforceDetail)
+  const view = render(<WorkforceRunPage />)
+  await screen.findByText("workforces.run.placeholder")
+  return view
+}
+
 function getComposer(container: HTMLElement) {
   const editor = screen.getByRole("textbox")
   const submit = container.querySelector('form button[type="submit"]') as HTMLButtonElement
@@ -173,6 +193,32 @@ function getComposer(container: HTMLElement) {
 function typeMessage(editor: HTMLElement, text: string) {
   editor.innerHTML = text
   fireEvent.input(editor)
+}
+
+async function attachFile(container: HTMLElement, name = "brief.txt", fileId = "file-123") {
+  routeUploadResponse(fileId)
+  return attachFiles(container, [name])
+}
+
+async function attachFiles(container: HTMLElement, names: string[]) {
+  const files = names.map((name) => new File(["hello"], name, { type: "text/plain", lastModified: 1 }))
+  fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+    target: { files },
+  })
+  for (const name of names) await screen.findByText(name)
+  return files
+}
+
+async function openNewRun() {
+  fireEvent.click(screen.getByRole("button", { name: "workforces.runs.title" }))
+  fireEvent.click(await screen.findByRole("button", { name: "workforces.run.newRun" }))
+}
+
+async function sendFirstMessage(container: HTMLElement, text = "Plan launch") {
+  const { editor, submit } = getComposer(container)
+  typeMessage(editor, text)
+  await waitFor(() => expect(submit).not.toBeDisabled())
+  fireEvent.click(submit)
 }
 
 describe("workforce run first-message attachments", () => {
@@ -198,32 +244,17 @@ describe("workforce run first-message attachments", () => {
   afterEach(() => cleanup())
 
   it("exposes a file upload control before the run starts", async () => {
-    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
-
-    const { container } = render(<WorkforceRunPage />)
-    await screen.findByText("workforces.run.placeholder")
+    const { container } = await renderRunPage()
 
     expect(container.querySelector('input[type="file"]')).not.toBeNull()
   })
 
   it("sends the first message with an uploaded file id", async () => {
-    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
-    runWorkforceMock.mockResolvedValueOnce({ workforce_run_id: 5, task_id: 99, status: "running", redirect_url: "/task/99" })
-    routeUploadResponse("file-123")
+    runWorkforceMock.mockResolvedValueOnce(runResponse)
+    const { container } = await renderRunPage()
+    await attachFile(container)
 
-    const { container } = render(<WorkforceRunPage />)
-    await screen.findByText("workforces.run.placeholder")
-    const { editor, submit } = getComposer(container)
-
-    const file = new File(["hello"], "brief.txt", { type: "text/plain", lastModified: 1 })
-    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
-      target: { files: [file] },
-    })
-    await screen.findByText("brief.txt")
-
-    typeMessage(editor, "Plan launch")
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
+    await sendFirstMessage(container)
 
     await waitFor(() => {
       expect(runWorkforceMock).toHaveBeenCalledWith("42", {
@@ -235,16 +266,10 @@ describe("workforce run first-message attachments", () => {
   })
 
   it("sends the first message without files as an empty list", async () => {
-    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
-    runWorkforceMock.mockResolvedValueOnce({ workforce_run_id: 5, task_id: 99, status: "running", redirect_url: "/task/99" })
+    runWorkforceMock.mockResolvedValueOnce(runResponse)
+    const { container } = await renderRunPage()
 
-    const { container } = render(<WorkforceRunPage />)
-    await screen.findByText("workforces.run.placeholder")
-    const { editor, submit } = getComposer(container)
-
-    typeMessage(editor, "Plan launch")
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
+    await sendFirstMessage(container)
 
     await waitFor(() => {
       expect(runWorkforceMock).toHaveBeenCalledWith("42", {
@@ -256,50 +281,130 @@ describe("workforce run first-message attachments", () => {
   })
 
   it("keeps the attached file and the draft when the first run fails", async () => {
-    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
     runWorkforceMock.mockRejectedValueOnce(new Error("run failed"))
-    routeUploadResponse("file-123")
+    const { container } = await renderRunPage()
+    await attachFile(container)
 
-    const { container } = render(<WorkforceRunPage />)
-    await screen.findByText("workforces.run.placeholder")
-    const { editor, submit } = getComposer(container)
-
-    const file = new File(["hello"], "brief.txt", { type: "text/plain", lastModified: 1 })
-    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
-      target: { files: [file] },
-    })
-    await screen.findByText("brief.txt")
-
-    typeMessage(editor, "Plan launch")
-    await waitFor(() => expect(submit).not.toBeDisabled())
-    fireEvent.click(submit)
+    await sendFirstMessage(container)
 
     await waitFor(() => expect(runWorkforceMock).toHaveBeenCalled())
     expect(await screen.findByText("brief.txt")).toBeInTheDocument()
-    expect(editor).toHaveTextContent("Plan launch")
+    expect(screen.getByRole("textbox")).toHaveTextContent("Plan launch")
     expect(screen.queryByTestId("task-conversation-panel")).not.toBeInTheDocument()
     expect(toastErrorMock).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(getComposer(container).submit).not.toBeDisabled())
   })
 
   it("asks for a message instead of running with attachments only", async () => {
-    getWorkforceMock.mockResolvedValueOnce(workforceDetail)
-    routeUploadResponse("file-123")
-
-    const { container } = render(<WorkforceRunPage />)
-    await screen.findByText("workforces.run.placeholder")
+    const { container } = await renderRunPage()
+    await attachFile(container)
     const { submit } = getComposer(container)
-
-    const file = new File(["hello"], "brief.txt", { type: "text/plain", lastModified: 1 })
-    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
-      target: { files: [file] },
-    })
-    await screen.findByText("brief.txt")
     await waitFor(() => expect(submit).not.toBeDisabled())
+
     fireEvent.click(submit)
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith("workforces.run.messageRequired"))
     expect(toastErrorMock).toHaveBeenCalledTimes(1)
     expect(runWorkforceMock).not.toHaveBeenCalled()
     expect(screen.getByText("brief.txt")).toBeInTheDocument()
+  })
+
+  it("clears the attachment after a successful first send", async () => {
+    runWorkforceMock.mockResolvedValueOnce(runResponse)
+    const { container } = await renderRunPage()
+    await attachFile(container)
+
+    await sendFirstMessage(container)
+    await waitFor(() => expect(runWorkforceMock).toHaveBeenCalledTimes(1))
+
+    await openNewRun()
+
+    expect(screen.queryByText("brief.txt")).not.toBeInTheDocument()
+    runWorkforceMock.mockResolvedValueOnce(runResponse)
+    await sendFirstMessage(container, "Second run")
+    await waitFor(() => {
+      expect(runWorkforceMock).toHaveBeenLastCalledWith("42", {
+        message: "Second run",
+        files: [],
+        is_visible: false,
+      })
+    })
+  })
+
+  it("clears the attachment when a past run is opened before starting a new run", async () => {
+    listWorkforceRunsMock.mockResolvedValueOnce({ items: [pastRun], total: 1, page: 1, size: 20, pages: 1 })
+    const { container } = await renderRunPage()
+    await attachFile(container)
+
+    fireEvent.click(screen.getByRole("button", { name: "workforces.runs.title" }))
+    fireEvent.click(await screen.findByRole("button", { name: /Past run title/ }))
+    await screen.findByTestId("task-conversation-panel")
+
+    fireEvent.click(screen.getByRole("button", { name: "workforces.run.newRun" }))
+
+    expect(screen.queryByText("brief.txt")).not.toBeInTheDocument()
+    runWorkforceMock.mockResolvedValueOnce(runResponse)
+    await sendFirstMessage(container, "Fresh run")
+    await waitFor(() => {
+      expect(runWorkforceMock).toHaveBeenCalledWith("42", {
+        message: "Fresh run",
+        files: [],
+        is_visible: false,
+      })
+    })
+  })
+
+  it("keeps the submit disabled and ignores new uploads while the first run is pending", async () => {
+    let resolveRun: (value: unknown) => void = () => {}
+    runWorkforceMock.mockImplementationOnce(() => new Promise((resolve) => { resolveRun = resolve }))
+    const { container } = await renderRunPage()
+
+    await sendFirstMessage(container)
+    const { submit } = getComposer(container)
+    await waitFor(() => expect(runWorkforceMock).toHaveBeenCalledTimes(1))
+
+    expect(submit).toBeDisabled()
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(["late"], "late.txt", { type: "text/plain", lastModified: 1 })] },
+    })
+    expect(screen.queryByText("late.txt")).not.toBeInTheDocument()
+
+    resolveRun(runResponse)
+    await waitFor(() => expect(screen.queryByTestId("task-conversation-panel")).toBeInTheDocument())
+  })
+
+  it("ignores an upload that resolves after the pre-run attachments were cleared", async () => {
+    listWorkforceRunsMock.mockResolvedValueOnce({ items: [pastRun], total: 1, page: 1, size: 20, pages: 1 })
+    const pending: Array<{ name: string; resolve: (response: Response) => void }> = []
+    apiRequestMock.mockImplementation((url: string, options?: RequestInit) => {
+      if (typeof url === "string" && url.includes("/api/files/upload")) {
+        const file = (options?.body as FormData).get("file") as File
+        return new Promise<Response>((resolve) => pending.push({ name: file.name, resolve }))
+      }
+      return Promise.resolve(emptyJsonResponse())
+    })
+
+    const { container } = await renderRunPage()
+    await attachFiles(container, ["ok.txt", "fail.txt"])
+
+    fireEvent.click(screen.getByRole("button", { name: "workforces.runs.title" }))
+    fireEvent.click(await screen.findByRole("button", { name: /Past run title/ }))
+    await screen.findByTestId("task-conversation-panel")
+    fireEvent.click(screen.getByRole("button", { name: "workforces.run.newRun" }))
+    await waitFor(() => expect(screen.getByRole("textbox")).toBeInTheDocument())
+
+    // The old composer's partial-failure update ([ok.txt]) must not repopulate
+    // the list the run switch already cleared.
+    for (const item of pending) {
+      item.resolve(item.name === "ok.txt"
+        ? uploadResponse("file-ok")
+        : new Response(JSON.stringify({ success: false, file_id: null }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }))
+    }
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled())
+    expect(screen.queryByText("ok.txt")).not.toBeInTheDocument()
   })
 })

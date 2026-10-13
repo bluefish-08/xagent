@@ -290,16 +290,31 @@ function WorkforceRunPageInner() {
   const [agentExecutionDetail, setAgentExecutionDetail] = useState<WorkforceAgentExecution | null>(null)
   const [agentExecutionLoading, setAgentExecutionLoading] = useState(false)
   const [agentExecutionError, setAgentExecutionError] = useState<string | null>(null)
+  const [preRunFiles, setPreRunFiles] = useState<File[]>([])
 
+  const preRunFilesGenerationRef = useRef(0)
   const previewTaskIdRef = useRef<number | null>(null)
   const openedRunParamRef = useRef<string | null>(null)
   const [agentExecutionRequestKey, setAgentExecutionRequestKey] = useState(0)
   const eventBackedConversation = state.currentTask?.conversationStorageVersion === 2
   const taskStatus = state.currentTask?.status ?? null
 
+  // Drop a late onFilesChange from a composer whose attachments were cleared
+  // (its upload can resolve after the composer unmounted).
+  const handlePreRunFilesChange = useCallback((next: File[], generation: number) => {
+    if (generation !== preRunFilesGenerationRef.current) return
+    setPreRunFiles(next)
+  }, [])
+
+  const clearPreRunFiles = useCallback(() => {
+    preRunFilesGenerationRef.current += 1
+    setPreRunFiles([])
+  }, [])
+
   const resetRunState = useCallback(() => {
     openedRunParamRef.current = null
     previewTaskIdRef.current = null
+    clearPreRunFiles()
     setSelectedTaskId(null)
     setTaskStarted(false)
     setInspectorMode(null)
@@ -311,7 +326,7 @@ function WorkforceRunPageInner() {
     dispatch({ type: "SET_CURRENT_TASK", payload: null })
     dispatch({ type: "SET_HISTORY_LOADING", payload: false })
     setTaskId(null, { navigate: false })
-  }, [closeFilePreview, dispatch, setTaskId])
+  }, [clearPreRunFiles, closeFilePreview, dispatch, setTaskId])
 
   const openRun = useCallback((run: WorkforceRunHistoryItem) => {
     if (!run.task_id) {
@@ -568,6 +583,7 @@ function WorkforceRunPageInner() {
   }
 
   const managerName = workforce.manager?.name || t("workforces.canvas.nodeTypes.manager")
+  const preRunFilesGeneration = preRunFilesGenerationRef.current
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -639,7 +655,7 @@ function WorkforceRunPageInner() {
             initialLeftWidth={inspectorMode === "file" ? 50 : 65}
             minLeftWidth={35}
             maxLeftWidth={80}
-            leftPanel={<ChatArea taskStarted={taskStarted} managerName={managerName} handleSend={handleSend} onAgentExecutionClick={openAgentExecution} t={t} />}
+            leftPanel={<ChatArea taskStarted={taskStarted} managerName={managerName} handleSend={handleSend} onAgentExecutionClick={openAgentExecution} t={t} files={preRunFiles} onFilesChange={(next) => handlePreRunFilesChange(next, preRunFilesGeneration)} />}
             rightPanel={inspectorMode ? (
               <div
                 className="h-full min-h-0 bg-background"
@@ -778,14 +794,18 @@ function ChatArea({
   handleSend,
   onAgentExecutionClick,
   t,
+  files,
+  onFilesChange,
 }: {
   taskStarted: boolean
   managerName: string
   handleSend: (content: string, config?: unknown, files?: (File & { file_id?: string })[]) => Promise<boolean>
   onAgentExecutionClick: (execution: AgentExecutionSummary) => void
   t: Translate
+  files: File[]
+  onFilesChange: (files: File[]) => void
 }) {
-  const [files, setFiles] = useState<File[]>([])
+  const [starting, setStarting] = useState(false)
 
   const handlePreRunSend = async (content: string) => {
     if (!content.trim()) {
@@ -793,12 +813,14 @@ function ChatArea({
       toast.error(t("workforces.run.messageRequired"))
       throw Object.assign(new Error("workforce run message required"), { notificationHandled: true })
     }
-    if (await handleSend(content, undefined, files)) {
-      setFiles([])
-      return
+    setStarting(true)
+    try {
+      if (await handleSend(content, undefined, files)) return
+      // handleSend owns any error toast; throwing keeps ChatInput's draft for a retry.
+      throw Object.assign(new Error("workforce run failed"), { notificationHandled: true })
+    } finally {
+      setStarting(false)
     }
-    // handleSend already toasted; throwing keeps ChatInput's draft for a retry.
-    throw Object.assign(new Error("workforce run failed"), { notificationHandled: true })
   }
 
   if (!taskStarted) {
@@ -817,8 +839,9 @@ function ChatArea({
           <div className="mx-auto max-w-3xl px-4 py-4">
             <ChatInput
               placeholder={t("workforces.run.placeholder", { manager: managerName })}
+              isLoading={starting}
               files={files}
-              onFilesChange={setFiles}
+              onFilesChange={onFilesChange}
               hideConfig
               onSend={handlePreRunSend}
             />
