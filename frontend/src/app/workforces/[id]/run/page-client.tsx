@@ -15,7 +15,7 @@ import {
   type Edge,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
-import { AlertCircle, ArrowLeft, Bot, Crown, FileText, GitBranch, History, Loader2, Pencil, Plus, Users, X } from "lucide-react"
+import { ArrowLeft, Crown, FileText, GitBranch, History, Pencil, Plus, Users, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useI18n, type Translate } from "@/contexts/i18n-context"
 import { isTerminalTaskStatus, useApp } from "@/contexts/app-context-chat"
@@ -23,6 +23,7 @@ import type { Task } from "@/contexts/app-context-chat"
 import { normalizeTaskStatus, type TaskStatus } from "@/lib/task-status"
 import { getWorkforce, getWorkforceAgentExecution, getWorkforceRun, runWorkforce } from "@/lib/workforces-api"
 import { WorkforceRunsList, WorkforceStatusBadge } from "@/components/workforce"
+import { ChatInput } from "@/components/chat/ChatInput"
 import { TaskConversationPanel } from "@/components/task/task-conversation-panel"
 import type { AgentExecutionSummary } from "@/components/chat/TraceEventRenderer"
 import { AgentExecutionPanel, RunInspectorHeader, mergeAgentExecutionTraceEvents, sanitizeAgentExecutionTraceEvents } from "@/components/task/agent-execution-panel"
@@ -502,9 +503,9 @@ function WorkforceRunPageInner() {
     _config?: unknown,
     files?: (File & { file_id?: string })[],
   ) => {
-    if (!id) return
+    if (!id) return false
     let taskId = previewTaskIdRef.current
-    if (taskId === -1) return
+    if (taskId === -1) return false
 
     try {
       if (!taskId) {
@@ -535,9 +536,11 @@ function WorkforceRunPageInner() {
       } else {
         await sendMessage(content, { force: true, targetTaskId: taskId }, files)
       }
+      return true
     } catch (err) {
       if (previewTaskIdRef.current === -1) previewTaskIdRef.current = null
       toast.error(err instanceof Error ? err.message : t("workforces.errors.run"))
+      return false
     }
   }, [id, closeFilePreview, setTaskId, dispatch, sendMessage, t])
 
@@ -778,10 +781,26 @@ function ChatArea({
 }: {
   taskStarted: boolean
   managerName: string
-  handleSend: (content: string, config?: unknown, files?: (File & { file_id?: string })[]) => Promise<void>
+  handleSend: (content: string, config?: unknown, files?: (File & { file_id?: string })[]) => Promise<boolean>
   onAgentExecutionClick: (execution: AgentExecutionSummary) => void
   t: Translate
 }) {
+  const [files, setFiles] = useState<File[]>([])
+
+  const handlePreRunSend = async (content: string) => {
+    if (!content.trim()) {
+      // The run API requires a message; ChatInput lets attachments alone through.
+      toast.error(t("workforces.run.messageRequired"))
+      throw Object.assign(new Error("workforce run message required"), { notificationHandled: true })
+    }
+    if (await handleSend(content, undefined, files)) {
+      setFiles([])
+      return
+    }
+    // handleSend already toasted; throwing keeps ChatInput's draft for a retry.
+    throw Object.assign(new Error("workforce run failed"), { notificationHandled: true })
+  }
+
   if (!taskStarted) {
     return (
       <div className="flex h-full w-full flex-col">
@@ -796,11 +815,14 @@ function ChatArea({
         </div>
         <div className="shrink-0 border-t bg-background">
           <div className="mx-auto max-w-3xl px-4 py-4">
-            <RunInput
+            <ChatInput
               placeholder={t("workforces.run.placeholder", { manager: managerName })}
-              onSend={(content) => handleSend(content)}
-              hint={t("workforces.run.inputHint")}
+              files={files}
+              onFilesChange={setFiles}
+              hideConfig
+              onSend={handlePreRunSend}
             />
+            <p className="mt-3 text-center text-xs text-muted-foreground">{t("workforces.run.inputHint")}</p>
           </div>
         </div>
       </div>
@@ -816,68 +838,10 @@ function ChatArea({
       showTaskFiles
       hideFileUpload={false}
       autoFocusInput={false}
-      onSend={handleSend}
+      onSend={async (message, config, sentFiles) => {
+        await handleSend(message, config, sentFiles)
+      }}
       onAgentExecutionClick={onAgentExecutionClick}
     />
-  )
-}
-
-// ─── Simple input component for empty state ────────────────────────────────────
-
-function RunInput({
-  placeholder,
-  hint,
-  onSend,
-}: {
-  placeholder: string
-  hint: string
-  onSend: (content: string) => Promise<void>
-}) {
-  const [value, setValue] = useState("")
-  const [loading, setLoading] = useState(false)
-
-  const submit = async () => {
-    const text = value.trim()
-    if (!text || loading) return
-    setLoading(true)
-    try {
-      await onSend(text)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-end gap-2 rounded-xl border bg-card px-4 py-3 shadow-sm focus-within:border-primary/50 transition-colors">
-        <textarea
-          className="flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground/60 min-h-[44px] max-h-[160px]"
-          placeholder={placeholder}
-          value={value}
-          rows={1}
-          onChange={(e) => {
-            setValue(e.target.value)
-            e.target.style.height = "auto"
-            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              void submit()
-            }
-          }}
-        />
-        <button
-          disabled={!value.trim() || loading}
-          onClick={submit}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-opacity disabled:opacity-40"
-        >
-          <svg className="h-4 w-4 rotate-90" fill="currentColor" viewBox="0 0 20 20">
-            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-          </svg>
-        </button>
-      </div>
-      <p className="text-center text-xs text-muted-foreground">{hint}</p>
-    </div>
   )
 }
