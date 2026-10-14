@@ -6,6 +6,7 @@ one ``ensure_milvus_collection`` installs and the one old collections keep.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -15,6 +16,7 @@ from typing import Any
 import pytest
 
 from xagent.core.tools.core.RAG_tools.core.schemas import ChunkEmbeddingData
+from xagent.core.tools.core.RAG_tools.kb import collection_handle
 from xagent.core.tools.core.RAG_tools.kb.collection_handle import (
     KBCollectionHandle,
     KBHandleProvider,
@@ -80,15 +82,8 @@ def _open() -> KBCollectionHandle:
     )
 
 
-Chunk = tuple[str, str, list[float], dict[str, Any]]
-
-
-def _chunk(chunk_id: str, text: str) -> Chunk:
-    return chunk_id, text, ONE, {}
-
-
 def _ingest(
-    handle: KBCollectionHandle, model: str, doc_id: str, chunks: list[Chunk]
+    handle: KBCollectionHandle, model: str, doc_id: str, chunks: list[tuple[str, str]]
 ) -> None:
     now = datetime.now(timezone.utc)
     handle.write_chunks(
@@ -102,13 +97,12 @@ def _ingest(
                 "index": index,
                 "text": text,
                 "created_at": now,
-                "metadata": metadata,
+                "metadata": {},
             }
-            for index, (chunk_id, text, _, metadata) in enumerate(chunks)
+            for index, (chunk_id, text) in enumerate(chunks)
         ],
         user_id=1,
     )
-    vectors = {chunk_id: vector for chunk_id, _, vector, _ in chunks}
     pending = handle.read_chunks_needing_embedding(
         doc_id, PARSE, model, user_id=1, is_admin=False
     ).chunks
@@ -119,10 +113,10 @@ def _ingest(
                 chunk_id=chunk.chunk_id,
                 parse_hash=chunk.parse_hash,
                 model=model,
-                vector=vectors[chunk.chunk_id],
+                vector=ONE,
                 text=chunk.text,
                 chunk_hash=chunk.chunk_hash,
-                metadata=chunk.metadata,
+                metadata={},
             )
             for chunk in pending
         ],
@@ -140,31 +134,46 @@ def _found(response: Any) -> set[str]:
     return {result.chunk_id for result in response.results}
 
 
-def test_keyword_search_is_case_insensitive(model: str) -> None:
+@pytest.mark.parametrize(
+    ("text", "queries"),
+    [
+        ("Milvus 2.6 向量数据库", ("milvus", "MILVUS", "Milvus")),
+        ("知识库检索与向量数据库", ("向量数据库", "知识库")),
+        ("ＭｉｌｖｕｓＤＢ ２０２６", ("ＭｉｌｖｕｓＤＢ",)),
+        ("こんにちは世界", ("こんにちは",)),
+        ("안녕하세요 세계", ("안녕하세요",)),
+        ("Milvus2.6 release", ("Milvus2.6", "milvus2.6")),
+        ("v2.6.25 发布", ("v2.6",)),
+        ("version 2.6 notes", ("2.6",)),
+    ],
+    ids=[
+        "ascii-case",
+        "chinese-words",
+        "full-width",
+        "kana",
+        "hangul",
+        "mixed-alpha",
+        "mixed-version",
+        "dotted-version",
+    ],
+)
+def test_keyword_search_matches_expected_tokens(
+    text: str, queries: tuple[str, ...], model: str
+) -> None:
     handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", "Milvus 2.6 向量数据库")])
+    _ingest(handle, model, "d", [("c0", text)])
 
-    for query in ("milvus", "MILVUS", "Milvus"):
+    for query in queries:
         response = _sparse(handle, model, query)
         assert _found(response) == {"c0"}, query
         assert response.warnings == [], query
 
 
-@pytest.mark.parametrize(
-    ("text", "query"),
-    [
-        ("ＭｉｌｖｕｓＤＢ ２０２６", "ＭｉｌｖｕｓＤＢ"),
-        ("こんにちは世界", "こんにちは"),
-        ("안녕하세요 세계", "안녕하세요"),
-    ],
-)
-def test_keyword_search_keeps_full_width_kana_and_hangul_tokens(
-    text: str, query: str, model: str
-) -> None:
+def test_han_symbols_jieba_emits_are_kept(model: str) -> None:
     handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", text)])
+    _ingest(handle, model, "d", [("c0", "日期⽇期")])
 
-    response = _sparse(handle, model, query)
+    response = _sparse(handle, model, "⽇")
 
     assert _found(response) == {"c0"}
     assert response.warnings == []
@@ -173,110 +182,93 @@ def test_keyword_search_keeps_full_width_kana_and_hangul_tokens(
 def test_full_width_text_is_matched_one_character_at_a_time(model: str) -> None:
     """Document character-level matching of full-width text, not a feature to extend."""
     handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", "ＡＢＣ"), _chunk("c1", "ＣＢＡ")])
+    _ingest(handle, model, "d", [("c0", "ＡＢＣ"), ("c1", "ＣＢＡ")])
 
     response = _sparse(handle, model, "ＡＢＣ")
 
     assert _found(response) == {"c0", "c1"}
     assert response.warnings == []
-
-
-def test_chinese_multi_word_queries_still_match(model: str) -> None:
-    handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", "知识库检索与向量数据库")])
-
-    for query in ("向量数据库", "知识库"):
-        response = _sparse(handle, model, query)
-        assert "c0" in _found(response), query
-        assert response.warnings == [], query
-
-
-def test_punctuation_only_queries_match_no_bm25_tokens(client: Any, model: str) -> None:
-    handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", "hello ， world!! 🎉 结束")])
-    name = milvus_collection_name(model)
-
-    for query in ("，", "!!"):
-        hits = client.search(
-            name,
-            data=[query],
-            anns_field="sparse",
-            limit=5,
-            search_params={"metric_type": "BM25"},
-            output_fields=["chunk_id"],
-            consistency_level="Strong",
-        )[0]
-        assert hits == [], query
+    assert response.results[0].score == pytest.approx(response.results[1].score)
 
 
 @pytest.mark.parametrize(
-    ("text", "queries"),
+    ("text", "query"),
     [
-        ("Milvus2.6 release", ("Milvus2.6", "milvus2.6")),
-        ("v2.6.25 发布", ("v2.6",)),
-        ("version 2.6 notes", ("2.6",)),
+        ("Привет мир", "мир"),
+        ("Müller Café", "ü"),
     ],
+    ids=["cyrillic", "accented-latin"],
 )
-def test_mixed_alphanumeric_tokens_stay_whole(
-    text: str, queries: tuple[str, ...], model: str
+def test_other_scripts_reach_the_substring_fallback(
+    text: str, query: str, model: str
 ) -> None:
     handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", text)])
+    _ingest(handle, model, "d", [("c0", text)])
 
-    for query in queries:
-        response = _sparse(handle, model, query)
-        assert _found(response) == {"c0"}, query
-        assert response.warnings == [], query
+    response = _sparse(handle, model, query)
+
+    assert _found(response) == {"c0"}
+    assert [warning.code for warning in response.warnings] == ["FTS_FALLBACK"]
 
 
-def test_whitespace_is_not_indexed_as_a_token(model: str) -> None:
+@pytest.mark.parametrize(
+    ("text", "query"),
+    [
+        ("alpha beta", "zzz qqq"),
+        ("hello ， world!! 🎉 结束", "!!"),
+        ("全角逗号，与感叹号！！", "，！！"),
+        ("hello ， world!! 🎉 结束", "🎉"),
+    ],
+    ids=["whitespace-terms", "ascii-punctuation", "cjk-punctuation", "emoji"],
+)
+def test_queries_without_indexed_tokens_match_no_bm25_row(
+    text: str, query: str, client: Any, model: str
+) -> None:
     handle = _open()
-    _ingest(
-        handle,
-        model,
-        "d",
-        [_chunk("c0", "alpha beta"), _chunk("c1", "gamma delta")],
-    )
+    _ingest(handle, model, "d", [("c0", text)])
+    name = milvus_collection_name(model)
 
-    response = _sparse(handle, model, "zzz qqq")
+    hits = client.search(
+        name,
+        data=[query],
+        anns_field="sparse",
+        limit=5,
+        search_params={"metric_type": "BM25"},
+        output_fields=["chunk_id"],
+        consistency_level="Strong",
+    )[0]
 
-    assert _found(response) == set()
-    assert response.warnings == []
-
-
-def test_a_punctuation_only_query_matches_no_bm25_token(model: str) -> None:
-    handle = _open()
-    _ingest(handle, model, "d", [_chunk("c0", "全角逗号，与感叹号！！")])
-
-    response = _sparse(handle, model, "，！！")
-
-    assert _found(response) == set()
-    assert response.warnings == []
+    assert hits == [], query
 
 
 def test_an_existing_collection_of_the_old_analyzer_is_kept(
-    client: Any, model: str
+    client: Any, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    name = _create_old_collection(client, model)
+    """Patch the analyzer constant for one create, so the old schema is real."""
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            collection_handle, "_MILVUS_ANALYZER_PARAMS", {"type": "chinese"}
+        )
+        name = ensure_milvus_collection(client, model, DIM)
     assert ensure_milvus_collection(client, model, DIM) == name
     fields = {
         field["name"]: field for field in client.describe_collection(name)["fields"]
     }
-    assert fields["text"]["params"]["analyzer_params"] == '{"type":"chinese"}'
+    assert json.loads(fields["text"]["params"]["analyzer_params"]) == {
+        "type": "chinese"
+    }
 
     handle = _open()
     _ingest(
         handle,
         model,
         "d",
-        [
-            _chunk("c0", "Milvus 2.6 向量数据库"),
-            _chunk("f0", "ＭｉｌｖｕｓＤＢ ２０２６"),
-        ],
+        [("c0", "Milvus 2.6 向量数据库"), ("f0", "ＭｉｌｖｕｓＤＢ ２０２６")],
     )
     lower = _sparse(handle, model, "milvus")
     upper = _sparse(handle, model, "Milvus")
     full = _sparse(handle, model, "ＭｉｌｖｕｓＤＢ")
+    mixed = _sparse(handle, model, "Milvus ＭｉｌｖｕｓＤＢ")
 
     assert (lower.results, lower.warnings) == ([], [])
     assert (_found(upper), upper.warnings) == ({"c0"}, [])
@@ -284,50 +276,4 @@ def test_an_existing_collection_of_the_old_analyzer_is_kept(
         {"f0"},
         ["FTS_FALLBACK"],
     )
-
-
-def _create_old_collection(client: Any, model: str) -> str:
-    """Build the pre-change collection directly, before the new analyzer existed."""
-    from pymilvus import DataType, Function, FunctionType
-
-    name = milvus_collection_name(model)
-    schema = client.create_schema(auto_id=False)
-    schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True, max_length=512)
-    schema.add_field("kb_id", DataType.VARCHAR, max_length=512, is_partition_key=True)
-    schema.add_field("user_id", DataType.INT64, nullable=True)
-    for field in ("doc_id", "parse_hash", "config_hash"):
-        schema.add_field(field, DataType.VARCHAR, max_length=512)
-    schema.add_field(
-        "text",
-        DataType.VARCHAR,
-        max_length=65_535,
-        enable_analyzer=True,
-        analyzer_params={"type": "chinese"},
-    )
-    schema.add_field("sparse", DataType.SPARSE_FLOAT_VECTOR)
-    schema.add_field("dense", DataType.FLOAT_VECTOR, dim=DIM)
-    schema.add_field("visible", DataType.BOOL)
-    schema.add_field("created_at", DataType.INT64)
-    schema.add_field("metadata", DataType.JSON)
-    schema.add_function(
-        Function(
-            name="text_bm25",
-            function_type=FunctionType.BM25,
-            input_field_names=["text"],
-            output_field_names=["sparse"],
-        )
-    )
-    client.create_collection(name, schema=schema, properties={"xagent.model_id": model})
-    indexes = client.prepare_index_params()
-    indexes.add_index(
-        "dense",
-        index_type="HNSW",
-        metric_type="COSINE",
-        params={"M": 16, "efConstruction": 200},
-    )
-    indexes.add_index("sparse", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25")
-    for field in ("doc_id", "user_id"):
-        indexes.add_index(field, index_type="INVERTED")
-    client.create_index(name, indexes)
-    client.load_collection(name)
-    return name
+    assert (_found(mixed), mixed.warnings) == ({"c0"}, [])

@@ -5527,7 +5527,16 @@ _MILVUS_NOT_LOADED = 101
 # The analyzer is fixed when a collection is created, so existing ones keep theirs.
 _MILVUS_ANALYZER_PARAMS = {
     "tokenizer": "jieba",
-    "filter": ["lowercase", {"type": "regex", "expr": r"[\p{L}\p{N}]"}],
+    "filter": [
+        "lowercase",
+        {
+            "type": "regex",
+            "expr": (
+                r"[0-9A-Za-z\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}"
+                r"\x{FF10}-\x{FF19}\x{FF21}-\x{FF3A}\x{FF41}-\x{FF5A}]"
+            ),
+        },
+    ],
 }
 
 
