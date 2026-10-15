@@ -1,5 +1,6 @@
 """Unit tests for knowledge base search tool in Vibe adapters."""
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -967,6 +968,54 @@ class TestKnowledgeSearchTool:
 
         assert "Knowledge base search failed" in result.summary
         assert "kb1: boom" in result.summary
+
+    def test_argument_schema_exposes_no_min_score(self):
+        """The schema handed to the model must not advertise a dead parameter."""
+        schema = get_knowledge_search_tool().args_type().model_json_schema()
+
+        assert "min_score" not in schema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_min_score_argument_is_ignored_and_config_matches(self):
+        """Callers still passing min_score get the exact search as without it."""
+        mock_collections = [
+            CollectionInfo(
+                name="kb1",
+                total_documents=1,
+                embeddings=1,
+                document_names=["doc1.pdf"],
+            ),
+        ]
+        mock_list_result = MagicMock()
+        mock_list_result.collections = mock_collections
+        mock_search_result = _successful_pipeline_result([])
+
+        async def _search_with(extra: dict) -> tuple[Any, Any]:
+            with patch(
+                "xagent.core.tools.core.document_search.list_collections",
+                return_value=mock_list_result,
+            ):
+                with patch(
+                    "xagent.core.tools.core.document_search.run_document_search",
+                    return_value=mock_search_result,
+                ) as mock_search:
+                    tool = get_knowledge_search_tool()
+                    args = {
+                        "query": "test query",
+                        "collections": ["kb1"],
+                        "search_type": "hybrid",
+                        "top_k": 5,
+                    }
+                    args.update(extra)
+                    result = await tool.run_json_async(args)
+                    return result, mock_search.call_args
+
+        legacy_result, legacy_call = await _search_with({"min_score": 0.3})
+        plain_result, plain_call = await _search_with({})
+
+        assert legacy_result.results == plain_result.results
+        assert legacy_call[1]["config"] == plain_call[1]["config"]
+        assert "min_score" not in legacy_call[1]["config"]
 
 
 class TestKnowledgeToolsRegistration:
