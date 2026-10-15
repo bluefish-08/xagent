@@ -994,7 +994,7 @@ class TestKnowledgeSearchTool:
                     await tool.run_json_async(args)
                     return mock_search.call_args
 
-        legacy_call = await _search_with({"min_score": 0.3})
+        legacy_call = await _search_with({"min_score": 0.9})
         plain_call = await _search_with({})
 
         assert legacy_call[1]["config"] == plain_call[1]["config"]
