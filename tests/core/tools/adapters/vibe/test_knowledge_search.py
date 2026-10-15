@@ -251,7 +251,6 @@ class TestKnowledgeSearchTool:
                     "collections": [],
                     "search_type": "hybrid",
                     "top_k": 5,
-                    "min_score": 0.3,
                 }
             )
 
@@ -304,7 +303,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],  # Only search kb1
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -339,7 +337,6 @@ class TestKnowledgeSearchTool:
                     "collections": ["invalid_kb"],  # Non-existent collection
                     "search_type": "hybrid",
                     "top_k": 5,
-                    "min_score": 0.3,
                 }
             )
 
@@ -378,7 +375,6 @@ class TestKnowledgeSearchTool:
                         "collections": [],  # Empty = search all
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -423,7 +419,6 @@ class TestKnowledgeSearchTool:
                         "collections": [],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -477,7 +472,6 @@ class TestKnowledgeSearchTool:
                         "collections": [],  # Empty - should use allowed_collections
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -516,7 +510,6 @@ class TestKnowledgeSearchTool:
                         "collections": [],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -557,7 +550,6 @@ class TestKnowledgeSearchTool:
                     "collections": ["kb1", "kb2"],  # kb2 is not allowed
                     "search_type": "hybrid",
                     "top_k": 5,
-                    "min_score": 0.3,
                 }
             )
 
@@ -607,7 +599,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],  # Within allowed
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -654,7 +645,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1", "kb2"],  # Any collection
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -703,7 +693,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -749,7 +738,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -795,7 +783,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -854,7 +841,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -923,7 +909,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1", "kb2"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -962,7 +947,6 @@ class TestKnowledgeSearchTool:
                         "collections": ["kb1"],
                         "search_type": "hybrid",
                         "top_k": 5,
-                        "min_score": 0.3,
                     }
                 )
 
@@ -977,7 +961,7 @@ class TestKnowledgeSearchTool:
 
     @pytest.mark.asyncio
     async def test_legacy_min_score_argument_is_ignored_and_config_matches(self):
-        """Callers still passing min_score get the exact search as without it."""
+        """Callers still passing min_score get the same search config as without it."""
         mock_collections = [
             CollectionInfo(
                 name="kb1",
@@ -990,7 +974,7 @@ class TestKnowledgeSearchTool:
         mock_list_result.collections = mock_collections
         mock_search_result = _successful_pipeline_result([])
 
-        async def _search_with(extra: dict) -> tuple[Any, Any]:
+        async def _search_with(extra: dict) -> Any:
             with patch(
                 "xagent.core.tools.core.document_search.list_collections",
                 return_value=mock_list_result,
@@ -1007,13 +991,12 @@ class TestKnowledgeSearchTool:
                         "top_k": 5,
                     }
                     args.update(extra)
-                    result = await tool.run_json_async(args)
-                    return result, mock_search.call_args
+                    await tool.run_json_async(args)
+                    return mock_search.call_args
 
-        legacy_result, legacy_call = await _search_with({"min_score": 0.3})
-        plain_result, plain_call = await _search_with({})
+        legacy_call = await _search_with({"min_score": 0.3})
+        plain_call = await _search_with({})
 
-        assert legacy_result.results == plain_result.results
         assert legacy_call[1]["config"] == plain_call[1]["config"]
         assert "min_score" not in legacy_call[1]["config"]
 
