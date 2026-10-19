@@ -1,31 +1,25 @@
-"""Shared prompt-context value filter for every entry point."""
+"""Shared filter that turns raw values into a ``prompt_context`` value."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
+from ..schemas.agent import PromptContextFieldList
 from .file_turn import build_prompt_context_block
 
 _PRIMITIVES = (str, int, float, bool)
+_DECLARATIONS: TypeAdapter[Any] = TypeAdapter(PromptContextFieldList)
 
 
 def _declaration_limits(declarations: Any) -> dict[str, int]:
-    if not isinstance(declarations, Sequence) or isinstance(declarations, (str, bytes)):
+    try:
+        validated = _DECLARATIONS.validate_python(declarations, strict=True)
+    except ValidationError:
         return {}
-    limits: dict[str, int] = {}
-    for declaration in declarations:
-        if not isinstance(declaration, Mapping):
-            continue
-        name = declaration.get("name")
-        max_length = declaration.get("max_length")
-        if not isinstance(name, str):
-            continue
-        if not isinstance(max_length, int) or isinstance(max_length, bool):
-            continue
-        if 1 <= max_length <= 1024:
-            limits[name] = max_length
-    return limits
+    return {item.name: item.max_length for item in validated}
 
 
 def build_prompt_context_value(
@@ -42,7 +36,11 @@ def build_prompt_context_value(
         if limits is not None:
             if name not in limits:
                 continue
-            if len(str(value)) > limits[name]:
+            try:
+                length = len(str(value))
+            except ValueError:
+                continue
+            if length > limits[name]:
                 continue
         kept[name] = value
     if not kept:

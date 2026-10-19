@@ -186,7 +186,6 @@ class V1AgentTemplateCreateRequest(BaseModel):
     skills: Optional[list[str]] = None
     tool_categories: Optional[list[str]] = None
     suggested_prompts: Optional[list[str]] = None
-    prompt_context_fields: Optional[PromptContextFieldList] = None
     generate_runtime_key: bool = True
 
 

@@ -134,7 +134,7 @@ def test_downgrade_removes_column(config_at_parent_revision: Config) -> None:
     assert "prompt_context_fields" not in _columns(config_at_parent_revision)
 
 
-def test_upgrade_and_downgrade_are_idempotent(
+def test_repeated_upgrade_and_downgrade_commands_are_no_ops(
     config_at_parent_revision: Config,
 ) -> None:
     command.upgrade(config_at_parent_revision, TARGET_REVISION)

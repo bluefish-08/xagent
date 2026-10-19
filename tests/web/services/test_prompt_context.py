@@ -80,17 +80,33 @@ def test_malformed_declarations_declare_nothing() -> None:
         [{"name": "account", "max_length": "8"}],
         [{"name": "account", "max_length": 0}],
         [{"name": "account", "max_length": True}],
+        [{"name": "account", "max_length": 8.0}],
         [{"max_length": 8}],
         [None],
+        [None, {"name": "account", "max_length": 8}],
+        [{"name": "account", "max_length": 8}, {"name": "account", "max_length": 9}],
+        [{"name": f"f{i}", "max_length": 8} for i in range(32)]
+        + [{"name": "account", "max_length": 8}],
     ):
         assert build_prompt_context_value(values, declarations, signed=False) is None, (
             declarations
         )
 
 
-def test_malformed_entries_do_not_discard_valid_declarations() -> None:
+def test_invalid_declared_name_admits_nothing() -> None:
+    assert (
+        build_prompt_context_value(
+            {"bad name": "a"}, [{"name": "bad name", "max_length": 4}], signed=False
+        )
+        is None
+    )
+
+
+def test_unsigned_drops_integer_too_large_to_stringify() -> None:
     assert build_prompt_context_value(
-        {"account": "acme"}, [None, {"name": "account", "max_length": 8}], signed=False
+        {"big": 10**5000, "account": "acme"},
+        [{"name": "big", "max_length": 1024}, {"name": "account", "max_length": 8}],
+        signed=False,
     ) == {"data": {"account": "acme"}, "signed": False}
 
 
