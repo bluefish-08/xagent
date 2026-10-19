@@ -141,8 +141,7 @@ def _public_audience_trace_data(event_type: Any, data: Any) -> Any:
 def public_audience_frame(frame: Any) -> Any:
     """Project an outbound websocket frame for a widget / share guest socket.
 
-    Returns a new frame and never mutates ``frame``, which other audiences
-    receive unchanged.
+    Never mutates ``frame``: other audiences receive it unchanged.
     """
     if not isinstance(frame, dict) or frame.get("type") != "trace_event":
         return frame

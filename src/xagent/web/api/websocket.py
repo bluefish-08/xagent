@@ -1151,7 +1151,7 @@ class ConnectionManager:
         """Register an already-accepted websocket for task broadcasts.
 
         ``public_audience`` marks a widget / share guest socket: every frame
-        sent to it goes through ``public_audience_frame``.
+        this manager sends to it goes through ``public_audience_frame``.
         """
         if public_audience:
             self._public_sockets.add(websocket)
