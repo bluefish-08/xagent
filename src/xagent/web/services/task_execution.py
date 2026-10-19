@@ -159,7 +159,9 @@ from .file_reference_output_service import (
     reconcile_assistant_file_references,
 )
 from .file_turn import (
+    append_prompt_context_block,
     normalize_filename,
+    prompt_context_from_agent_config,
 )
 from .mcp_runtime import (
     MCPActorExecutionIdentity,
@@ -2573,7 +2575,12 @@ async def execute_task_background(
 
             # Execute the next turn under the same task/thread id.
             actual_task_id = str(task_id)
-            task_for_agent = llm_user_message or user_message
+            task_for_agent = append_prompt_context_block(
+                llm_user_message or user_message,
+                prompt_context_from_agent_config(
+                    getattr(snapshot.task, "agent_config", None)
+                ),
+            )
             # ``task_source`` and ``run_id`` are server-owned execution
             # identities: the first selects the MCP approval registration,
             # the second names the lease an approval is recorded under. This
