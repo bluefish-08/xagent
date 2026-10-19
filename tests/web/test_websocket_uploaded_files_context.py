@@ -7,6 +7,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from xagent.core.agent import Agent, ExecutionContext
+from xagent.core.agent.runner import AgentRunner
 from xagent.core.agent.trace import get_display_user_message
 from xagent.core.file_storage.factory import get_unscoped_file_storage
 from xagent.core.tools.core.workspace_file_tool import WorkspaceFileOperations
@@ -772,6 +774,7 @@ def test_build_prompt_context_block_escapes_backticks_inside_fence(value):
         {"data": {1: "b"}, "signed": True},
         {"data": {"x": float("nan")}, "signed": True},
         {"data": {"x": float("inf")}, "signed": True},
+        {"data": {"n": "\ud83d"}, "signed": True},
     ],
 )
 def test_build_prompt_context_block_rejects_invalid_values(value):
@@ -817,6 +820,7 @@ async def _run_execute_task_background(
     llm_user_message: str | None,
     agent_config: dict | None,
     captured: dict,
+    context: dict | None = None,
 ) -> None:
     user = _create_user(db_session, 1, "owner")
     lease = _task_lease(task_id)
@@ -841,13 +845,14 @@ async def _run_execute_task_background(
 
         async def execute_task(self, **kwargs):
             captured["agent_task"] = kwargs.get("task")
+            captured["agent_context"] = kwargs.get("context")
             return {"success": True, "output": "ok", "file_outputs": []}
 
     _wire_execute_task_background(monkeypatch, db_session, BroadcastManager())
     await execute_task_background(
         task_id=task_id,
         user_message=user_message,
-        context={},
+        context=context or {},
         agent_manager=AgentManager(),
         task_owner_user_id=int(user.id),
         llm_user_message=llm_user_message,
@@ -927,6 +932,115 @@ async def test_execute_task_background_start_message_is_not_duplicated(
 
     assert captured["agent_task"] == start_message
     assert captured["agent_task"].count(block) == 1
+    assert captured["agent_context"]["display_message"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_background_sets_display_message_when_block_appended(
+    db_session, monkeypatch
+):
+    prompt_context = {"data": {"account": "acme"}, "signed": True}
+    block = build_prompt_context_block(prompt_context)
+    assert block is not None
+    captured: dict = {}
+
+    await _run_execute_task_background(
+        db_session,
+        monkeypatch,
+        task_id=10,
+        user_message="Hello",
+        llm_user_message=None,
+        agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
+        captured=captured,
+    )
+
+    assert captured["agent_task"] == f"Hello\n\n{block}"
+    assert captured["agent_context"]["display_message"] == "Hello"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param({"display_message": "Typed"}, id="top-level"),
+        pytest.param(
+            {"request_context": {"display_user_message": "Typed"}},
+            id="request-context",
+        ),
+    ],
+)
+async def test_execute_task_background_preserves_existing_display_override(
+    db_session, monkeypatch, context
+):
+    prompt_context = {"data": {"account": "acme"}, "signed": True}
+    captured: dict = {}
+
+    await _run_execute_task_background(
+        db_session,
+        monkeypatch,
+        task_id=10,
+        user_message="Hello",
+        llm_user_message=None,
+        agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
+        captured=captured,
+        context=context,
+    )
+
+    if "display_message" in context:
+        assert captured["agent_context"]["display_message"] == "Typed"
+    else:
+        assert "display_message" not in captured["agent_context"]
+        assert captured["agent_context"]["request_context"]["display_user_message"] == (
+            "Typed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_task_background_without_block_adds_no_display_message(
+    db_session, monkeypatch
+):
+    captured: dict = {}
+
+    await _run_execute_task_background(
+        db_session,
+        monkeypatch,
+        task_id=10,
+        user_message="Hello",
+        llm_user_message="Hello\n\nenriched",
+        agent_config=None,
+        captured=captured,
+    )
+
+    assert "display_message" not in captured["agent_context"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_context_display_message_survives_real_initial_message_path(
+    db_session, monkeypatch
+):
+    prompt_context = {"data": {"account": "acme"}, "signed": True}
+    block = build_prompt_context_block(prompt_context)
+    assert block is not None
+    captured: dict = {}
+
+    await _run_execute_task_background(
+        db_session,
+        monkeypatch,
+        task_id=10,
+        user_message="Hello",
+        llm_user_message=None,
+        agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
+        captured=captured,
+    )
+
+    agent_task = captured["agent_task"]
+    assert agent_task.rstrip().endswith(block)
+    runner = AgentRunner(agent=Agent(name="writer", patterns=[]))
+    context = ExecutionContext(metadata={"request_context": captured["agent_context"]})
+    metadata = runner._initial_user_message_metadata(context)
+    context.add_user_message(agent_task, metadata=metadata)
+
+    assert get_display_user_message(context, agent_task) == "Hello"
 
 
 @pytest.mark.asyncio
@@ -961,6 +1075,7 @@ async def test_execute_existing_task_gets_prompt_context_at_run_start(
 
         async def execute_task(self, **kwargs):
             captured["agent_task"] = kwargs.get("task")
+            captured["agent_context"] = kwargs.get("context")
             return {"success": True, "output": "ok", "file_outputs": []}
 
     async def fake_schedule(**kwargs):

@@ -474,9 +474,10 @@ def build_prompt_context_block(value: Any) -> Optional[str]:
         serialized = json.dumps(
             data, ensure_ascii=False, sort_keys=True, allow_nan=False
         ).replace("`", "\\u0060")
+        size = len(serialized.encode("utf-8"))
     except ValueError:
         return None
-    if len(serialized.encode("utf-8")) > _MAX_PROMPT_CONTEXT_DATA_BYTES:
+    if size > _MAX_PROMPT_CONTEXT_DATA_BYTES:
         return None
     trust = (
         "Signed by the integrator's backend."
