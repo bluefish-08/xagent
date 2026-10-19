@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-PARENT_REVISION = "20261017_task_cmd_dispatch_class"
+PARENT_REVISION = "20261019_zendesk_marketplace"
 TARGET_REVISION = "20261018_agent_prompt_context_fields"
 
 _CREATE_USERS_TABLE = """

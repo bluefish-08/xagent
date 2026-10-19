@@ -5,7 +5,7 @@ may pass: ``[{"name": str, "max_length": int}]``. Existing rows stay NULL and
 read as no declared fields.
 
 Revision ID: 20261018_agent_prompt_context_fields
-Revises: 20261017_task_cmd_dispatch_class
+Revises: 20261019_zendesk_marketplace
 Create Date: 2026-10-18 00:00:00.000000
 
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20261018_agent_prompt_context_fields"
-down_revision: Union[str, None] = "20261017_task_cmd_dispatch_class"
+down_revision: Union[str, None] = "20261019_zendesk_marketplace"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
