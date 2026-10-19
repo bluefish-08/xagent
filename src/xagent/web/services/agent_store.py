@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -43,6 +45,7 @@ _AGENT_UPDATE_FIELDS = {
     "skills",
     "tool_categories",
     "suggested_prompts",
+    "prompt_context_fields",
     "logo_url",
     "status",
     "widget_enabled",
@@ -138,6 +141,23 @@ def clean_tool_categories(categories: Any) -> list[str]:
     return normalize_tool_categories(categories) or []
 
 
+def clean_prompt_context_fields(value: Any) -> list[dict[str, Any]]:
+    """Coerce a stored declaration list for response payloads.
+
+    ``ensure_list`` is string-oriented and would flatten the declaration
+    mappings, so this keeps mapping entries (and tolerates a JSON string).
+    """
+    parsed = value
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except ValueError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, Mapping)]
+
+
 class AgentStore:
     """Owns Agent reads/writes that participate in hot-path cache policy."""
 
@@ -159,6 +179,9 @@ class AgentStore:
             "skills": ensure_list(agent.skills) or [],
             "tool_categories": clean_tool_categories(agent.tool_categories),
             "suggested_prompts": ensure_list(agent.suggested_prompts) or [],
+            "prompt_context_fields": clean_prompt_context_fields(
+                agent.prompt_context_fields
+            ),
             "logo_url": agent.logo_url,
             "status": agent.status.value,
             "visibility": agent.visibility,
@@ -320,6 +343,7 @@ class AgentStore:
         skills: list[str] | None = None,
         tool_categories: list[str] | None = None,
         suggested_prompts: list[str] | None = None,
+        prompt_context_fields: list[dict[str, Any]] | None = None,
         origin: str = AgentOrigin.USER.value,
         status: AgentStatus = AgentStatus.DRAFT,
         published_at: datetime | None = None,
@@ -342,6 +366,7 @@ class AgentStore:
             skills=skills,
             tool_categories=tool_categories,
             suggested_prompts=suggested_prompts,
+            prompt_context_fields=prompt_context_fields,
             origin=origin,
             status=status,
             published_at=published_at,
@@ -374,6 +399,7 @@ class AgentStore:
         skills: list[str] | None = None,
         tool_categories: list[str] | None = None,
         suggested_prompts: list[str] | None = None,
+        prompt_context_fields: list[dict[str, Any]] | None = None,
         origin: str = AgentOrigin.USER.value,
         status: AgentStatus = AgentStatus.DRAFT,
         published_at: datetime | None = None,
@@ -412,6 +438,7 @@ class AgentStore:
             skills=skills or [],
             tool_categories=normalize_tool_categories(tool_categories),
             suggested_prompts=suggested_prompts or [],
+            prompt_context_fields=prompt_context_fields or [],
             origin=origin,
             status=status,
             published_at=published_at,

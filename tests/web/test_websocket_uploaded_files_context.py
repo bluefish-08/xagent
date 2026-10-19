@@ -89,6 +89,7 @@ def _create_task(
     status: TaskStatus = TaskStatus.PENDING,
     runner_id: str | None = None,
     run_id: str | None = None,
+    execution_mode: str | None = None,
 ) -> Task:
     if agent_config is None and selected_file_ids is not None:
         agent_config = {"selected_file_ids": selected_file_ids}
@@ -98,6 +99,7 @@ def _create_task(
         title=f"task-{task_id}",
         description="task",
         status=status,
+        execution_mode=execution_mode,
         lease_attempt_id="test-attempt" if runner_id is not None else None,
         runner_id=runner_id,
         run_id=run_id,
@@ -115,6 +117,7 @@ def _task_setup_snapshot(
     status: TaskStatus,
     run_id: str | None = None,
     agent_config: dict | None = None,
+    execution_mode: str | None = None,
 ) -> TaskSetupSnapshot:
     """Build the detached runtime input consumed by the background runner."""
     return TaskSetupSnapshot(
@@ -127,7 +130,7 @@ def _task_setup_snapshot(
             agent_config=agent_config,
             model_name=None,
             compact_model_name=None,
-            execution_mode=None,
+            execution_mode=execution_mode,
             agent_type="standard",
             run_id=run_id,
         ),
@@ -821,6 +824,7 @@ async def _run_execute_task_background(
     agent_config: dict | None,
     captured: dict,
     context: dict | None = None,
+    execution_mode: str | None = None,
 ) -> None:
     user = _create_user(db_session, 1, "owner")
     lease = _task_lease(task_id)
@@ -832,6 +836,7 @@ async def _run_execute_task_background(
         agent_config=agent_config,
         runner_id=lease.runner_id,
         run_id=lease.run_id,
+        execution_mode=execution_mode,
     )
     db_session.commit()
 
@@ -862,6 +867,7 @@ async def _run_execute_task_background(
             status=TaskStatus.RUNNING,
             run_id=lease.run_id,
             agent_config=agent_config,
+            execution_mode=execution_mode,
         ),
         expected_run_id=lease.run_id,
         task_lease=lease,
@@ -870,8 +876,9 @@ async def _run_execute_task_background(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution_mode", ["flash", "balanced", "think", "auto"])
 async def test_execute_task_background_appends_prompt_context_to_agent_task_only(
-    db_session, monkeypatch
+    db_session, monkeypatch, execution_mode
 ):
     prompt_context = {"data": {"account": "acme"}, "signed": True}
     block = build_prompt_context_block(prompt_context)
@@ -886,9 +893,62 @@ async def test_execute_task_background_appends_prompt_context_to_agent_task_only
         llm_user_message=None,
         agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
         captured=captured,
+        execution_mode=execution_mode,
     )
 
     assert captured["agent_task"] == f"Hello\n\n{block}"
+    assert captured["agent_task"].endswith(block)
+
+
+@pytest.mark.asyncio
+async def test_execute_task_background_logs_field_names_and_signed_only(
+    db_session, monkeypatch, caplog
+):
+    prompt_context = {"data": {"zeta": "secret-value", "alpha": 7}, "signed": False}
+
+    with caplog.at_level("INFO", logger="xagent.web.services.task_execution"):
+        await _run_execute_task_background(
+            db_session,
+            monkeypatch,
+            task_id=10,
+            user_message="Hello",
+            llm_user_message=None,
+            agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
+            captured={},
+        )
+
+    records = [
+        record.getMessage()
+        for record in caplog.records
+        if "prompt_context" in record.getMessage()
+    ]
+    assert len(records) == 1
+    message = records[0]
+    assert "10" in message
+    assert "['alpha', 'zeta']" in message
+    assert "signed=False" in message
+    assert "secret-value" not in message
+    assert "alpha" in message
+
+
+@pytest.mark.asyncio
+async def test_execute_task_background_without_injected_block_logs_nothing(
+    db_session, monkeypatch, caplog
+):
+    with caplog.at_level("INFO", logger="xagent.web.services.task_execution"):
+        await _run_execute_task_background(
+            db_session,
+            monkeypatch,
+            task_id=10,
+            user_message="Hello",
+            llm_user_message=None,
+            agent_config=None,
+            captured={},
+        )
+
+    assert not [
+        record for record in caplog.records if "prompt_context" in record.getMessage()
+    ]
 
 
 @pytest.mark.asyncio
