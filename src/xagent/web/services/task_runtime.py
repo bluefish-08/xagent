@@ -85,7 +85,7 @@ TASK_RUNTIME_BINDINGS_AGENT_CONFIG_KEY = "runtime_extension_bindings"
 # same string.
 SELECTED_FILE_IDS_AGENT_CONFIG_KEY = "selected_file_ids"
 # Reserved server-owned ``tasks.agent_config`` key whose reference data is added
-# to task-run execution messages, never to the persisted transcript.
+# to orchestrated-run and websocket execution messages, never to the transcript.
 PROMPT_CONTEXT_AGENT_CONFIG_KEY = "prompt_context"
 # Durable server-owned marker for tasks whose MCP tool set must be built with a
 # trusted actor credential namespace. Only the literal boolean ``True`` marks a
