@@ -1,9 +1,9 @@
-"""Widget and share guests must never receive LLM input in trace frames.
+"""Widget and share guests must never receive LLM input in LLM trace frames.
 
 ``llm_call_start`` carries ``context_preview`` (the last messages sent to the
 model: system prompt, uploaded-file context, the execution message). These
-tests drive the real guest websocket endpoints and assert the canaries never
-reach the guest, on both the live broadcast and the historical replay path.
+tests put canaries in that payload, drive the real guest websocket endpoints,
+and assert no frame the guest receives carries them, live and on replay.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def test_live_llm_trace_frame_reaches_guest_without_llm_input(
         await manager.broadcast_to_task({"type": DONE_TYPE}, task_id)
 
     with client.websocket_connect(url) as ws:
-        ws.receive_text()  # first replay frame: the socket is registered by now
+        _frames_until(ws, lambda f: True)  # the socket is registered by now
         ws.portal.call(emit)
         frames = _frames_until(ws, lambda f: f.get("type") == DONE_TYPE)
 

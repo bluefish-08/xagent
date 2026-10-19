@@ -135,7 +135,9 @@ def _public_audience_trace_data(event_type: Any, data: Any) -> Any:
         return data
     if not isinstance(data, dict):
         return {}
-    return {key: data[key] for key in PUBLIC_AUDIENCE_LLM_FIELDS if key in data}
+    return {
+        key: value for key, value in data.items() if key in PUBLIC_AUDIENCE_LLM_FIELDS
+    }
 
 
 def public_audience_frame(frame: Any) -> Any:
