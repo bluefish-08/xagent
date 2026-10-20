@@ -1,8 +1,8 @@
 """add prompt_context_fields to agents
 
 The column holds the declared prompt-context fields the unsigned widget entry
-may pass: ``[{"name": str, "max_length": int}]``. Existing rows stay NULL and
-read as no declared fields.
+may pass: ``[{"name": str, "max_length": int, "description": str | null}]``.
+Existing rows stay NULL and read as no declared fields.
 
 Revision ID: 20261018_agent_prompt_context_fields
 Revises: 20261019_zendesk_marketplace

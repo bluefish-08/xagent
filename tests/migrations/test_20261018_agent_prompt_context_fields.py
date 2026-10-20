@@ -134,12 +134,30 @@ def test_downgrade_removes_column(config_at_parent_revision: Config) -> None:
     assert "prompt_context_fields" not in _columns(config_at_parent_revision)
 
 
-def test_repeated_upgrade_and_downgrade_commands_are_no_ops(
+def test_upgrade_keeps_column_already_present(
     config_at_parent_revision: Config,
 ) -> None:
+    engine = create_engine(config_at_parent_revision.get_main_option("sqlalchemy.url"))
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE agents ADD COLUMN prompt_context_fields JSON"))
+    engine.dispose()
+
     command.upgrade(config_at_parent_revision, TARGET_REVISION)
-    command.upgrade(config_at_parent_revision, TARGET_REVISION)
-    command.downgrade(config_at_parent_revision, PARENT_REVISION)
+
+    assert "prompt_context_fields" in _columns(config_at_parent_revision)
+
+
+def test_downgrade_succeeds_when_column_already_absent(
+    config_at_parent_revision: Config,
+) -> None:
+    engine = create_engine(config_at_parent_revision.get_main_option("sqlalchemy.url"))
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE alembic_version SET version_num = :target"),
+            {"target": TARGET_REVISION},
+        )
+    engine.dispose()
+
     command.downgrade(config_at_parent_revision, PARENT_REVISION)
 
     assert "prompt_context_fields" not in _columns(config_at_parent_revision)

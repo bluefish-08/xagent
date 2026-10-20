@@ -335,7 +335,9 @@ def test_detail_cache_without_prompt_context_fields_reloads_from_db(db):
         fresh = store.get_agent_response(int(u.id), int(agent.id))
 
         assert fresh is not None
-        assert fresh["prompt_context_fields"] == [{"name": "tier", "max_length": 8}]
+        assert fresh["prompt_context_fields"] == [
+            {"name": "tier", "max_length": 8, "description": None}
+        ]
     finally:
         set_cache_backend_for_testing(None)
 

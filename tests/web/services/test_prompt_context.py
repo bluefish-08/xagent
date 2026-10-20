@@ -122,6 +122,23 @@ def test_nan_returns_none() -> None:
     assert build_prompt_context_value({"a": float("nan")}, [], signed=True) is None
 
 
+_DECLARED_A_B = [{"name": "a", "max_length": 8}, {"name": "b", "max_length": 8}]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "\ud83d"])
+@pytest.mark.parametrize("signed", [False, True])
+def test_unserializable_value_drops_only_that_field(bad, signed) -> None:
+    assert build_prompt_context_value(
+        {"a": "ok", "b": bad}, _DECLARED_A_B, signed=signed
+    ) == {"data": {"a": "ok"}, "signed": signed}
+
+
+def test_signed_nan_drops_only_that_field() -> None:
+    assert build_prompt_context_value(
+        {"a": "ok", "b": float("nan")}, _DECLARED_A_B, signed=True
+    ) == {"data": {"a": "ok"}, "signed": True}
+
+
 @pytest.mark.parametrize("value", ["text", 1, 0, -2.5, True, False])
 def test_signed_keeps_each_primitive_kind(value: str | int | float | bool) -> None:
     assert build_prompt_context_value({"a": value}, [], signed=True) == {

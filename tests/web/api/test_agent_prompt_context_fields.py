@@ -2,7 +2,10 @@
 
 import pytest
 
-from .conftest import _admin_headers, client
+from xagent.web.models.agent import Agent
+from xagent.web.services.hot_path_cache import invalidate_agent_cache
+
+from .conftest import _admin_headers, _direct_db_session, client
 
 pytestmark = pytest.mark.usefixtures("_test_db")
 
@@ -60,6 +63,60 @@ def test_update_replaces_declarations_and_omission_keeps_them() -> None:
     ]
 
 
+def test_update_with_empty_list_clears_declarations() -> None:
+    headers = _admin_headers()
+    agent_id = _create(headers, "clearable", _FIELDS)["id"]
+
+    cleared = client.put(
+        f"/api/agents/{agent_id}",
+        headers=headers,
+        json={"prompt_context_fields": []},
+    )
+
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["prompt_context_fields"] == []
+
+
+def test_update_with_null_leaves_declarations_unchanged() -> None:
+    headers = _admin_headers()
+    agent_id = _create(headers, "null-keeps", _FIELDS)["id"]
+
+    kept = client.put(
+        f"/api/agents/{agent_id}",
+        headers=headers,
+        json={"prompt_context_fields": None},
+    )
+
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["prompt_context_fields"] == _FIELDS
+
+
+def test_malformed_stored_declarations_read_as_empty() -> None:
+    headers = _admin_headers()
+    created = _create(headers, "malformed-stored", _FIELDS)
+    agent_id = created["id"]
+    db = _direct_db_session()
+    try:
+        agent = db.get(Agent, agent_id)
+        agent.prompt_context_fields = [{"name": "no-max-length"}]
+        db.commit()
+    finally:
+        db.close()
+    invalidate_agent_cache(int(created["user_id"]), agent_id)
+
+    fetched = client.get(f"/api/agents/{agent_id}", headers=headers)
+    updated = client.put(
+        f"/api/agents/{agent_id}",
+        headers=headers,
+        json={"description": "changed"},
+    )
+
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["prompt_context_fields"] == []
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["prompt_context_fields"] == []
+
+
 @pytest.mark.parametrize(
     "fields",
     [
@@ -97,6 +154,18 @@ def test_update_replaces_declarations_and_omission_keeps_them() -> None:
         pytest.param(
             [{"name": "backtick-desc", "max_length": 8, "description": "a`b"}],
             id="description-backtick",
+        ),
+        pytest.param(
+            [{"name": "ls-desc", "max_length": 8, "description": "a\u2028b"}],
+            id="description-line-separator",
+        ),
+        pytest.param(
+            [{"name": "ps-desc", "max_length": 8, "description": "a\u2029b"}],
+            id="description-paragraph-separator",
+        ),
+        pytest.param(
+            [{"name": "bidi-desc", "max_length": 8, "description": "a\u202eb"}],
+            id="description-bidi",
         ),
     ],
 )

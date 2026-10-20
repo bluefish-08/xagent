@@ -10,6 +10,20 @@ PROMPT_CONTEXT_MAX_FIELDS = 32
 PROMPT_CONTEXT_MIN_LENGTH = 1
 PROMPT_CONTEXT_MAX_LENGTH = 1024
 PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH = 200
+PROMPT_CONTEXT_PRIMITIVES = (str, int, float, bool)
+_UNSAFE_DESCRIPTION_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def is_valid_prompt_context_description(value: str) -> bool:
+    """True when a description renders on one line of the meanings block."""
+    return (
+        0 < len(value) <= PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH
+        and "`" not in value
+        and not any(
+            unicodedata.category(char) in _UNSAFE_DESCRIPTION_CATEGORIES
+            for char in value
+        )
+    )
 
 
 def _normalize_description(value: Optional[str]) -> Optional[str]:
@@ -23,9 +37,12 @@ def _normalize_description(value: Optional[str]) -> Optional[str]:
             "description must be at most "
             f"{PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH} characters"
         )
-    # Control characters (newline, tab, ...) would break the line format.
-    if "`" in value or any(unicodedata.category(char) == "Cc" for char in value):
-        raise ValueError("description cannot contain backticks or control characters")
+    # Backticks and control/line-break/bidi characters break the block format.
+    if not is_valid_prompt_context_description(value):
+        raise ValueError(
+            "description cannot contain backticks, control, line-break or bidi "
+            "characters"
+        )
     return value
 
 

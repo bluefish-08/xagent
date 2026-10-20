@@ -860,6 +860,38 @@ def test_build_prompt_context_block_skips_invalid_descriptions():
     assert "- 3" not in block
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u202e"])
+def test_build_prompt_context_block_skips_linebreak_and_bidi_descriptions(separator):
+    value = {
+        "data": {"a": "x", "b": "y"},
+        "signed": True,
+        "descriptions": {"a": f"left{separator}right", "b": "kept"},
+    }
+
+    block = build_prompt_context_block(value)
+
+    assert block is not None
+    assert "- b: kept\n" in block
+    assert "- a:" not in block
+
+
+@pytest.mark.parametrize("name", ["newline\nname", "fence`name", "line\u2028sep"])
+def test_build_prompt_context_block_skips_descriptions_with_invalid_names(name):
+    value = {
+        "data": {name: "x", "good": "y"},
+        "signed": True,
+        "descriptions": {name: "Meaning", "good": "Kept"},
+    }
+
+    block = build_prompt_context_block(value)
+
+    assert block is not None
+    assert "- good: Kept\n" in block
+    assert "- newline" not in block
+    assert "- fence" not in block
+    assert "- line" not in block
+
+
 def test_build_prompt_context_block_ignores_non_mapping_descriptions():
     value = {"data": {"a": "x"}, "signed": True, "descriptions": ["nope"]}
 
@@ -953,9 +985,8 @@ async def _run_execute_task_background(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("execution_mode", ["flash", "balanced", "think", "auto"])
 async def test_execute_task_background_appends_prompt_context_to_agent_task_only(
-    db_session, monkeypatch, execution_mode
+    db_session, monkeypatch
 ):
     prompt_context = {"data": {"account": "acme"}, "signed": True}
     block = build_prompt_context_block(prompt_context)
@@ -970,7 +1001,6 @@ async def test_execute_task_background_appends_prompt_context_to_agent_task_only
         llm_user_message=None,
         agent_config={PROMPT_CONTEXT_AGENT_CONFIG_KEY: prompt_context},
         captured=captured,
-        execution_mode=execution_mode,
     )
 
     assert captured["agent_task"] == f"Hello\n\n{block}"

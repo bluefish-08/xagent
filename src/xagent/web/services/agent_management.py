@@ -935,11 +935,7 @@ def _agent_response_snapshot(payload: dict[str, Any]) -> AgentResponseSnapshot:
         skills=tuple(payload.get("skills") or ()),
         tool_categories=tuple(payload.get("tool_categories") or ()),
         suggested_prompts=tuple(payload.get("suggested_prompts") or ()),
-        prompt_context_fields=tuple(
-            dict(item)
-            for item in payload.get("prompt_context_fields") or ()
-            if isinstance(item, dict)
-        ),
+        prompt_context_fields=tuple(payload.get("prompt_context_fields") or ()),
         logo_url=cast("str | None", payload.get("logo_url")),
         status=str(payload["status"]),
         visibility=str(payload["visibility"]),

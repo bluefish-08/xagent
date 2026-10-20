@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, cast
 
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
 from ...core.tools.adapters.vibe.base import AGENT_CONFIG_UNASSIGNABLE_CATEGORIES
@@ -15,6 +15,7 @@ from ..models.agent import Agent, AgentOrigin, AgentStatus
 from ..models.agent_api_key import AgentApiKey
 from ..models.database import release_db_connection_if_clean
 from ..models.task import Task
+from ..schemas.agent import PromptContextFieldList
 from .agent_team_scope import (
     get_agent_team_scope,
     owned_agent_clause,
@@ -141,11 +142,15 @@ def clean_tool_categories(categories: Any) -> list[str]:
     return normalize_tool_categories(categories) or []
 
 
+_PROMPT_CONTEXT_FIELDS: TypeAdapter[Any] = TypeAdapter(PromptContextFieldList)
+
+
 def clean_prompt_context_fields(value: Any) -> list[dict[str, Any]]:
     """Coerce a stored declaration list for response payloads.
 
     ``ensure_list`` is string-oriented and would flatten the declaration
     mappings, so this keeps mapping entries (and tolerates a JSON string).
+    Malformed stored values fail closed to no declarations.
     """
     parsed = value
     if isinstance(parsed, str):
@@ -153,9 +158,11 @@ def clean_prompt_context_fields(value: Any) -> list[dict[str, Any]]:
             parsed = json.loads(parsed)
         except ValueError:
             return []
-    if not isinstance(parsed, list):
+    try:
+        validated = _PROMPT_CONTEXT_FIELDS.validate_python(parsed, strict=True)
+    except ValidationError:
         return []
-    return [dict(item) for item in parsed if isinstance(item, Mapping)]
+    return [dict(item) for item in validated]
 
 
 class AgentStore:

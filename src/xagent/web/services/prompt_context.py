@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any, cast
 
 from pydantic import TypeAdapter, ValidationError
 
-from ..schemas.agent import PromptContextFieldList
+from ..schemas.agent import PROMPT_CONTEXT_PRIMITIVES, PromptContextFieldList
 from .file_turn import build_prompt_context_block
 
-_PRIMITIVES = (str, int, float, bool)
 _DECLARATIONS: TypeAdapter[Any] = TypeAdapter(PromptContextFieldList)
 
 
@@ -23,35 +23,24 @@ def _validated_declarations(declarations: Any) -> list[Any] | None:
         return None
 
 
-def _declaration_limits(declarations: Any) -> dict[str, int]:
-    validated = _validated_declarations(declarations)
-    if validated is None:
-        return {}
-    return {item.name: item.max_length for item in validated}
-
-
-def _declaration_descriptions(declarations: Any) -> dict[str, str]:
-    validated = _validated_declarations(declarations)
-    if validated is None:
-        return {}
-    return {
-        item.name: item.description
-        for item in validated
-        if item.description is not None
-    }
-
-
 def build_prompt_context_value(
     values: Any, declarations: Any, *, signed: bool
 ) -> dict[str, Any] | None:
     """Filter raw values into a prompt_context value, or None if none survive."""
     if not isinstance(values, Mapping):
         return None
-    limits = None if signed else _declaration_limits(declarations)
-    descriptions = _declaration_descriptions(declarations)
+    validated = _validated_declarations(declarations) or []
+    limits = None if signed else {item.name: item.max_length for item in validated}
+    descriptions = {
+        item.name: item.description
+        for item in validated
+        if item.description is not None
+    }
     kept: dict[str, Any] = {}
     for name, value in values.items():
-        if not isinstance(name, str) or not isinstance(value, _PRIMITIVES):
+        if not isinstance(name, str) or not isinstance(
+            value, PROMPT_CONTEXT_PRIMITIVES
+        ):
             continue
         if limits is not None:
             if name not in limits:
@@ -62,6 +51,10 @@ def build_prompt_context_value(
                 continue
             if length > limits[name]:
                 continue
+        try:
+            json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (ValueError, UnicodeEncodeError):
+            continue
         kept[name] = value
     if not kept:
         return None
