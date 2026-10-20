@@ -5,15 +5,25 @@ export const PROMPT_CONTEXT_MAX_FIELDS = 32
 export const PROMPT_CONTEXT_MIN_LENGTH = 1
 export const PROMPT_CONTEXT_MAX_LENGTH = 1024
 export const PROMPT_CONTEXT_DEFAULT_LENGTH = 256
+export const PROMPT_CONTEXT_DESCRIPTION_MAX_LENGTH = 200
+const DESCRIPTION_FORBIDDEN_CHARS = /[\u0000-\u001f\u007f-\u009f`]/
+// Python str.strip()'s whitespace set; JS trim() differs (\x1c-\x1f, \x85 vs \ufeff).
+const PY_STRIP = /^[\t-\r\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g
+
+function stripDescription(value: string): string {
+  return value.replace(PY_STRIP, "")
+}
 
 export interface PromptContextFieldDeclaration {
   name: string
   max_length: number
+  description: string | null
 }
 
 export interface PromptContextFieldDraft {
   name: string
   maxLength: string
+  description: string
 }
 
 export type PromptContextFieldNameError = "required" | "invalid" | "duplicate"
@@ -21,6 +31,7 @@ export type PromptContextFieldNameError = "required" | "invalid" | "duplicate"
 export interface PromptContextFieldRowErrors {
   name?: PromptContextFieldNameError
   maxLength?: "invalid"
+  description?: "tooLong" | "invalidChars"
 }
 
 export interface PromptContextFieldsValidation {
@@ -30,16 +41,16 @@ export interface PromptContextFieldsValidation {
 }
 
 export function newPromptContextFieldDraft(): PromptContextFieldDraft {
-  return { name: "", maxLength: String(PROMPT_CONTEXT_DEFAULT_LENGTH) }
+  return { name: "", maxLength: String(PROMPT_CONTEXT_DEFAULT_LENGTH), description: "" }
 }
 
 export function draftsFromDeclarations(value: unknown): PromptContextFieldDraft[] {
   if (!Array.isArray(value)) return []
   return value.flatMap((item) => {
     if (!item || typeof item !== "object") return []
-    const { name, max_length } = item as Record<string, unknown>
+    const { name, max_length, description } = item as Record<string, unknown>
     if (typeof name !== "string" || typeof max_length !== "number") return []
-    return [{ name, maxLength: String(max_length) }]
+    return [{ name, maxLength: String(max_length), description: typeof description === "string" ? description : "" }]
   })
 }
 
@@ -67,11 +78,15 @@ export function validatePromptContextFields(
     else if (!PROMPT_CONTEXT_FIELD_NAME_PATTERN.test(name)) errors.name = "invalid"
     else if ((counts.get(name) ?? 0) > 1) errors.name = "duplicate"
     if (parseMaxLength(draft.maxLength) === null) errors.maxLength = "invalid"
+    const description = stripDescription(draft.description)
+    if (DESCRIPTION_FORBIDDEN_CHARS.test(description)) errors.description = "invalidChars"
+    // Code points, not UTF-16 units, to match the server's len().
+    else if ([...description].length > PROMPT_CONTEXT_DESCRIPTION_MAX_LENGTH) errors.description = "tooLong"
     return errors
   })
 
   const tooMany = drafts.length > PROMPT_CONTEXT_MAX_FIELDS
-  const valid = !tooMany && rows.every((row) => !row.name && !row.maxLength)
+  const valid = !tooMany && rows.every((row) => !row.name && !row.maxLength && !row.description)
   return { rows, tooMany, valid }
 }
 
@@ -82,9 +97,12 @@ export function toPromptContextFieldsPayload(
   return drafts.map((draft) => ({
     name: draft.name.trim(),
     max_length: Number(draft.maxLength.trim()),
+    description: stripDescription(draft.description) || null,
   }))
 }
 
 export function promptContextFieldsKey(drafts: PromptContextFieldDraft[]): string {
-  return JSON.stringify(drafts.map((draft) => [draft.name.trim(), draft.maxLength.trim()]))
+  return JSON.stringify(
+    drafts.map((draft) => [draft.name.trim(), draft.maxLength.trim(), stripDescription(draft.description)]),
+  )
 }

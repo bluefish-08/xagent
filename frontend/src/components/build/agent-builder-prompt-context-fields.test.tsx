@@ -137,7 +137,7 @@ import { AgentBuilder } from "./agent-builder"
 const AGENT_ID = "5"
 const FIELDS = "builds.configForm.promptContextFields"
 
-type Declaration = { name: string; max_length: number }
+type Declaration = { name: string; max_length: number; description?: string | null }
 
 const DEFAULT_MODEL = {
   id: 10,
@@ -227,6 +227,8 @@ function installApi(
 const updateButton = () => screen.getByText("builds.editor.header.update")
 const nameInputs = () => screen.queryAllByLabelText(`${FIELDS}.nameLabel`) as HTMLInputElement[]
 const lengthInputs = () => screen.queryAllByLabelText(`${FIELDS}.maxLengthLabel`) as HTMLInputElement[]
+const descriptionInputs = () =>
+  screen.queryAllByLabelText(`${FIELDS}.descriptionLabel`) as HTMLInputElement[]
 const addButton = () => screen.getByRole("button", { name: `${FIELDS}.add` })
 const deleteButtons = () => screen.queryAllByRole("button", { name: `${FIELDS}.delete` })
 const callsWith = (method: string) =>
@@ -292,7 +294,7 @@ describe("AgentBuilder prompt context fields", () => {
     fireEvent.click(updateButton())
 
     await waitFor(() => expect(putCalls()).toHaveLength(1))
-    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "order_id", max_length: 64 }])
+    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "order_id", max_length: 64, description: null }])
     await waitFor(() => expect(updateButton()).toBeDisabled())
     expect(nameInputs()[0].value).toBe("order_id")
   })
@@ -311,7 +313,7 @@ describe("AgentBuilder prompt context fields", () => {
     fireEvent.click(updateButton())
 
     await waitFor(() => expect(putCalls()).toHaveLength(1))
-    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "customer.tier", max_length: 48 }])
+    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "customer.tier", max_length: 48, description: null }])
   })
 
   it("saves an empty list when every declaration is removed", async () => {
@@ -323,6 +325,39 @@ describe("AgentBuilder prompt context fields", () => {
 
     await waitFor(() => expect(putCalls()).toHaveLength(1))
     expect(lastPutBody().prompt_context_fields).toEqual([])
+  })
+
+  it("loads a description and saves an edited one", async () => {
+    installApi([{ name: "customer.tier", max_length: 32, description: "Membership level" }])
+    await renderLoaded()
+
+    expect(descriptionInputs().map((input) => input.value)).toEqual(["Membership level"])
+    expect(updateButton()).toBeDisabled()
+
+    fireEvent.change(descriptionInputs()[0], { target: { value: " Membership level, VIP or standard " } })
+    fireEvent.click(updateButton())
+
+    await waitFor(() => expect(putCalls()).toHaveLength(1))
+    expect(lastPutBody().prompt_context_fields).toEqual([
+      { name: "customer.tier", max_length: 32, description: "Membership level, VIP or standard" },
+    ])
+  })
+
+  it("shows a description error inline and does not save", async () => {
+    installApi([{ name: "customer.tier", max_length: 32 }])
+    await renderLoaded()
+
+    fireEvent.change(descriptionInputs()[0], { target: { value: "use `tier`" } })
+    expect(screen.getByText(`${FIELDS}.errors.description.invalidChars`)).toBeInTheDocument()
+    expect(descriptionInputs()[0]).toHaveClass("border-destructive")
+
+    fireEvent.change(descriptionInputs()[0], { target: { value: "a".repeat(201) } })
+    expect(screen.getByText(`${FIELDS}.errors.description.tooLong`)).toBeInTheDocument()
+
+    fireEvent.click(updateButton())
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith(`${FIELDS}.invalid`, expect.anything()))
+    expect(putCalls()).toHaveLength(0)
   })
 
   it("shows format, duplicate and range errors inline and does not save", async () => {
@@ -413,7 +448,7 @@ describe("AgentBuilder prompt context fields", () => {
 
     await waitFor(() => expect(postCalls()).toHaveLength(1))
     const body = JSON.parse((postCalls()[0][1] as { body: string }).body)
-    expect(body.prompt_context_fields).toEqual([{ name: "order_id", max_length: 64 }])
+    expect(body.prompt_context_fields).toEqual([{ name: "order_id", max_length: 64, description: null }])
   })
 
   it("keeps unsaved declarations when the assistant creates the agent", async () => {
@@ -432,7 +467,7 @@ describe("AgentBuilder prompt context fields", () => {
     fireEvent.click(updateButton())
 
     await waitFor(() => expect(putCalls()).toHaveLength(1))
-    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "order_id", max_length: 256 }])
+    expect(lastPutBody().prompt_context_fields).toEqual([{ name: "order_id", max_length: 256, description: null }])
   })
 
   it("keeps rows edited while the assistant-created agent loads", async () => {
