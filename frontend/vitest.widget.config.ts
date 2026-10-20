@@ -218,6 +218,7 @@ export default defineConfig({
       "src/lib/remark-currency-safe-math.test.ts",
       "src/lib/prompt-context-fields.test.ts",
       "src/components/build/agent-builder-prompt-context-fields.test.tsx",
+      "src/lib/widget-parent-message.test.ts",
     ],
   },
 })
