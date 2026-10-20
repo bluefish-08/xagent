@@ -128,3 +128,39 @@ def test_signed_keeps_each_primitive_kind(value: str | int | float | bool) -> No
         "data": {"a": value},
         "signed": True,
     }
+
+
+_DESCRIBED = [
+    {"name": "account", "max_length": 8, "description": "Customer account slug"},
+    {"name": "tier", "max_length": 8, "description": "Customer membership level"},
+    {"name": "unused", "max_length": 8, "description": "Not passed"},
+]
+
+
+def test_descriptions_carry_only_for_kept_fields() -> None:
+    assert build_prompt_context_value(
+        {"account": "acme", "other": "x"}, _DESCRIBED, signed=False
+    ) == {
+        "data": {"account": "acme"},
+        "signed": False,
+        "descriptions": {"account": "Customer account slug"},
+    }
+
+
+def test_descriptions_omitted_when_declaration_has_none() -> None:
+    assert build_prompt_context_value(
+        {"account": "acme"}, DECLARATIONS, signed=False
+    ) == {"data": {"account": "acme"}, "signed": False}
+
+
+def test_signed_descriptions_cover_declared_kept_names_only() -> None:
+    assert build_prompt_context_value(
+        {"account": "acme", "tier": 3, "extra": "x"}, _DESCRIBED, signed=True
+    ) == {
+        "data": {"account": "acme", "tier": 3, "extra": "x"},
+        "signed": True,
+        "descriptions": {
+            "account": "Customer account slug",
+            "tier": "Customer membership level",
+        },
+    }

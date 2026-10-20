@@ -1,24 +1,49 @@
 """Shared agent request/response schema pieces."""
 
-from typing import Annotated, List
+import unicodedata
+from typing import Annotated, List, Optional
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, StrictInt
 
 PROMPT_CONTEXT_FIELD_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"
 PROMPT_CONTEXT_MAX_FIELDS = 32
 PROMPT_CONTEXT_MIN_LENGTH = 1
 PROMPT_CONTEXT_MAX_LENGTH = 1024
+PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH = 200
+
+
+def _normalize_description(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH:
+        raise ValueError(
+            "description must be at most "
+            f"{PROMPT_CONTEXT_MAX_DESCRIPTION_LENGTH} characters"
+        )
+    # Control characters (newline, tab, ...) would break the line format.
+    if "`" in value or any(unicodedata.category(char) == "Cc" for char in value):
+        raise ValueError("description cannot contain backticks or control characters")
+    return value
+
+
+PromptContextFieldDescription = Annotated[
+    Optional[str], AfterValidator(_normalize_description)
+]
 
 
 class PromptContextFieldDeclaration(BaseModel):
     """One field the unsigned widget entry may pass to prompt context."""
 
     name: str = Field(..., pattern=PROMPT_CONTEXT_FIELD_NAME_PATTERN)
-    max_length: int = Field(
+    max_length: StrictInt = Field(
         ...,
         ge=PROMPT_CONTEXT_MIN_LENGTH,
         le=PROMPT_CONTEXT_MAX_LENGTH,
     )
+    description: PromptContextFieldDescription = None
 
 
 def _unique_field_names(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -14,12 +14,31 @@ _PRIMITIVES = (str, int, float, bool)
 _DECLARATIONS: TypeAdapter[Any] = TypeAdapter(PromptContextFieldList)
 
 
-def _declaration_limits(declarations: Any) -> dict[str, int]:
+def _validated_declarations(declarations: Any) -> list[Any] | None:
     try:
-        validated = _DECLARATIONS.validate_python(declarations, strict=True)
+        return cast(
+            "list[Any]", _DECLARATIONS.validate_python(declarations, strict=True)
+        )
     except ValidationError:
+        return None
+
+
+def _declaration_limits(declarations: Any) -> dict[str, int]:
+    validated = _validated_declarations(declarations)
+    if validated is None:
         return {}
     return {item.name: item.max_length for item in validated}
+
+
+def _declaration_descriptions(declarations: Any) -> dict[str, str]:
+    validated = _validated_declarations(declarations)
+    if validated is None:
+        return {}
+    return {
+        item.name: item.description
+        for item in validated
+        if item.description is not None
+    }
 
 
 def build_prompt_context_value(
@@ -29,6 +48,7 @@ def build_prompt_context_value(
     if not isinstance(values, Mapping):
         return None
     limits = None if signed else _declaration_limits(declarations)
+    descriptions = _declaration_descriptions(declarations)
     kept: dict[str, Any] = {}
     for name, value in values.items():
         if not isinstance(name, str) or not isinstance(value, _PRIMITIVES):
@@ -45,5 +65,9 @@ def build_prompt_context_value(
         kept[name] = value
     if not kept:
         return None
-    result = {"data": kept, "signed": signed}
+    result: dict[str, Any] = {"data": kept, "signed": signed}
+    # Signed values stay unrestricted; declarations only supply meanings.
+    meanings = {name: descriptions[name] for name in kept if name in descriptions}
+    if meanings:
+        result["descriptions"] = meanings
     return result if build_prompt_context_block(result) is not None else None

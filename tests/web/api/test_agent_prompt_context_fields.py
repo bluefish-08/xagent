@@ -7,8 +7,12 @@ from .conftest import _admin_headers, client
 pytestmark = pytest.mark.usefixtures("_test_db")
 
 _FIELDS = [
-    {"name": "account_id", "max_length": 64},
-    {"name": "plan.tier", "max_length": 16},
+    {
+        "name": "account_id",
+        "max_length": 64,
+        "description": "Customer account identifier",
+    },
+    {"name": "plan.tier", "max_length": 16, "description": "Current plan name"},
 ]
 
 
@@ -52,7 +56,7 @@ def test_update_replaces_declarations_and_omission_keeps_them() -> None:
     )
     assert replaced.status_code == 200, replaced.text
     assert replaced.json()["prompt_context_fields"] == [
-        {"name": "only", "max_length": 1}
+        {"name": "only", "max_length": 1, "description": None}
     ]
 
 
@@ -75,6 +79,25 @@ def test_update_replaces_declarations_and_omission_keeps_them() -> None:
         ),
         pytest.param([{"name": "zero", "max_length": 0}], id="max-length-zero"),
         pytest.param([{"name": "huge", "max_length": 1025}], id="max-length-1025"),
+        pytest.param([{"name": "str", "max_length": "8"}], id="max-length-str"),
+        pytest.param([{"name": "bool", "max_length": True}], id="max-length-bool"),
+        pytest.param([{"name": "float", "max_length": 8.0}], id="max-length-float"),
+        pytest.param(
+            [{"name": "long-desc", "max_length": 8, "description": "x" * 201}],
+            id="description-201",
+        ),
+        pytest.param(
+            [{"name": "newline-desc", "max_length": 8, "description": "a\nb"}],
+            id="description-newline",
+        ),
+        pytest.param(
+            [{"name": "tab-desc", "max_length": 8, "description": "a\tb"}],
+            id="description-tab",
+        ),
+        pytest.param(
+            [{"name": "backtick-desc", "max_length": 8, "description": "a`b"}],
+            id="description-backtick",
+        ),
     ],
 )
 def test_invalid_declarations_are_422(fields) -> None:
@@ -86,6 +109,54 @@ def test_invalid_declarations_are_422(fields) -> None:
     )
 
     assert response.status_code == 422, response.text
+
+
+def test_description_is_echoed_stripped() -> None:
+    headers = _admin_headers()
+    created = _create(
+        headers,
+        "described",
+        [{"name": "tier", "max_length": 8, "description": "  Customer tier  "}],
+    )
+
+    assert created["prompt_context_fields"] == [
+        {"name": "tier", "max_length": 8, "description": "Customer tier"}
+    ]
+
+
+def test_blank_description_becomes_null() -> None:
+    headers = _admin_headers()
+    created = _create(
+        headers,
+        "blank-desc",
+        [{"name": "tier", "max_length": 8, "description": "   "}],
+    )
+
+    assert created["prompt_context_fields"] == [
+        {"name": "tier", "max_length": 8, "description": None}
+    ]
+
+
+def test_absent_description_echoes_null() -> None:
+    headers = _admin_headers()
+    created = _create(headers, "no-desc", [{"name": "tier", "max_length": 8}])
+
+    assert created["prompt_context_fields"] == [
+        {"name": "tier", "max_length": 8, "description": None}
+    ]
+
+
+def test_update_rejects_lax_max_length() -> None:
+    headers = _admin_headers()
+    agent_id = _create(headers, "strict-update")["id"]
+
+    for value in ("8", True, 8.0):
+        response = client.put(
+            f"/api/agents/{agent_id}",
+            headers=headers,
+            json={"prompt_context_fields": [{"name": "x", "max_length": value}]},
+        )
+        assert response.status_code == 422, (value, response.text)
 
 
 def test_update_invalid_declarations_are_422() -> None:
@@ -104,8 +175,8 @@ def test_update_invalid_declarations_are_422() -> None:
 def test_boundary_declarations_are_accepted() -> None:
     headers = _admin_headers()
     fields = [
-        {"name": "A" + "b" * 63, "max_length": 1024},
-        {"name": "_", "max_length": 1},
+        {"name": "A" + "b" * 63, "max_length": 1024, "description": "x" * 200},
+        {"name": "_", "max_length": 1, "description": None},
     ]
     created = _create(headers, "boundary", fields)
 

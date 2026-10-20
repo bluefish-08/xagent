@@ -262,7 +262,8 @@ class AgentStore:
             bool(team_scope and team_scope.is_team_admin),
         )
         cached = cache_get(cache_key)
-        if isinstance(cached, dict):
+        # Entries written before prompt_context_fields shipped are stale.
+        if isinstance(cached, dict) and "prompt_context_fields" in cached:
             return cached
 
         agent = self.get_owned_agent(user_id, agent_id, team_scope)
