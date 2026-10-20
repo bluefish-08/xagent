@@ -281,6 +281,18 @@ describe("AgentBuilder prompt context fields", () => {
     expect(updateButton()).toBeDisabled()
   })
 
+  it("stays clean when an edit spells the stored value differently", async () => {
+    installApi([{ name: "customer.tier", max_length: 7, description: "Membership level" }])
+    await renderLoaded()
+
+    fireEvent.change(lengthInputs()[0], { target: { value: "007" } })
+    fireEvent.change(descriptionInputs()[0], { target: { value: " Membership level " } })
+    expect(updateButton()).toBeDisabled()
+
+    fireEvent.change(lengthInputs()[0], { target: { value: "7.0" } })
+    expect(updateButton()).not.toBeDisabled()
+  })
+
   it("adds a field and saves it", async () => {
     installApi([])
     await renderLoaded()

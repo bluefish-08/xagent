@@ -103,6 +103,11 @@ export function toPromptContextFieldsPayload(
 
 export function promptContextFieldsKey(drafts: PromptContextFieldDraft[]): string {
   return JSON.stringify(
-    drafts.map((draft) => [draft.name.trim(), draft.maxLength.trim(), stripDescription(draft.description)]),
+    drafts.map((draft) => [
+      draft.name.trim(),
+      // Valid limits compare as the number the server stores; invalid drafts keep their raw text.
+      parseMaxLength(draft.maxLength) ?? draft.maxLength,
+      stripDescription(draft.description),
+    ]),
   )
 }

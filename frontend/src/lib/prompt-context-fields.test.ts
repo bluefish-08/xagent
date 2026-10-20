@@ -137,9 +137,16 @@ describe("draftsFromDeclarations", () => {
 })
 
 describe("promptContextFieldsKey", () => {
+  it("compares valid limits by value and invalid ones by their text", () => {
+    expect(promptContextFieldsKey([draft("a", "007")])).toBe(promptContextFieldsKey([draft("a", "7")]))
+    expect(promptContextFieldsKey([draft("a", "07.0")])).not.toBe(promptContextFieldsKey([draft("a", "7")]))
+    expect(promptContextFieldsKey([draft("a", "1e3")])).not.toBe(promptContextFieldsKey([draft("a", "1E3")]))
+  })
+
   it("ignores surrounding whitespace but keeps order significant", () => {
     expect(promptContextFieldsKey([draft(" a ", " 5", " d ")])).toBe(promptContextFieldsKey([draft("a", "5", "d")]))
     expect(promptContextFieldsKey([draft("a", "5", "d")])).not.toBe(promptContextFieldsKey([draft("a", "5")]))
+    expect(promptContextFieldsKey([draft("a", "5", "\u001fd\u0085")])).toBe(promptContextFieldsKey([draft("a", "5", "d")]))
     expect(promptContextFieldsKey([draft("a"), draft("b")])).not.toBe(
       promptContextFieldsKey([draft("b"), draft("a")]),
     )
