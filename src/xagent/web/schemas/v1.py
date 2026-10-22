@@ -103,6 +103,14 @@ class CreateTaskRequest(BaseModel):
         ),
     )
     message: MessageBody = Field(..., description="First user message of the task.")
+    prompt_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Trusted per-turn reference data for the agent. Values are "
+            "passed through without the agent's field whitelist and stamped "
+            "signed; the serialized data must fit in 4096 UTF-8 bytes."
+        ),
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
@@ -355,6 +363,17 @@ class AppendMessageRequest(BaseModel):
         ),
     )
     message: MessageBody = Field(..., description="Next user message in the task.")
+    prompt_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Trusted reference data for this turn. A non-empty object fully "
+            "replaces the context stored on the task; an empty object clears "
+            "it so later turns carry none; omitted or null replays the stored "
+            "value. Values are passed through without the agent's field "
+            "whitelist and stamped signed; the serialized data must fit in "
+            "4096 UTF-8 bytes."
+        ),
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Free-form correlation data passed through unchanged.",
