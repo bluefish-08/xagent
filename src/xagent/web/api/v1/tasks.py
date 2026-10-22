@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, NoReturn, Optional, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import TypeAdapter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -64,6 +64,15 @@ from ...services.managed_file_ref import (
     DurableStorageOperationError,
 )
 from ...services.task_auto_resume import TerminalView, status_only_terminal_view
+from ...services.task_delete import (
+    TaskDeleteBusy,
+    TaskDeleteSnapshot,
+    TaskExtensionCleanupRejected,
+    commit_task_deletion,
+    finish_task_deletion,
+    task_delete_snapshot,
+    task_is_active_for_delete,
+)
 from ...services.task_execution_controller import TaskControlState
 from ...services.task_interaction_read import get_pending_interaction_question
 from ...services.task_orchestrator import (
@@ -502,6 +511,32 @@ def _resolve_task_or_404(task_id: int, principal: ApiKeyPrincipal, db: Session) 
         _raise_start_rejection(exc)
 
 
+# A task an executor may still be writing to is refused rather than deleted
+# out from under it; a finished/paused/waiting task is deletable.
+def _raise_if_task_active_for_delete(task: Task) -> None:
+    if task_is_active_for_delete(task):
+        raise V1ApiError(
+            V1ErrorCode.TASK_BUSY,
+            409,
+            message=(
+                "Task is currently running; wait for it to finish before deleting it."
+            ),
+        )
+
+
+def _load_task_delete_snapshot(
+    task_id: int,
+    principal: ApiKeyPrincipal,
+) -> TaskDeleteSnapshot:
+    """Authorize and guard one task inside a worker-owned short Session."""
+
+    SessionLocal = get_session_local()
+    with SessionLocal() as db:
+        task = _resolve_task_or_404(task_id, principal, db)
+        _raise_if_task_active_for_delete(task)
+        return task_delete_snapshot(task)
+
+
 def _load_task_info_snapshot(
     task_id: int,
     principal: ApiKeyPrincipal,
@@ -920,6 +955,80 @@ async def reply_to_waiting_task(
     from .task_reply import reply_to_task
 
     return await reply_to_task(task_id=task_id, request=request, principal=principal)
+
+
+@router.delete("/chat/tasks/{task_id}", status_code=204)
+async def delete_chat_task(
+    task_id: int,
+    principal: ApiKeyPrincipal = Depends(get_principal_from_api_key),
+) -> Response:
+    """Delete one SDK task and everything tied to it.
+
+    The task is resolved through the same ownership rule as
+    ``GET /v1/chat/tasks/{task_id}``: a task of another agent, another
+    user's agent, or a nonexistent id all answer the same 404. A task
+    still executing answers 409 ``task_busy`` instead of being deleted
+    out from under its executor; wait for it to finish (or cancel it via
+    the UI) and retry.
+
+    The owned rows (trace events/blobs/checkpoints, chat messages, DAG
+    executions, interaction requests, connector runtime context, runtime
+    extension bindings), the uploaded-file bindings, and the workspace
+    are removed through the same helper the Web UI delete uses. External
+    cleanup that fails is recorded as a retryable obligation, never a
+    half state reported as success: the response's
+    ``X-Xagent-*-Cleanup-Pending`` headers say whether anything is still
+    owed. Deleting twice answers 404.
+
+    Raises:
+        V1ApiError 401: missing / invalid / revoked key.
+        V1ApiError 404: task missing or not owned by the calling key.
+        V1ApiError 409: ``task_busy`` -- still running, retry after it ends.
+        V1ApiError 410: ``task_expired`` for a retention-expired task.
+        V1ApiError 503: a bound runtime extension could not release its
+            state; the task was not deleted.
+    """
+    snapshot = await run_db_io_cancellation_safe(
+        lambda: _load_task_delete_snapshot(task_id, principal)
+    )
+    try:
+        committed = await commit_task_deletion(snapshot, refuse_if_active=True)
+    except TaskDeleteBusy as exc:
+        raise V1ApiError(
+            V1ErrorCode.TASK_BUSY,
+            409,
+            message=(
+                "Task became active during deletion; wait for it to finish "
+                "before deleting it."
+            ),
+        ) from exc
+    except TaskExtensionCleanupRejected as exc:
+        raise V1ApiError(
+            V1ErrorCode.INTERNAL_ERROR,
+            503,
+            message="Runtime extension cleanup failed; the task was not deleted.",
+        ) from exc
+    if committed is None:
+        raise V1ApiError(V1ErrorCode.TASK_NOT_FOUND, 404)
+
+    # The rows are committed as gone; stop any in-process executor before the
+    # workspace is reclaimed. Cross-worker executors were refused above.
+    from ...services.task_execution import background_task_manager
+
+    await background_task_manager.cancel_task(task_id, timeout_seconds=0.05)
+    outcome = await finish_task_deletion(committed)
+    await record_key_usage(str(principal.key.key_prefix))
+    return Response(
+        status_code=204,
+        headers={
+            "X-Xagent-Workspace-Cleanup-Pending": (
+                "true" if outcome.workspace_cleanup_pending else "false"
+            ),
+            "X-Xagent-External-Cleanup-Pending": (
+                "true" if outcome.external_cleanup_pending else "false"
+            ),
+        },
+    )
 
 
 @router.get("/chat/tasks/{task_id}", response_model=TaskInfoResponse)
