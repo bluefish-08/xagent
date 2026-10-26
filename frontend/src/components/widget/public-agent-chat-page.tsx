@@ -6,6 +6,7 @@ import { ChatStartScreen } from "@/components/chat/ChatStartScreen"
 import { TaskConversationPanel } from "@/components/task/task-conversation-panel"
 import { iconButtonClassName, WidgetChromeControls } from "@/components/widget/widget-chrome-controls"
 import { AppProvider, useApp, type AppProviderTransportConfig } from "@/contexts/app-context-chat"
+import { useWidgetInitialMessage } from "@/hooks/use-widget-initial-message"
 import { resolveReportedTimezone } from "@/hooks/use-websocket"
 import { usePublicFileAccessPolicy } from "@/contexts/file-access-context"
 import { useI18n } from "@/contexts/i18n-context"
@@ -377,6 +378,12 @@ function PublicConversationContent({
       setIsBootstrappingTask(false)
     }
   }, [createTaskError, state.taskId])
+
+  useWidgetInitialMessage({
+    ready: authMode === "widget" && hasResolvedStoredTask,
+    hasConversation: state.taskId !== null,
+    onMessage: (message) => handleSend(message, undefined, []),
+  })
 
   const resolvedAgentName = state.currentTask?.agentName || agentName || t("widgetChat.title")
   const resolvedAgentLogo = state.currentTask?.agentLogoUrl || agentLogo || null

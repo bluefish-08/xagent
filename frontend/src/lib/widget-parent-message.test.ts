@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { requestPromptContext } from "./widget-parent-message"
+import { listenForInitialMessage, requestPromptContext } from "./widget-parent-message"
 
 function stubParent() {
   const postMessage = vi.fn()
@@ -113,5 +113,74 @@ describe("requestPromptContext", () => {
 
     await expect(requestPromptContext()).resolves.toBeNull()
     expect(postMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe("listenForInitialMessage", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  function send(
+    value: unknown,
+    envelope: Record<string, unknown> = {},
+    source: MessageEventSource = window.parent as unknown as MessageEventSource,
+  ) {
+    window.dispatchEvent(new MessageEvent("message", {
+      data: { xagent: true, v: 1, type: "initial_message", value, ...envelope },
+      source,
+    }))
+  }
+
+  it("requests the message and delivers the trimmed reply", () => {
+    const postMessage = stubParent()
+    const onMessage = vi.fn()
+    const stop = listenForInitialMessage(onMessage)
+
+    expect(postMessage).toHaveBeenCalledWith(
+      { xagent: true, v: 1, type: "initial_message_request" },
+      "*",
+    )
+    send("  hi there ")
+
+    expect(onMessage).toHaveBeenCalledWith("hi there")
+    stop()
+  })
+
+  it("ignores other sources, wrong envelopes and unusable values", () => {
+    stubParent()
+    const onMessage = vi.fn()
+    const stop = listenForInitialMessage(onMessage)
+
+    send("hi", {}, window as unknown as MessageEventSource)
+    send("hi", { xagent: false })
+    send("hi", { v: 2 })
+    send("hi", { type: "prompt_context" })
+    send("   ")
+    send(42)
+    send("x".repeat(2001))
+
+    expect(onMessage).not.toHaveBeenCalled()
+    stop()
+  })
+
+  it("stops listening after cleanup", () => {
+    stubParent()
+    const onMessage = vi.fn()
+    listenForInitialMessage(onMessage)()
+
+    send("hi")
+
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it("does nothing on a direct visit", () => {
+    const post = vi.spyOn(window, "postMessage")
+    const onMessage = vi.fn()
+
+    listenForInitialMessage(onMessage)()
+
+    expect(post).not.toHaveBeenCalled()
   })
 })

@@ -14,6 +14,10 @@ export type WidgetParentMessageType =
   | "widget_expand"
   | "widget_collapse"
   | "prompt_context_request"
+  | "initial_message_request"
+
+// Must stay in step with MAX_INITIAL_MESSAGE_LENGTH in public/widget.js.
+export const MAX_INITIAL_MESSAGE_LENGTH = 2000
 
 export function postToParentWidget(type: WidgetParentMessageType): void {
   // A direct (non-embedded) visit to this page has window.parent === window;
@@ -85,5 +89,32 @@ export function listenForWidgetHostMessage(
     onMessage()
   }
   window.addEventListener("message", handleMessage)
+  return () => window.removeEventListener("message", handleMessage)
+}
+
+// Unlike prompt_context, the parent may answer long after the request: it
+// holds the message until the visitor first opens the panel. No timeout, so
+// the caller owns the lifetime through the returned cleanup.
+export function listenForInitialMessage(
+  onMessage: (message: string) => void,
+): () => void {
+  if (window.parent === window) return () => undefined
+  const handleMessage = (event: MessageEvent) => {
+    if (event.source !== window.parent) return
+    const data: unknown = event.data
+    if (
+      !data || typeof data !== "object"
+      || (data as Record<string, unknown>).xagent !== true
+      || (data as Record<string, unknown>).v !== 1
+      || (data as Record<string, unknown>).type !== "initial_message"
+    ) return
+    const value = (data as Record<string, unknown>).value
+    if (typeof value !== "string") return
+    const message = value.trim()
+    if (!message || message.length > MAX_INITIAL_MESSAGE_LENGTH) return
+    onMessage(message)
+  }
+  window.addEventListener("message", handleMessage)
+  postToParentWidget("initial_message_request")
   return () => window.removeEventListener("message", handleMessage)
 }
