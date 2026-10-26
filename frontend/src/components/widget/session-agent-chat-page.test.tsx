@@ -935,6 +935,19 @@ describe("SessionAgentChatPage", () => {
       expect(app.sendMessage).toHaveBeenCalledTimes(1)
     })
 
+    it("does not send after a first message queued before the connection opened", () => {
+      const post = stubParent()
+      setBridge("active", activeSession())
+      app.isConnected = false
+      app.isMessageDeliveryPending = true
+      const { rerender } = render(<SessionAgentChatPage />)
+
+      app.isConnected = true
+      rerender(<SessionAgentChatPage />)
+
+      expect(initialRequests(post)).toEqual([])
+    })
+
     it("waits for an open connection before asking", () => {
       const post = stubParent()
       setBridge("active", activeSession())

@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useCallback, useEffect, useMemo, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Loader2, MessageSquarePlus } from "lucide-react"
 import { ChatStartScreen } from "@/components/chat/ChatStartScreen"
 import { TaskConversationPanel } from "@/components/task/task-conversation-panel"
@@ -160,6 +160,7 @@ function PublicConversationContent({
   const [draftFiles, setDraftFiles] = useState<File[]>([])
   const [isBootstrappingTask, setIsBootstrappingTask] = useState(false)
   const [hasResolvedStoredTask, setHasResolvedStoredTask] = useState(false)
+  const openingTaskCreatedRef = useRef(false)
   const storageKey = authMode === "share"
     // Scope the persisted task-id by guest_id (decoded from the guest JWT) so a
     // task minted under one guest is never read back under another's token — a
@@ -340,6 +341,7 @@ function PublicConversationContent({
       }
 
       setTaskId(newTaskId, { navigate: false })
+      openingTaskCreatedRef.current = true
       dispatch({
         type: "SET_CURRENT_TASK",
         payload: {
@@ -382,9 +384,13 @@ function PublicConversationContent({
   useWidgetInitialMessage({
     ready: authMode === "widget" && hasResolvedStoredTask,
     hasConversation: state.taskId !== null,
-    onMessage: (message) => handleSend(message, undefined, []).catch(() => {
-      setCreateTaskError((current) => current ?? t("widgetChat.messages.error_init"))
-    }),
+    onMessage: (message) => {
+      openingTaskCreatedRef.current = false
+      return handleSend(message, undefined, []).catch(() => {
+        if (openingTaskCreatedRef.current) return
+        setCreateTaskError((current) => current ?? t("widgetChat.messages.error_init"))
+      })
+    },
   })
 
   const resolvedAgentName = state.currentTask?.agentName || agentName || t("widgetChat.title")

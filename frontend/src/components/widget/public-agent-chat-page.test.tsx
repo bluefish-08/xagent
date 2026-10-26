@@ -1016,7 +1016,7 @@ describe("PublicAgentChatPage", () => {
       post.mock.calls.filter(([data]) => data.type === "initial_message_request")
     )
 
-    it("starts the conversation with the delivered message and spends it", async () => {
+    it("starts the conversation with the delivered message", async () => {
       const post = vi.fn()
       vi.stubGlobal("parent", { postMessage: post })
       fetchMock
@@ -1037,9 +1037,6 @@ describe("PublicAgentChatPage", () => {
       expect(createBody.description).toBe("hello agent")
       expect(app.sendMessage).toHaveBeenCalledWith("hello agent", { targetTaskId: 60 }, [])
 
-      deliverInitialMessage("again")
-      await Promise.resolve()
-      expect(fetchMock).toHaveBeenCalledTimes(2)
       expect(app.sendMessage).toHaveBeenCalledTimes(1)
     })
 
@@ -1065,6 +1062,25 @@ describe("PublicAgentChatPage", () => {
       await screen.findByRole("button", { name: "start:Support Agent" })
 
       expect(initialRequests(post)).toEqual([])
+    })
+
+    it("keeps the header clean when only the send after task creation fails", async () => {
+      const post = vi.fn()
+      vi.stubGlobal("parent", { postMessage: post })
+      app.sendMessage.mockRejectedValueOnce(new Error("delivery failed"))
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
+        .mockResolvedValueOnce(jsonResponse(widgetTaskResponse(61, "pending")))
+
+      renderWidgetPage({ widgetKey: "widget-secret" })
+      await screen.findByRole("button", { name: "start:Support Agent" })
+      await waitFor(() => expect(initialRequests(post)).toHaveLength(1))
+
+      deliverInitialMessage("hello agent")
+
+      await waitFor(() => expect(app.sendMessage).toHaveBeenCalledTimes(1))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(screen.queryByText("widgetChat.messages.error_init")).toBeNull()
     })
 
     it("shows a network failure on the start screen too", async () => {

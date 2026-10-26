@@ -168,7 +168,8 @@ function SessionConversationContent({
 
   useWidgetInitialMessage({
     ready: status === "active" && agent !== null && isConnected,
-    hasConversation: state.taskId !== null,
+    // A first send queued during the initial connect has no task yet.
+    hasConversation: state.taskId !== null || isMessageDeliveryPending,
     onMessage: (message) => handleStartMessage(message, []),
   })
 

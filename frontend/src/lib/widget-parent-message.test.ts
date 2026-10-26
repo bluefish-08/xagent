@@ -204,9 +204,13 @@ describe("requestInitialMessage", () => {
   it("does nothing on a direct visit", () => {
     const post = vi.spyOn(window, "postMessage")
     const onMessage = vi.fn()
+    const stop = requestInitialMessage(onMessage)
 
-    requestInitialMessage(onMessage)()
+    // Here window.parent === window, so the source check alone would accept this.
+    send("hi", {}, window as unknown as MessageEventSource)
 
     expect(post).not.toHaveBeenCalled()
+    expect(onMessage).not.toHaveBeenCalled()
+    stop()
   })
 })
