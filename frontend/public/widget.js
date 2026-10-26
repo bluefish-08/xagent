@@ -1057,12 +1057,13 @@
   // The iframe loads with the page while the panel is still hidden, so the
   // message waits for the first open: sending on load would start an agent
   // run for every page view, including visitors who never open the chat.
+  // The value is host-authored: never fill it from URL parameters or other
+  // visitor-controlled input, since in Session mode it runs as a signed turn.
   function deliverInitialMessage() {
     if (torndown || initialMessageDelivered || !initialMessageRequested || !hasOpened || !iframe.contentWindow) return;
     initialMessageRequested = false;
     var value = readInitialMessage();
     if (value === null) return;
-    initialMessageDelivered = true;
     iframe.contentWindow.postMessage({ xagent: true, v: 1, type: 'initial_message', value: value }, host);
   }
 
@@ -1109,6 +1110,10 @@
     } else if (data.type === 'initial_message_request') {
       initialMessageRequested = true;
       deliverInitialMessage();
+    } else if (data.type === 'initial_message_ack') {
+      // Only the iframe's own acknowledgement ends delivery: a post made while
+      // its listener was down (not ready, reloading) is simply answered again.
+      initialMessageDelivered = true;
     }
   }
   window.addEventListener('message', onChromeMessage);

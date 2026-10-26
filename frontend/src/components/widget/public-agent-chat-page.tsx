@@ -382,7 +382,9 @@ function PublicConversationContent({
   useWidgetInitialMessage({
     ready: authMode === "widget" && hasResolvedStoredTask,
     hasConversation: state.taskId !== null,
-    onMessage: (message) => handleSend(message, undefined, []),
+    onMessage: (message) => handleSend(message, undefined, []).catch(() => {
+      setCreateTaskError((current) => current ?? t("widgetChat.messages.error_init"))
+    }),
   })
 
   const resolvedAgentName = state.currentTask?.agentName || agentName || t("widgetChat.title")

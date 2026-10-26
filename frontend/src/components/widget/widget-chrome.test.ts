@@ -106,7 +106,7 @@ describe("widget chrome", () => {
     // corresponding control (a same-origin, same-source, correctly-enveloped
     // message the host would now just ignore) with no compiler error to
     // catch it.
-    const messageTypes: WidgetParentMessageType[] = ["widget_close", "widget_expand", "widget_collapse", "prompt_context_request", "initial_message_request"]
+    const messageTypes: WidgetParentMessageType[] = ["widget_close", "widget_expand", "widget_collapse", "prompt_context_request", "initial_message_request", "initial_message_ack"]
     for (const messageType of messageTypes) {
       expect(widgetScript).toContain(`data.type === '${messageType}'`)
     }
@@ -291,15 +291,36 @@ describe("widget chrome", () => {
       expect(postToIframe).toHaveBeenCalledWith(initialMessage("hello agent"), HOST)
     })
 
-    it("delivers once per page load, not on reopen or a repeated request", () => {
+    it("answers a repeated request until the iframe acknowledges, then never again", () => {
       const postToIframe = runWithInitialMessage()
+      fromIframe("initial_message_request")
+      // The iframe's listener went away (not ready) before the first open.
       fabEl()?.click()
+      expect(postToIframe).toHaveBeenCalledTimes(1)
+
+      // Closing and reopening does not repost without a new request.
+      fabEl()?.click()
+      fabEl()?.click()
+      expect(postToIframe).toHaveBeenCalledTimes(1)
+
+      fromIframe("initial_message_request")
+      expect(postToIframe).toHaveBeenCalledTimes(2)
+
+      fromIframe("initial_message_ack")
       fromIframe("initial_message_request")
       fabEl()?.click()
       fabEl()?.click()
+      expect(postToIframe).toHaveBeenCalledTimes(2)
+    })
+
+    it("accepts a message of exactly the length cap", () => {
+      const message = "x".repeat(2000)
+      const postToIframe = runWithInitialMessage(message)
+      fabEl()?.click()
+
       fromIframe("initial_message_request")
 
-      expect(postToIframe).toHaveBeenCalledTimes(1)
+      expect(postToIframe).toHaveBeenCalledWith(initialMessage(message), HOST)
     })
 
     it("keeps the length cap in step with the iframe side", () => {

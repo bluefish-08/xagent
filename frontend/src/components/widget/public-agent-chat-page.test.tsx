@@ -1067,6 +1067,23 @@ describe("PublicAgentChatPage", () => {
       expect(initialRequests(post)).toEqual([])
     })
 
+    it("shows a network failure on the start screen too", async () => {
+      const post = vi.fn()
+      vi.stubGlobal("parent", { postMessage: post })
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(successfulAgentAuth))
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+
+      renderWidgetPage({ widgetKey: "widget-secret" })
+      await screen.findByRole("button", { name: "start:Support Agent" })
+      await waitFor(() => expect(initialRequests(post)).toHaveLength(1))
+
+      deliverInitialMessage("hello agent")
+
+      expect(await screen.findByText("widgetChat.messages.error_init")).toBeInTheDocument()
+      expect(app.sendMessage).not.toHaveBeenCalled()
+    })
+
     it("shows the failure on the start screen and does not retry", async () => {
       const post = vi.fn()
       vi.stubGlobal("parent", { postMessage: post })

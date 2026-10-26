@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react"
-import { listenForInitialMessage } from "@/lib/widget-parent-message"
+import { requestInitialMessage } from "@/lib/widget-parent-message"
 
 interface UseWidgetInitialMessageOptions {
   // True once the page knows whether a conversation already exists.
@@ -8,9 +8,9 @@ interface UseWidgetInitialMessageOptions {
   onMessage: (message: string) => void | Promise<void>
 }
 
-// One shot per mount (widget.js answers once per page load): any conversation
-// seen here, restored or started by the visitor, spends it for good, so
-// "start new conversation" never replays the host's message.
+// One shot per mount (widget.js stops answering after the first ack): any
+// conversation seen here, restored or started by the visitor, spends it for
+// good, so "start new conversation" never replays the host's message.
 export function useWidgetInitialMessage({
   ready,
   hasConversation,
@@ -26,7 +26,7 @@ export function useWidgetInitialMessage({
 
   useEffect(() => {
     if (!ready || hasConversation || consumedRef.current) return
-    const stop = listenForInitialMessage((message) => {
+    const stop = requestInitialMessage((message) => {
       consumedRef.current = true
       stop()
       void Promise.resolve(onMessageRef.current(message)).catch(() => undefined)

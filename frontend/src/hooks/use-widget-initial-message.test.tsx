@@ -71,6 +71,24 @@ describe("useWidgetInitialMessage", () => {
     expect(onMessage).toHaveBeenCalledTimes(1)
   })
 
+  it("asks again when readiness returns before any delivery", () => {
+    const post = stubParent()
+    const onMessage = vi.fn()
+    const { rerender } = renderHook(
+      (props) => useWidgetInitialMessage(props),
+      { initialProps: { ready: true, hasConversation: false, onMessage } },
+    )
+
+    rerender({ ready: false, hasConversation: false, onMessage })
+    deliver("lost while not ready")
+    expect(onMessage).not.toHaveBeenCalled()
+
+    rerender({ ready: true, hasConversation: false, onMessage })
+    expect(requests(post)).toHaveLength(2)
+    deliver("hello")
+    expect(onMessage).toHaveBeenCalledWith("hello")
+  })
+
   it("swallows a rejected handler", async () => {
     stubParent()
     const onMessage = vi.fn().mockRejectedValue(new Error("send failed"))
