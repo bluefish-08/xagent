@@ -753,6 +753,41 @@ def test_active_task_is_refused_before_extension_state_is_released(
     assert instance.deleted == []
 
 
+def test_activity_after_the_unlocked_check_refuses_but_the_release_has_happened(
+    provider: tuple[str, _Provider],
+) -> None:
+    """Pins the known window: the locked re-check still refuses the delete,
+    but provider state was released before it ran."""
+    name, instance = provider
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    _bind_extension(task_id, name)
+    flipped = {"done": False}
+
+    def _flip_status_then_capture(*args, **kwargs):
+        if not flipped["done"]:
+            flipped["done"] = True
+            _force_status(task_id, TaskStatus.RUNNING)
+        return capture_workspace_cleanup_target_best_effort(*args, **kwargs)
+
+    with patch(
+        "xagent.web.services.task_delete.capture_workspace_cleanup_target_best_effort",
+        side_effect=_flip_status_then_capture,
+    ):
+        response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert flipped["done"] is True
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "task_busy"
+    assert instance.deleted == [task_id]
+    db = _direct_db_session()
+    try:
+        assert db.query(Task).filter(Task.id == task_id).count() == 1
+    finally:
+        db.close()
+
+
 def test_delete_detaches_and_closes_the_tasks_websocket_connections() -> None:
     from xagent.web.api.websocket import manager as websocket_manager
 

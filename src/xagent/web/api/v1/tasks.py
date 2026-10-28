@@ -19,6 +19,7 @@ which is also used by the WebSocket UI path so both transports share
 one state machine.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1020,20 +1021,26 @@ async def delete_chat_task(
         raise V1ApiError(V1ErrorCode.TASK_NOT_FOUND, 404)
 
     # The rows are committed as gone: detach this task's WebSocket
-    # connections and stop any in-process executor before the workspace is
-    # reclaimed, as the Web UI delete does. The guards above refuse a task
-    # that is leased or has queued work, so this only reaches executors that
-    # started in the window the pre-checks cannot close.
+    # connections before the next await, then stop any in-process executor and
+    # close the sockets before the workspace is reclaimed, as the Web UI
+    # delete does. The guards above refuse a task that is leased or has queued
+    # work, so this only reaches executors that started in the window the
+    # pre-checks cannot close. The cleanup runs as its own task and is
+    # shielded, so a cancelled request cannot leave sockets detached but open.
     from ...services.task_execution import background_task_manager
     from ..websocket import manager as websocket_manager
 
     connections = websocket_manager.detach_task_connections(task_id)
-    await background_task_manager.cancel_task(task_id, timeout_seconds=0.05)
-    for connection in connections:
-        try:
-            await connection.close()
-        except Exception:
-            logger.warning("Failed to close WebSocket connection", exc_info=True)
+
+    async def _cleanup_runtime_state() -> None:
+        await background_task_manager.cancel_task(task_id, timeout_seconds=0.05)
+        for connection in connections:
+            try:
+                await connection.close()
+            except Exception:
+                logger.warning("Failed to close WebSocket connection", exc_info=True)
+
+    await asyncio.shield(asyncio.create_task(_cleanup_runtime_state()))
     outcome = await finish_task_deletion(committed)
     await record_key_usage(str(principal.key.key_prefix))
     return DeleteTaskResponse(

@@ -277,6 +277,11 @@ async def commit_task_deletion(
     """
 
     if refuse_if_active:
+        # Narrows the window but does not close it: a task that turns active
+        # after this check and before the locked re-check still gets a 409
+        # with its provider state already released. Releasing after the
+        # commit instead would delete the task even when a provider fails,
+        # which the Web UI delete (and the retry-safe contract) rules out.
         await asyncio.to_thread(_refuse_if_task_active_sync, snapshot.task_id)
     try:
         unreleased = await delete_task_extensions(
