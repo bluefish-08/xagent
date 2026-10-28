@@ -40,6 +40,7 @@ from ...models.uploaded_file import UploadedFile
 from ...schemas.v1 import (
     AppendMessageRequest,
     AppendMessageResponse,
+    CancelQuestionResponse,
     CreateTaskRequest,
     CreateTaskResponse,
     DeleteTaskResponse,
@@ -69,6 +70,7 @@ from ...services.hot_path_cache import (
 from ...services.managed_file_ref import (
     DurableStorageOperationError,
 )
+from ...services.prompt_context import validate_signed_prompt_context
 from ...services.task_auto_resume import TerminalView, status_only_terminal_view
 from ...services.task_delete import (
     TaskDeleteBusy,
@@ -276,6 +278,15 @@ def _raise_v1_file_binding_error(exc: TaskTurnFileBindingError) -> NoReturn:
     ) from exc
 
 
+def _validate_prompt_context(prompt_context: dict[str, Any] | None) -> None:
+    if prompt_context is None:
+        return
+    try:
+        validate_signed_prompt_context(prompt_context)
+    except ValueError as exc:
+        raise V1ApiError(V1ErrorCode.INVALID_INPUT, 422, message=str(exc)) from exc
+
+
 def _raise_v1_connector_runtime_error(exc: ConnectorRuntimeError) -> NoReturn:
     try:
         code = V1ErrorCode(exc.code)
@@ -363,6 +374,7 @@ async def create_chat_task(
             exception message stays out of the response.
     """
     agent_identity = principal.agent
+    _validate_prompt_context(request.prompt_context)
     if agent_identity is None or request.agent_id != agent_identity.id:
         raise V1ApiError(V1ErrorCode.AGENT_NOT_FOUND, 404)
 
@@ -379,6 +391,7 @@ async def create_chat_task(
             timezone=request.timezone,
             requested_dispatch_class=request.dispatch_class,
             requested_priority=request.priority,
+            prompt_context=request.prompt_context,
         )
     except task_start_service.TaskStartRejected as exc:
         _raise_start_rejection(exc)
@@ -985,6 +998,13 @@ async def append_message_to_task(
             (use ``reply`` instead).
         500: any other unexpected error (V1 envelope via global handler).
     """
+    _validate_prompt_context(request.prompt_context)
+    if request.prompt_context is not None and principal.workforce is not None:
+        raise V1ApiError(
+            V1ErrorCode.INVALID_INPUT,
+            422,
+            message="prompt_context is not supported for workforce keys.",
+        )
     try:
         started = await task_start_service.append_sdk_turn(
             task_id=task_id,
@@ -997,6 +1017,7 @@ async def append_message_to_task(
             connector_runtime_context=tuple(
                 item.model_dump() for item in request.connector_runtime_context or ()
             ),
+            prompt_context=request.prompt_context,
         )
     except task_start_service.TaskStartRejected as exc:
         _raise_start_rejection(exc)
@@ -1141,6 +1162,71 @@ async def delete_chat_task(
         task_id=task_id,
         workspace_cleanup_pending=outcome.workspace_cleanup_pending,
         external_cleanup_pending=outcome.external_cleanup_pending,
+    )
+
+
+@router.post(
+    "/chat/tasks/{task_id}/cancel-question",
+    status_code=202,
+    response_model=CancelQuestionResponse,
+)
+async def cancel_waiting_task_question(
+    task_id: int,
+    principal: ApiKeyPrincipal = Depends(get_principal_from_api_key),
+) -> CancelQuestionResponse:
+    """Abandon the pending question on a ``waiting_for_user`` task.
+
+    Reuses ``GET``'s ownership rule (another agent's task, another user's
+    agent, a missing id, or a non-SDK task all answer 404). The pending
+    interaction row is terminated rather than deleted, the paused run is
+    finalized to ``completed``, and the same task then accepts
+    ``POST /v1/chat/tasks/{id}/messages`` (fresh connector context, same
+    conversation). Repeating the call on the already-cancelled run returns
+    the same 202 body; any other non-waiting state answers 409.
+
+    A concurrent ``POST .../reply`` that claimed the answer slot first makes
+    this answer 409 ``task_busy``. Once this endpoint wins, a reply that
+    admitted against the old waiting state can still answer 409
+    ``task_busy`` when its own compare-and-swap loses; one that reads the
+    task afterwards answers 409 ``no_pending_interaction``.
+
+    Raises:
+        V1ApiError 401: missing / invalid / revoked key.
+        V1ApiError 404: task missing, not owned by the key, or not SDK-created.
+        V1ApiError 409: ``task_busy`` while a reply is in flight;
+            ``task_not_waiting`` for any other non-waiting state.
+        V1ApiError 410: ``task_expired`` for a retention-expired task.
+    """
+    from ...services.task_question_cancel import (
+        TaskQuestionCancelBusy,
+        TaskQuestionCancelNotWaiting,
+        cancel_task_question,
+    )
+
+    try:
+        result = await cancel_task_question(
+            task_id=task_id,
+            scope=_sdk_task_scope(principal),
+        )
+    except task_start_service.TaskStartRejected as exc:
+        _raise_start_rejection(exc)
+    except TaskQuestionCancelBusy as exc:
+        raise V1ApiError(
+            V1ErrorCode.TASK_BUSY,
+            409,
+            message="A reply is already in flight for this task; retry later.",
+        ) from exc
+    except TaskQuestionCancelNotWaiting as exc:
+        raise V1ApiError(V1ErrorCode.TASK_NOT_WAITING, 409) from exc
+    except TaskTurnError as exc:
+        raise_for_turn_rejection(exc.reason)
+
+    await record_key_usage(str(principal.key.key_prefix))
+    return CancelQuestionResponse(
+        task_id=result.task_id,
+        status=result.status,
+        run_id=result.run_id,
+        state_version=result.state_version,
     )
 
 

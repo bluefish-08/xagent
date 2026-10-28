@@ -103,6 +103,20 @@ class CreateTaskRequest(BaseModel):
         ),
     )
     message: MessageBody = Field(..., description="First user message of the task.")
+    prompt_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Trusted reference data stored on the task and replayed on every "
+            "turn until an append replaces or clears it. Keys must match "
+            "``^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`` and values must be strings, "
+            "finite numbers, or booleans. Values are passed through without "
+            "the agent's field whitelist and stamped signed. The size limit "
+            "is 4096 UTF-8 bytes of the rendered form: JSON with sorted keys, "
+            "default separators (``, `` and ``: ``), non-ASCII kept as-is, and "
+            "backticks escaped to ``\\u0060`` (six bytes); a client measuring "
+            "compact JSON undercounts."
+        ),
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
@@ -386,6 +400,17 @@ class AppendMessageRequest(BaseModel):
         ),
     )
     message: MessageBody = Field(..., description="Next user message in the task.")
+    prompt_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Trusted reference data stored on the task. A non-empty object "
+            "fully replaces the stored context for this and later turns; an "
+            "empty object clears it so later turns carry none; omitted or null "
+            "replays the stored value. Not accepted with a workforce key. Key "
+            "and value rules, signing and the 4096-byte limit (measured on the "
+            "rendered JSON, not compact JSON) are the same as on task create."
+        ),
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Free-form correlation data passed through unchanged.",
@@ -572,6 +597,30 @@ class DeleteTaskResponse(BaseModel):
     external_cleanup_pending: bool = Field(
         ...,
         description="The workspace or runtime-extension state is still owed cleanup.",
+    )
+
+
+class CancelQuestionResponse(BaseModel):
+    """``POST /v1/chat/tasks/{task_id}/cancel-question`` -> 202 response.
+
+    The pending question was abandoned (not answered, not deleted), the
+    paused run was closed, and the task now accepts an append. Repeating
+    the call on the same cancelled run returns this same shape.
+    """
+
+    task_id: int = Field(..., description="Existing task primary key.")
+    status: str = Field(
+        ...,
+        description=(
+            "Task status after cancellation: 'completed' (the waiting run is "
+            "closed so the next turn can be appended)."
+        ),
+    )
+    run_id: Optional[str] = Field(
+        ..., description="The run whose pending question was cancelled."
+    )
+    state_version: int = Field(
+        ..., description="Monotonic version of the task control state."
     )
 
 
