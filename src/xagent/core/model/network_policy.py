@@ -119,6 +119,12 @@ class PrivateEndpointPolicy:
                 f"configuration: {variable}"
             ) from None
 
+    def approves(self, url: str) -> bool:
+        try:
+            return _parts(url, self.label) in self.origins
+        except ValueError:
+            return False
+
     def destination(self, url: str) -> tuple[str, int]:
         return self._destination(_parts(url, self.label))
 

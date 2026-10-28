@@ -79,27 +79,76 @@ async def test_approved_literal_private_ip_origin(monkeypatch, network):
     assert seen[0].url.host == "10.0.3.7"
 
 
+UNLISTED = "private network"
+UNAPPROVED = "not approved by deployment policy"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("endpoints", "cidrs", "answer"),
+    ("endpoints", "cidrs", "answer", "reason"),
     [
-        (ENDPOINT, "", "172.20.0.5"),
-        ("", "172.20.0.0/16", "172.20.0.5"),
-        ("http://mcp-tools:9000", "172.20.0.0/16", "172.20.0.5"),
-        ("https://mcp-tools:8000", "172.20.0.0/16", "172.20.0.5"),
-        (ENDPOINT, "172.20.0.0/16", "10.0.0.5"),
+        (ENDPOINT, "", "172.20.0.5", UNAPPROVED),
+        ("", "172.20.0.0/16", "172.20.0.5", UNLISTED),
+        ("http://mcp-tools:9000", "172.20.0.0/16", "172.20.0.5", UNLISTED),
+        ("https://mcp-tools:8000", "172.20.0.0/16", "172.20.0.5", UNLISTED),
+        (ENDPOINT, "172.20.0.0/16", "10.0.0.5", UNAPPROVED),
     ],
 )
 async def test_origin_and_every_dns_answer_must_both_be_approved(
-    monkeypatch, network, endpoints, cidrs, answer
+    monkeypatch, network, endpoints, cidrs, answer, reason
 ):
     answers, seen = network
     answers[:] = [answer]
     approve(monkeypatch, endpoints, cidrs)
     async with create_mcp_http_client(endpoint_url=f"{ENDPOINT}/mcp") as client:
-        with pytest.raises(UnsafePublicHttpTarget):
+        with pytest.raises(UnsafePublicHttpTarget, match=reason):
             await client.post(f"{ENDPOINT}/mcp", content=b"credentials")
     assert not seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "answer"),
+    [
+        ("http://other-tools:8000", "172.20.0.5"),
+        ("http://localhost:8000", "127.0.0.1"),
+        ("http://public.example:8000", "64:ff9b::808:808"),
+    ],
+)
+async def test_unlisted_origins_behave_as_if_the_feature_were_off(
+    monkeypatch, network, url, answer
+):
+    answers, seen = network
+    answers[:] = [answer]
+    approve(monkeypatch)
+    async with create_mcp_http_client(endpoint_url=f"{url}/mcp") as client:
+        with pytest.raises(UnsafePublicHttpTarget, match=UNLISTED):
+            await client.get(f"{url}/mcp")
+    assert not seen
+
+
+@pytest.mark.asyncio
+async def test_unlisted_public_origin_still_connects(monkeypatch, network):
+    answers, seen = network
+    answers[:] = ["8.8.8.8"]
+    approve(monkeypatch)
+    async with create_mcp_http_client(
+        endpoint_url="https://public.example/mcp"
+    ) as client:
+        await client.get("https://public.example/mcp")
+    assert seen[0].url.host == "8.8.8.8"
+
+
+@pytest.mark.asyncio
+async def test_approved_origin_rechecks_dns_on_every_request(monkeypatch, network):
+    answers, seen = network
+    approve(monkeypatch)
+    async with create_mcp_http_client(endpoint_url=f"{ENDPOINT}/mcp") as client:
+        await client.get(f"{ENDPOINT}/mcp")
+        answers[:] = ["10.0.0.5"]
+        with pytest.raises(UnsafePublicHttpTarget, match=UNAPPROVED):
+            await client.get(f"{ENDPOINT}/mcp")
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio
@@ -108,7 +157,7 @@ async def test_one_unapproved_dns_answer_blocks_the_origin(monkeypatch, network)
     answers[:] = ["172.20.0.5", "192.168.1.9"]
     approve(monkeypatch)
     async with create_mcp_http_client(endpoint_url=f"{ENDPOINT}/mcp") as client:
-        with pytest.raises(UnsafePublicHttpTarget):
+        with pytest.raises(UnsafePublicHttpTarget, match=UNAPPROVED):
             await client.get(f"{ENDPOINT}/mcp")
     assert not seen
 
@@ -119,7 +168,7 @@ async def test_model_allowlist_does_not_approve_mcp(monkeypatch, network):
     monkeypatch.setenv("XAGENT_MODEL_PRIVATE_ENDPOINTS", ENDPOINT)
     monkeypatch.setenv("XAGENT_MODEL_PRIVATE_CIDRS", "172.20.0.0/16")
     async with create_mcp_http_client(endpoint_url=f"{ENDPOINT}/mcp") as client:
-        with pytest.raises(UnsafePublicHttpTarget):
+        with pytest.raises(UnsafePublicHttpTarget, match=UNLISTED):
             await client.get(f"{ENDPOINT}/mcp")
     assert not seen
 

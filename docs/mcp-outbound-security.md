@@ -31,10 +31,20 @@ The approval is deployment-wide: any user allowed to create an MCP server can
 point one at an approved origin, under any path. List only origins that every
 such user may reach, and do not use broad CIDRs without that review.
 
-These settings cover only the HTTP transports. WebSocket MCP servers, the MCP
-connection-test transport and MCP OAuth discovery/refresh keep their existing
-policies, and the model allowlist still does not apply to MCP. With a trusted
-egress proxy enabled, the proxy must also allow the private origin.
+Dual-stack localhost commonly resolves to BOTH 127.0.0.1 and ::1, so approving
+`http://localhost:8000` needs both `127.0.0.1/32` and `::1/128`, or use an exact
+literal origin such as `http://127.0.0.1:8000`. Well-known NAT64 answers in
+64:ff9b::/96 are classified by their embedded IPv4 destination, as described in
+`model-outbound-security.md`. Origins that are not listed keep the default
+public-only behavior unchanged.
+
+These settings cover only the HTTP transports used to load and call tools.
+`POST /api/mcp/test-connection` still rejects an approved private origin even
+though loading the server works, and private servers that need MCP OAuth
+discovery or refresh are not supported. WebSocket MCP servers keep their
+existing policy, and the model allowlist still does not apply to MCP. Do not
+enable `XAGENT_MCP_OAUTH_ALLOW_PRIVATE_HOSTS` to work around either. With a
+trusted egress proxy enabled, the proxy must also allow the private origin.
 
 For an internal server, migrate to a reviewed stdio connector when the server
 supports that transport, or provide a public HTTPS endpoint with authentication

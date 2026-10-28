@@ -70,10 +70,11 @@ class MCPHttpTransport(PublicHttpTransport):
     def __init__(self, endpoint_url: str) -> None:
         self._origin = _origin(endpoint_url)
         policy = MCPNetworkPolicy()
-        # Without approved origins, keep the shared public-only resolver.
+        # Unlisted origins keep the shared public-only resolver, unchanged by
+        # approvals for other servers.
         super().__init__(
             proxy_url=get_trusted_proxy_url(),
-            _policy=policy if policy.origins else None,
+            _policy=policy if policy.approves(endpoint_url) else None,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
