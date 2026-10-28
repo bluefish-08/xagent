@@ -13,14 +13,14 @@ from xagent.web.schemas.chat import TaskCreateRequest as ChatTaskCreateRequest
 from xagent.web.schemas.chat import WidgetTaskCreateRequest
 from xagent.web.schemas.v1 import AppendMessageRequest, CreateTaskRequest, ReplyRequest
 from xagent.web.services import task_execution as task_execution_service
-from xagent.web.services.file_turn import build_prompt_context_block
+from xagent.web.services.file_turn import (
+    PROMPT_CONTEXT_MAX_DATA_BYTES,
+    build_prompt_context_block,
+    prompt_context_data_size,
+)
 from xagent.web.services.task_execution import execute_task_background
 from xagent.web.services.task_lease_service import TaskLease
-from xagent.web.services.task_setup_snapshot import (
-    RuntimeUserFields,
-    TaskSetupSnapshot,
-    _TaskFields,
-)
+from xagent.web.services.task_setup_snapshot import load_task_setup_snapshot_sync
 
 from ..conftest import _admin_headers, _direct_db_session, client
 
@@ -193,35 +193,6 @@ class _NoopBroadcastManager:
         pass
 
 
-def _task_snapshot(task: Task) -> TaskSetupSnapshot:
-    return TaskSetupSnapshot(
-        task=_TaskFields(
-            id=int(task.id),
-            user_id=int(task.user_id),
-            status=task.status,
-            source=task.source,
-            agent_id=task.agent_id,
-            agent_config=task.agent_config,
-            model_name=task.model_name,
-            compact_model_name=task.compact_model_name,
-            execution_mode=task.execution_mode,
-            agent_type=task.agent_type or "standard",
-            run_id=task.run_id,
-            state_version=int(task.state_version or 0),
-        ),
-        runtime_user=RuntimeUserFields(id=int(task.user_id), is_admin=False),
-        has_reconstructable_history=False,
-        task_pattern="single_call",
-        task_llm=None,
-        task_fast_llm=None,
-        task_vision_llm=None,
-        task_compact_llm=None,
-        agent=None,
-        agent_config=None,
-        excluded_agent_id=None,
-    )
-
-
 async def _run_agent_turn(
     monkeypatch: pytest.MonkeyPatch,
     task_id: int,
@@ -231,7 +202,6 @@ async def _run_agent_turn(
     db = _direct_db_session()
     try:
         task = db.query(Task).filter(Task.id == task_id).one()
-        snapshot = _task_snapshot(task)
         owner_id = int(task.user_id)
         lease = TaskLease(
             task_id=task_id,
@@ -241,6 +211,10 @@ async def _run_agent_turn(
         )
     finally:
         db.close()
+    # The production path into ``execute_task_background``: the snapshot has
+    # to carry the stored ``agent_config`` for the context to reach the turn.
+    snapshot = load_task_setup_snapshot_sync(task_id, owner_id)
+    assert snapshot is not None
 
     class AgentManager:
         async def get_agent_for_task(self, task_id, db, **kwargs):
@@ -528,6 +502,11 @@ def test_append_rejects_a_multi_key_payload_over_the_total_byte_cap() -> None:
         pytest.param({"none": None}, id="none-value"),
         pytest.param({"list": [1]}, id="list-value"),
         pytest.param({"too_big": "x" * 5000}, id="over-size"),
+        pytest.param({"": "v"}, id="empty-key"),
+        pytest.param({"has space": "v"}, id="key-with-space"),
+        pytest.param({"line\nbreak": "v"}, id="key-with-newline"),
+        pytest.param({"1leading_digit": "v"}, id="key-with-leading-digit"),
+        pytest.param({"k" * 65: "v"}, id="key-over-64-characters"),
     ],
 )
 def test_create_rejects_malformed_or_oversized_context(
@@ -572,6 +551,8 @@ def test_create_rejects_non_finite_numbers_from_raw_json() -> None:
     [
         pytest.param({"nested": {"a": 1}}, id="nested-object"),
         pytest.param({"too_big": "x" * 5000}, id="over-size"),
+        pytest.param({"has space": "v"}, id="key-with-space"),
+        pytest.param({"k" * 65: "v"}, id="key-over-64-characters"),
     ],
 )
 def test_append_rejects_malformed_or_oversized_context(prompt_context) -> None:
@@ -584,6 +565,81 @@ def test_append_rejects_malformed_or_oversized_context(prompt_context) -> None:
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "invalid_input"
     assert "prompt_context" not in _task_agent_config(task_id)
+
+
+def _context_with_rendered_size(size: int) -> dict[str, Any]:
+    context = {"k": "x" * (size - 9)}
+    assert prompt_context_data_size(context) == size
+    return context
+
+
+def test_create_accepts_exactly_the_byte_limit_and_rejects_one_more() -> None:
+    agent_id, full_key = _create_agent_with_key()
+    limit = PROMPT_CONTEXT_MAX_DATA_BYTES
+
+    accepted = client.post(
+        "/v1/chat/tasks",
+        headers=_bearer(full_key),
+        json={
+            "agent_id": agent_id,
+            "message": {"role": "user", "content": "first turn"},
+            "prompt_context": _context_with_rendered_size(limit),
+        },
+    )
+    rejected = client.post(
+        "/v1/chat/tasks",
+        headers=_bearer(full_key),
+        json={
+            "agent_id": agent_id,
+            "message": {"role": "user", "content": "first turn"},
+            "prompt_context": _context_with_rendered_size(limit + 1),
+        },
+    )
+
+    assert accepted.status_code == 202, accepted.text
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["error"]["code"] == "invalid_input"
+
+
+def test_append_accepts_exactly_the_byte_limit_and_rejects_one_more() -> None:
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_task_status(task_id, TaskStatus.COMPLETED)
+    limit = PROMPT_CONTEXT_MAX_DATA_BYTES
+
+    rejected = _append(
+        full_key,
+        agent_id,
+        task_id,
+        prompt_context=_context_with_rendered_size(limit + 1),
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "prompt_context" not in _task_agent_config(task_id)
+
+    accepted = _append(
+        full_key, agent_id, task_id, prompt_context=_context_with_rendered_size(limit)
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert _task_agent_config(task_id)["prompt_context"]["data"] == (
+        _context_with_rendered_size(limit)
+    )
+
+
+@pytest.mark.parametrize("status", [TaskStatus.RUNNING, TaskStatus.WAITING_FOR_USER])
+def test_rejected_append_leaves_the_stored_context_unchanged(
+    status: TaskStatus,
+) -> None:
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id, prompt_context={"date": "2026-10-19"})
+    before = _task_agent_config(task_id)["prompt_context"]
+    _force_task_status(task_id, status)
+
+    response = _append(
+        full_key, agent_id, task_id, prompt_context={"date": "2026-10-20"}
+    )
+
+    assert response.status_code == 409, response.text
+    assert _task_agent_config(task_id)["prompt_context"] == before
 
 
 def test_prompt_context_stays_off_the_other_entries() -> None:

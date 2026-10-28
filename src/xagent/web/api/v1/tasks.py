@@ -863,6 +863,12 @@ async def append_message_to_task(
         500: any other unexpected error (V1 envelope via global handler).
     """
     _validate_prompt_context(request.prompt_context)
+    if request.prompt_context is not None and principal.workforce is not None:
+        raise V1ApiError(
+            V1ErrorCode.INVALID_INPUT,
+            422,
+            message="prompt_context is not supported for workforce keys.",
+        )
     try:
         started = await task_start_service.append_sdk_turn(
             task_id=task_id,
