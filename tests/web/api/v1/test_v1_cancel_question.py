@@ -29,6 +29,7 @@ from xagent.web.services.task_coordinator_service import (
 )
 from xagent.web.services.task_execution_controller import TaskControlState
 from xagent.web.services.task_lease_service import TaskLease
+from xagent.web.services.task_orchestrator import finish_turn
 from xagent.web.services.task_question_cancel import (
     TaskQuestionCancelNotWaiting,
     _cancel_waiting_task,
@@ -320,6 +321,34 @@ def test_shared_cancel_keeps_ownership_until_the_coordinator_drains(monkeypatch)
             )
     finally:
         db.close()
+
+
+def test_shared_finalization_after_cancel_does_not_resurrect_the_question(
+    monkeypatch,
+):
+    monkeypatch.setenv("XAGENT_SHARED_TASK_EXECUTION_ENABLED", "true")
+    monkeypatch.setattr(task_event_bridge, "_bridge", Mock())
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _seed_earlier_turn(task_id)
+    _force_waiting(task_id)
+    _insert_question_message(task_id, content="Where are you flying to?")
+    lease = _hold_ownership(task_id)
+    assert _cancel(task_id, full_key).status_code == 202
+
+    # The still-matching owner reaches outer settlement after the cancel.
+    db = _direct_db_session()
+    try:
+        assert finish_turn(db, task_id, task_lease=lease) is True
+    finally:
+        db.close()
+
+    task = _task_row(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert task.output is None
+    read = client.get(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+    assert read.status_code == 200, read.text
+    assert read.json()["output"] is None
 
 
 def test_local_cancel_releases_ownership(monkeypatch):
