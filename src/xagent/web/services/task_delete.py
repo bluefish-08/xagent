@@ -12,7 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+
+from sqlalchemy.orm import Session
 
 from ...core.task_runtime import TaskRuntimeContext
 from ..models.database import get_session_local
@@ -31,6 +34,10 @@ from .task_cleanup_obligations import (
 )
 from .task_deletion import purge_task_rows
 from .task_execution_controller import TaskControlState
+from .task_retention import (
+    retention_commands_clear_condition,
+    retention_lease_clear_condition,
+)
 from .task_runtime import (
     TaskRuntimeExtensionError,
     delete_task_extensions,
@@ -95,13 +102,30 @@ _DELETE_BLOCKED_CONTROL_STATES = (
 )
 
 
-def task_is_active_for_delete(task: Task) -> bool:
-    """Whether deleting this task could race a live executor."""
+def task_is_active_for_delete(db: Session, task: Task) -> bool:
+    """Whether deleting this task could race a live executor.
 
-    return (
+    Besides ``status`` and ``control_state``, a task is active while it holds
+    an unexpired execution lease or an accepted command that has not finished:
+    under shared execution a queued turn stages a command and leaves the
+    status terminal, so the status columns alone would miss it.
+    """
+
+    if (
         task.status in _DELETE_BLOCKED_STATUSES
         or str(task.control_state or "") in _DELETE_BLOCKED_CONTROL_STATES
+    ):
+        return True
+    quiet = (
+        db.query(Task.id)
+        .filter(
+            Task.id == task.id,
+            retention_lease_clear_condition(now=datetime.now(timezone.utc)),
+            retention_commands_clear_condition(),
+        )
+        .first()
     )
+    return quiet is None
 
 
 def task_delete_snapshot(task: Task) -> TaskDeleteSnapshot:
@@ -197,13 +221,15 @@ def _delete_task_rows_sync(
         if refuse_if_active:
             # Re-read under the deletion transaction's row lock: the caller's
             # pre-check can be stale by the time cleanup work has finished.
+            # ``FOR UPDATE`` is a no-op on SQLite, so there this re-check and
+            # the purge are not atomic; the guarantee holds on PostgreSQL only.
             locked = (
                 delete_db.query(Task)
                 .filter(Task.id == task_id)
                 .with_for_update()
                 .first()
             )
-            if locked is not None and task_is_active_for_delete(locked):
+            if locked is not None and task_is_active_for_delete(delete_db, locked):
                 delete_db.rollback()
                 raise TaskDeleteBusy(task_id)
         deleted = purge_task_rows(
@@ -225,6 +251,17 @@ def _delete_task_rows_sync(
         delete_db.close()
 
 
+def _refuse_if_task_active_sync(task_id: int) -> None:
+    session_factory = get_session_local()
+    db = session_factory()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if task is not None and task_is_active_for_delete(db, task):
+            raise TaskDeleteBusy(task_id)
+    finally:
+        db.close()
+
+
 async def commit_task_deletion(
     snapshot: TaskDeleteSnapshot,
     *,
@@ -233,10 +270,14 @@ async def commit_task_deletion(
 ) -> CommittedTaskDeletion | None:
     """Release provider state, then delete the rows and record what is owed.
 
-    ``refuse_if_active`` adds the v1 busy guard to the deletion transaction;
-    the Web UI delete leaves it off because it never had that guard.
+    ``refuse_if_active`` adds the v1 busy guard: an unlocked check before the
+    irreversible extension release, then a locked re-check inside the deletion
+    transaction (PostgreSQL only; see ``_delete_task_rows_sync``). The Web UI
+    delete leaves it off because it never had that guard.
     """
 
+    if refuse_if_active:
+        await asyncio.to_thread(_refuse_if_task_active_sync, snapshot.task_id)
     try:
         unreleased = await delete_task_extensions(
             _task_runtime_context(snapshot),

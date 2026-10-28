@@ -19,12 +19,13 @@ which is also used by the WebSocket UI path so both transports share
 one state machine.
 """
 
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, NoReturn, Optional, cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -39,6 +40,7 @@ from ...schemas.v1 import (
     AppendMessageResponse,
     CreateTaskRequest,
     CreateTaskResponse,
+    DeleteTaskResponse,
     PendingInteraction,
     PublicStep,
     ReplyRequest,
@@ -84,6 +86,8 @@ from . import _events_stream
 from ._step_mapping import map_trace_events_to_public_steps
 from .deps import ApiKeyPrincipal, get_principal_from_api_key, record_key_usage
 from .errors import V1ApiError, V1ErrorCode, raise_for_turn_rejection
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -513,13 +517,14 @@ def _resolve_task_or_404(task_id: int, principal: ApiKeyPrincipal, db: Session) 
 
 # A task an executor may still be writing to is refused rather than deleted
 # out from under it; a finished/paused/waiting task is deletable.
-def _raise_if_task_active_for_delete(task: Task) -> None:
-    if task_is_active_for_delete(task):
+def _raise_if_task_active_for_delete(db: Session, task: Task) -> None:
+    if task_is_active_for_delete(db, task):
         raise V1ApiError(
             V1ErrorCode.TASK_BUSY,
             409,
             message=(
-                "Task is currently running; wait for it to finish before deleting it."
+                "Task is running or has queued work; wait for it to finish before "
+                "deleting it."
             ),
         )
 
@@ -533,7 +538,7 @@ def _load_task_delete_snapshot(
     SessionLocal = get_session_local()
     with SessionLocal() as db:
         task = _resolve_task_or_404(task_id, principal, db)
-        _raise_if_task_active_for_delete(task)
+        _raise_if_task_active_for_delete(db, task)
         return task_delete_snapshot(task)
 
 
@@ -957,33 +962,36 @@ async def reply_to_waiting_task(
     return await reply_to_task(task_id=task_id, request=request, principal=principal)
 
 
-@router.delete("/chat/tasks/{task_id}", status_code=204)
+@router.delete("/chat/tasks/{task_id}", response_model=DeleteTaskResponse)
 async def delete_chat_task(
     task_id: int,
     principal: ApiKeyPrincipal = Depends(get_principal_from_api_key),
-) -> Response:
+) -> DeleteTaskResponse:
     """Delete one SDK task and everything tied to it.
 
     The task is resolved through the same ownership rule as
     ``GET /v1/chat/tasks/{task_id}``: a task of another agent, another
     user's agent, or a nonexistent id all answer the same 404. A task
-    still executing answers 409 ``task_busy`` instead of being deleted
-    out from under its executor; wait for it to finish (or cancel it via
-    the UI) and retry.
+    that is executing, holds an unexpired execution lease, or has an
+    accepted command still queued answers 409 ``task_busy`` instead of
+    being deleted out from under its executor; wait for it to finish
+    and retry. The final re-check runs under a row lock, which is
+    effective on PostgreSQL only; SQLite leaves a small window between
+    the check and the delete.
 
     The owned rows (trace events/blobs/checkpoints, chat messages, DAG
     executions, interaction requests, connector runtime context, runtime
     extension bindings), the uploaded-file bindings, and the workspace
     are removed through the same helper the Web UI delete uses. External
     cleanup that fails is recorded as a retryable obligation, never a
-    half state reported as success: the response's
-    ``X-Xagent-*-Cleanup-Pending`` headers say whether anything is still
-    owed. Deleting twice answers 404.
+    half state reported as success: ``workspace_cleanup_pending`` and
+    ``external_cleanup_pending`` in the response say whether anything is
+    still owed. Deleting twice answers 404.
 
     Raises:
         V1ApiError 401: missing / invalid / revoked key.
         V1ApiError 404: task missing or not owned by the calling key.
-        V1ApiError 409: ``task_busy`` -- still running, retry after it ends.
+        V1ApiError 409: ``task_busy`` -- running or queued, retry after it ends.
         V1ApiError 410: ``task_expired`` for a retention-expired task.
         V1ApiError 503: a bound runtime extension could not release its
             state; the task was not deleted.
@@ -1011,23 +1019,27 @@ async def delete_chat_task(
     if committed is None:
         raise V1ApiError(V1ErrorCode.TASK_NOT_FOUND, 404)
 
-    # The rows are committed as gone; stop any in-process executor before the
-    # workspace is reclaimed. Cross-worker executors were refused above.
+    # The rows are committed as gone: detach this task's WebSocket
+    # connections and stop any in-process executor before the workspace is
+    # reclaimed, as the Web UI delete does. The guards above refuse a task
+    # that is leased or has queued work, so this only reaches executors that
+    # started in the window the pre-checks cannot close.
     from ...services.task_execution import background_task_manager
+    from ..websocket import manager as websocket_manager
 
+    connections = websocket_manager.detach_task_connections(task_id)
     await background_task_manager.cancel_task(task_id, timeout_seconds=0.05)
+    for connection in connections:
+        try:
+            await connection.close()
+        except Exception:
+            logger.warning("Failed to close WebSocket connection", exc_info=True)
     outcome = await finish_task_deletion(committed)
     await record_key_usage(str(principal.key.key_prefix))
-    return Response(
-        status_code=204,
-        headers={
-            "X-Xagent-Workspace-Cleanup-Pending": (
-                "true" if outcome.workspace_cleanup_pending else "false"
-            ),
-            "X-Xagent-External-Cleanup-Pending": (
-                "true" if outcome.external_cleanup_pending else "false"
-            ),
-        },
+    return DeleteTaskResponse(
+        task_id=task_id,
+        workspace_cleanup_pending=outcome.workspace_cleanup_pending,
+        external_cleanup_pending=outcome.external_cleanup_pending,
     )
 
 

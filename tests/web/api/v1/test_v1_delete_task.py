@@ -2,20 +2,21 @@
 
 The endpoint deletes through the same shared orchestration as the Web UI
 delete, so these tests pin the v1-specific parts (run-key ownership, the
-running-task refusal, the 204/404 surface) and the shared cleanup outcome
+running-task refusal, the 200/404 surface) and the shared cleanup outcome
 (rows gone, workspace removed, pending obligations recorded).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import xagent.web.services.task_delete as task_delete_module
 from tests.shared.execution_scope import register_scope_resolver
 from xagent.core.execution_scope import set_execution_scope_snapshot_loader
 from xagent.web.models.chat_message import TaskChatMessage
@@ -28,6 +29,7 @@ from xagent.web.models.task import (
     TraceEvent,
     TraceMessageBlob,
 )
+from xagent.web.models.task_command import TaskExecutionCommand
 from xagent.web.models.task_runtime_secret import TaskRuntimeSecret
 from xagent.web.models.uploaded_file import UploadedFile
 from xagent.web.services.agent_service_manager import get_agent_manager
@@ -38,6 +40,11 @@ from xagent.web.services.task_cleanup_obligations import (
     CleanupObligationStatus,
     CleanupResourceKind,
     list_cleanup_obligations,
+)
+from xagent.web.services.task_command_transport import (
+    COMMAND_COMPLETED,
+    COMMAND_PENDING,
+    COMMAND_PROCESSING,
 )
 from xagent.web.services.task_delete import (
     capture_workspace_cleanup_target_best_effort,
@@ -132,6 +139,13 @@ def _force_status(task_id: int, status: TaskStatus) -> None:
         task = db.query(Task).filter(Task.id == task_id).one()
         task.status = status
         task.control_state = status.value
+        if status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            # A finished turn has released its lease and settled its start
+            # command; creating the task claimed the first and may stage the other.
+            db.query(TaskExecutionCommand).filter(
+                TaskExecutionCommand.task_id == task_id
+            ).update({"status": COMMAND_COMPLETED})
+            task.lease_expires_at = None
         db.commit()
     finally:
         db.close()
@@ -247,10 +261,12 @@ def test_owner_delete_removes_rows_workspace_and_readability(
 
     response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
 
-    assert response.status_code == 204, response.text
-    assert response.content == b""
-    assert response.headers["X-Xagent-Workspace-Cleanup-Pending"] == "false"
-    assert response.headers["X-Xagent-External-Cleanup-Pending"] == "false"
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "task_id": task_id,
+        "workspace_cleanup_pending": False,
+        "external_cleanup_pending": False,
+    }
     assert not workspace.exists()
 
     for path in (
@@ -360,7 +376,7 @@ def test_delete_missing_task_and_second_delete_are_404() -> None:
     task_id = _create_task(full_key, agent_id)
     _force_status(task_id, TaskStatus.COMPLETED)
     first = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
-    assert first.status_code == 204, first.text
+    assert first.status_code == 200, first.text
     second = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
     assert second.status_code == 404
     assert second.json()["error"]["code"] == "task_not_found"
@@ -420,6 +436,97 @@ def test_delete_refuses_an_active_control_state(
         assert db.query(TraceEvent).filter(TraceEvent.task_id == task_id).count() == 1
     finally:
         db.close()
+
+
+def _stage_command(task_id: int, status: str) -> None:
+    db = _direct_db_session()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).one()
+        db.add(
+            TaskExecutionCommand(
+                task_id=task_id,
+                actor_user_id=int(task.user_id),
+                command_id=f"start:{task_id}:{status}",
+                kind="start",
+                payload={},
+                status=status,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("command_status", [COMMAND_PENDING, COMMAND_PROCESSING])
+def test_delete_refuses_a_task_with_a_live_command(
+    command_status: str, tmp_path: Path
+) -> None:
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    _stage_command(task_id, command_status)
+    db = _direct_db_session()
+    try:
+        owner_id = int(db.query(Task).filter(Task.id == task_id).one().user_id)
+    finally:
+        db.close()
+    _seed_related_rows(task_id=task_id, owner_id=owner_id, uploads=tmp_path)
+
+    response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "task_busy"
+    db = _direct_db_session()
+    try:
+        assert db.query(Task).filter(Task.id == task_id).count() == 1
+        assert (
+            db.query(TaskExecutionCommand)
+            .filter(TaskExecutionCommand.task_id == task_id)
+            .count()
+            == 1
+        )
+        assert db.query(TraceEvent).filter(TraceEvent.task_id == task_id).count() == 1
+    finally:
+        db.close()
+
+
+def test_delete_ignores_a_finished_command(tmp_path: Path) -> None:
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    _stage_command(task_id, COMMAND_COMPLETED)
+
+    response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert response.status_code == 200, response.text
+
+
+def test_delete_refuses_a_task_with_an_unexpired_lease() -> None:
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    db = _direct_db_session()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).one()
+        task.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "task_busy"
+
+    db = _direct_db_session()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).one()
+        task.lease_expires_at = datetime.now(UTC) - timedelta(minutes=5)
+        db.commit()
+    finally:
+        db.close()
+    expired = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+    assert expired.status_code == 200, expired.text
 
 
 def test_delete_rechecks_activity_inside_the_deletion_transaction(
@@ -508,9 +615,9 @@ def test_failed_workspace_removal_leaves_a_pending_obligation(
 
     response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
 
-    assert response.status_code == 204, response.text
-    assert response.headers["X-Xagent-Workspace-Cleanup-Pending"] == "true"
-    assert response.headers["X-Xagent-External-Cleanup-Pending"] == "true"
+    assert response.status_code == 200, response.text
+    assert response.json()["workspace_cleanup_pending"] is True
+    assert response.json()["external_cleanup_pending"] is True
     db = _direct_db_session()
     try:
         assert db.query(Task).filter(Task.id == task_id).count() == 0
@@ -588,9 +695,9 @@ def test_bound_extension_state_is_released(
 
     response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
 
-    assert response.status_code == 204, response.text
+    assert response.status_code == 200, response.text
     assert instance.deleted == [task_id]
-    assert response.headers["X-Xagent-External-Cleanup-Pending"] == "false"
+    assert response.json()["external_cleanup_pending"] is False
     db = _direct_db_session()
     try:
         assert db.query(Task).filter(Task.id == task_id).count() == 0
@@ -615,3 +722,51 @@ def test_failing_bound_extension_preserves_the_task(failing_provider: str) -> No
         assert list_cleanup_obligations(db) == []
     finally:
         db.close()
+
+
+def test_active_task_is_refused_before_extension_state_is_released(
+    provider: tuple[str, _Provider],
+) -> None:
+    name, instance = provider
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    _bind_extension(task_id, name)
+    flipped = {"done": False}
+    original = task_delete_module._refuse_if_task_active_sync
+
+    def _flip_status_then_check(task_id_arg: int) -> None:
+        if not flipped["done"]:
+            flipped["done"] = True
+            _force_status(task_id, TaskStatus.RUNNING)
+        original(task_id_arg)
+
+    with patch(
+        "xagent.web.services.task_delete._refuse_if_task_active_sync",
+        side_effect=_flip_status_then_check,
+    ):
+        response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert flipped["done"] is True
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "task_busy"
+    assert instance.deleted == []
+
+
+def test_delete_detaches_and_closes_the_tasks_websocket_connections() -> None:
+    from xagent.web.api.websocket import manager as websocket_manager
+
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _force_status(task_id, TaskStatus.COMPLETED)
+    connection = MagicMock()
+    connection.close = AsyncMock()
+
+    with patch.object(
+        websocket_manager, "detach_task_connections", return_value=[connection]
+    ) as detach:
+        response = client.delete(f"/v1/chat/tasks/{task_id}", headers=_bearer(full_key))
+
+    assert response.status_code == 200, response.text
+    detach.assert_called_once_with(task_id)
+    connection.close.assert_awaited_once()
