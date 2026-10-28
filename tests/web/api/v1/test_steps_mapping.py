@@ -686,6 +686,61 @@ def test_v2_assistant_message_conversion_does_not_duplicate_steps_or_sse():
     ]
 
 
+def _v2_agent_message_fact(
+    *, message_type: str | None, expect_response: bool
+) -> SimpleNamespace:
+    data: dict[str, Any] = {
+        "message": "Shall I continue?",
+        "visible": True,
+        "expect_response": expect_response,
+        "metadata": {},
+    }
+    if message_type is not None:
+        data["message_type"] = message_type
+    return SimpleNamespace(
+        kind="agent_message",
+        payload_version=1,
+        payload={"data": data, "protocol_event_id": "agent-message-fact"},
+        event_id="agent-message-fact",
+        task_id=1,
+        turn_id="turn-1",
+        occurred_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        sequence=1,
+        run_id="run-1",
+        scope_id="root",
+    )
+
+
+@pytest.mark.parametrize("message_type", ["question", "confirmation", "info", None])
+def test_v2_replayed_waiting_message_still_projects_as_a_question_step(message_type):
+    """Replay forces ``expect_response`` False to avoid re-arming the client,
+    but a ``send_message(expect_response=True)`` of any type is still the
+    question the task is waiting on, so ``/steps`` must show it."""
+    converted = convert_display_event(
+        _v2_agent_message_fact(message_type=message_type, expect_response=True),
+        replay=True,
+    )
+    assert converted is not None
+    assert converted["data"]["expect_response"] is False
+
+    steps = map_trace_events_to_public_steps([converted])
+
+    assert [s["data"] for s in steps if s["type"] == "message"] == [
+        {"role": "assistant", "content": "Shall I continue?"}
+    ]
+
+
+@pytest.mark.parametrize("message_type", ["info", "confirmation"])
+def test_v2_replayed_notice_without_a_wait_is_not_projected(message_type):
+    converted = convert_display_event(
+        _v2_agent_message_fact(message_type=message_type, expect_response=False),
+        replay=True,
+    )
+    assert converted is not None
+    assert "awaiting_response" not in converted["data"]
+    assert map_trace_events_to_public_steps([converted]) == []
+
+
 # ===== filtering: non-exposed event types are dropped =====
 
 

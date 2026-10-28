@@ -7,7 +7,7 @@ Covers both waiting-task shapes the read surface supports: a native
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -17,12 +17,18 @@ from xagent.web.models.task import Task, TaskStatus, TraceEvent
 from xagent.web.models.task_command import TaskExecutionCommand
 from xagent.web.models.task_execution_event import TaskExecutionEvent
 from xagent.web.models.task_interaction import TaskInteractionRequest
+from xagent.web.services import task_event_bridge
 from xagent.web.services.task_command_transport import (
     COMMAND_PENDING,
     COMMAND_PROCESSING,
     TaskCommandKind,
 )
+from xagent.web.services.task_coordinator_service import (
+    acquire_task_lease_no_commit,
+    release_task_lease_no_commit,
+)
 from xagent.web.services.task_execution_controller import TaskControlState
+from xagent.web.services.task_lease_service import TaskLease
 from xagent.web.services.task_question_cancel import (
     TaskQuestionCancelNotWaiting,
     _cancel_waiting_task,
@@ -250,6 +256,90 @@ def _task_row(task_id: int) -> Task:
         return db.query(Task).filter(Task.id == task_id).one()
     finally:
         db.close()
+
+
+# ===== shared execution ownership =====
+
+
+def _hold_ownership(task_id: int) -> TaskLease:
+    """Leave the first coordinator holding the task, as while it drains."""
+    lease = TaskLease(task_id, "worker-a", "run-original", "attempt-a")
+    db = _direct_db_session()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).one()
+        task.runner_id = lease.runner_id
+        task.lease_attempt_id = lease.attempt_id
+        task.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        db.commit()
+    finally:
+        db.close()
+    return lease
+
+
+def test_shared_cancel_keeps_ownership_until_the_coordinator_drains(monkeypatch):
+    monkeypatch.setenv("XAGENT_SHARED_TASK_EXECUTION_ENABLED", "true")
+    monkeypatch.setattr(task_event_bridge, "_bridge", Mock())
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _seed_earlier_turn(task_id)
+    _force_waiting(task_id)
+    _insert_question_message(task_id)
+    lease = _hold_ownership(task_id)
+
+    response = _cancel(task_id, full_key)
+
+    assert response.status_code == 202, response.text
+    task = _task_row(task_id)
+    assert task.status == TaskStatus.COMPLETED
+    assert (task.runner_id, task.lease_attempt_id) == ("worker-a", "attempt-a")
+    assert task.lease_expires_at is not None
+
+    db = _direct_db_session()
+    try:
+        # Another worker cannot take the task while the first still owns it.
+        assert acquire_task_lease_no_commit(db, task_id, runner_id="worker-b") is None
+        db.rollback()
+        # The owning coordinator's drain releases it, and only then can
+        # another worker take over.
+        with db.begin():
+            assert release_task_lease_no_commit(db, lease) is True
+    finally:
+        db.close()
+    task = _task_row(task_id)
+    assert (task.runner_id, task.lease_attempt_id, task.lease_expires_at) == (
+        None,
+        None,
+        None,
+    )
+    db = _direct_db_session()
+    try:
+        with db.begin():
+            assert (
+                acquire_task_lease_no_commit(db, task_id, runner_id="worker-b")
+                is not None
+            )
+    finally:
+        db.close()
+
+
+def test_local_cancel_releases_ownership(monkeypatch):
+    monkeypatch.setenv("XAGENT_SHARED_TASK_EXECUTION_ENABLED", "false")
+    agent_id, full_key = _create_agent_with_key()
+    task_id = _create_task(full_key, agent_id)
+    _seed_earlier_turn(task_id)
+    _force_waiting(task_id)
+    _insert_question_message(task_id)
+    _hold_ownership(task_id)
+
+    response = _cancel(task_id, full_key)
+
+    assert response.status_code == 202, response.text
+    task = _task_row(task_id)
+    assert (task.runner_id, task.lease_attempt_id, task.lease_expires_at) == (
+        None,
+        None,
+        None,
+    )
 
 
 # ===== legacy transcript path =====

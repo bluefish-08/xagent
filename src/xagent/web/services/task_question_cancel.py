@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ...config import get_shared_task_execution_enabled
 from ..models.chat_message import TaskChatMessage
 from ..models.database import get_session_local
 from ..models.task import Task, TaskStatus, TraceEvent
@@ -248,6 +249,16 @@ def _cancel_waiting_task(
         "run_id": run_id,
         "cancelled_at": now.isoformat(),
     }
+    # This request does not run inside the owning coordinator. Under shared
+    # execution that coordinator may still be draining its handle, so keep
+    # runner/attempt/lease as they are and let it release ownership after the
+    # drain; clearing them here would let another worker acquire the task and
+    # start an append before the drain barrier, and free the admission slot.
+    ownership: dict[str, Any] = (
+        {}
+        if get_shared_task_execution_enabled()
+        else task_settlement_ownership_values(task_id)
+    )
     values: dict[Any, Any] = {
         Task.status: TaskStatus.COMPLETED,
         Task.control_state: TaskControlState.COMPLETED.value,
@@ -256,7 +267,7 @@ def _cancel_waiting_task(
         Task.output: None,
         Task.error_message: None,
         Task.agent_config: agent_config,
-        **task_settlement_ownership_values(task_id),
+        **ownership,
     }
     # Same acceptance set as the reply prelease, plus the exact run/version
     # read above: a reply that finishes one round and asks again must not be
@@ -333,8 +344,6 @@ def _cancel_sync(*, task_id: int, scope: SdkTaskScope) -> TaskQuestionCancelResu
         task = resolve_sdk_task(task_id, scope, db)
         if task.status != TaskStatus.WAITING_FOR_USER:
             return _result_or_raise(task)
-        from ...config import get_shared_task_execution_enabled
-
         if not get_shared_task_execution_enabled():
             # Refuse a runner still finishing after WAITING_FOR_USER committed,
             # exactly as append does; ownership is checked first so 404 is opaque.

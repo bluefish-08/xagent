@@ -854,11 +854,13 @@ def _build_tool_start(
 def _is_question_agent_message(event: Any) -> bool:
     """The question channel is ``expect_response`` or ``message_type``.
 
-    V2 replays an ``assistant_message`` as an ``agent_message`` with
-    ``expect_response`` forced False, so both fields have to agree.
+    V2 display replay forces ``expect_response`` to False and keeps the
+    original intent in ``awaiting_response``; a waiting ``send_message`` can
+    carry any ``message_type``, so the three fields are read together.
     """
     return (
         _data_get(event, "expect_response") is True
+        or _data_get(event, "awaiting_response") is True
         or _data_get(event, "message_type") == "question"
     )
 
