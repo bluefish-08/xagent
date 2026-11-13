@@ -43,6 +43,11 @@ class _FakeMetadataStore:
         self.saved_collections: list[CollectionInfo] = []
         self.deleted_collections: list[str] = []
 
+    def get_raw_connection(self) -> object:
+        from xagent.providers.vector_store.lancedb import get_connection_from_env
+
+        return get_connection_from_env()
+
     async def save_collection_config(
         self,
         collection: str,
@@ -546,6 +551,69 @@ async def test_create_kb_from_file_uses_shared_service(tmp_path):
     )
     service.publish_collection.assert_awaited_once()
     db.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_kb_from_file_holds_a_write_lease_around_ingestion(
+    tmp_path, monkeypatch
+):
+    events: list[tuple] = []
+
+    async def _acquire(name: str, operation: str) -> str:
+        events.append(("acquire", name, operation))
+        return "lease-1"
+
+    async def _release(lease_ids) -> None:
+        events.append(("release", tuple(lease_ids)))
+
+    from xagent.core.tools.core.RAG_tools.management import write_leases
+
+    monkeypatch.setattr(write_leases, "acquire_lease_async", _acquire)
+    monkeypatch.setattr(write_leases, "release_leases_async", _release)
+
+    source_file = tmp_path / "notes.txt"
+    source_file.write_text("hello", encoding="utf-8")
+    file_record = SimpleNamespace(
+        user_id=7,
+        filename="notes.txt",
+        storage_path=str(source_file),
+        file_id="file-1",
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.all.return_value = [file_record]
+    db = MagicMock()
+    db.query.return_value = query
+
+    def fake_get_db():
+        yield from _fake_db_generator(db)
+
+    service = MagicMock()
+    service.prepare_collection = AsyncMock(return_value="agent_file_kb")
+    service.publish_collection = AsyncMock()
+    service.collection_exists = AsyncMock(return_value=True)
+
+    with (
+        patch("xagent.web.models.database.get_db", side_effect=fake_get_db),
+        patch(
+            "xagent.core.tools.adapters.vibe.agent_kb_service.AgentKnowledgeBaseService",
+            return_value=service,
+        ),
+        patch(
+            "xagent.core.tools.core.RAG_tools.pipelines.document_ingestion.run_document_ingestion",
+            new=Mock(side_effect=RuntimeError("ingest exploded")),
+        ),
+    ):
+        tool = CreateKnowledgeBaseFromFileTool(user_id=71, is_admin=False)
+        result = await tool.run_json_async(
+            {"file_ids": ["file-1"], "collection_name": "agent_file_kb"}
+        )
+
+    assert result["success"] is False
+    assert events == [
+        ("acquire", "agent_file_kb", "agent-file-ingestion"),
+        ("release", ("lease-1",)),
+    ]
 
 
 @pytest.mark.asyncio
