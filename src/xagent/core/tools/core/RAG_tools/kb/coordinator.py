@@ -2704,6 +2704,11 @@ def get_kb_coordinator() -> KBCoordinator:
     return _coordinator
 
 
+def resolve_collection_backend(collection_info: object | None) -> KBStorageBackend:
+    """The engine a collection is bound to, defaulting to the deployment's."""
+    return get_kb_coordinator()._resolve_backend(collection_info)
+
+
 def reset_kb_coordinator_for_tests() -> None:
     """Reset process-global KB coordinator state for tests."""
     global _coordinator
