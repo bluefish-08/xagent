@@ -47,8 +47,37 @@ class _Table:
         if self.rows:
             yield pa.RecordBatch.from_pylist(self.rows)
 
+    def search(self) -> "_Query":
+        return _Query(self)
+
     def close(self) -> None:  # pragma: no cover
         pass
+
+
+class _Query:
+    """The slice of LanceDB's query builder ``iter_rows`` uses."""
+
+    def __init__(self, table: Any) -> None:
+        self.table = table
+        self.filter = ""
+        self.columns: List[str] = []
+
+    def where(self, filter: str) -> "_Query":
+        self.filter = filter
+        return self
+
+    def select(self, columns: List[str]) -> "_Query":
+        self.columns = list(columns)
+        return self
+
+    def limit(self, value: Any) -> "_Query":
+        return self
+
+    def to_batches(self, batch_size: int) -> Iterator[Any]:
+        for batch in self.table.to_batches(filter=self.filter, batch_size=batch_size):
+            yield pa.RecordBatch.from_pylist(
+                [{k: row.get(k) for k in self.columns} for row in batch.to_pylist()]
+            )
 
 
 class _Conn:
@@ -639,3 +668,156 @@ def test_main_returns_1_when_every_collection_was_skipped(
 
 def test_main_rejects_a_non_finite_rate_limit() -> None:
     assert mod.main(["--model", "new", "--rate-limit", "nan"]) == 2
+
+
+# --- real LanceDB: the copy must land in a table search can use ---
+
+
+def _make_collection(name: str = "kb") -> None:
+    import asyncio
+
+    from xagent.core.tools.core.RAG_tools.core.schemas import CollectionInfo
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+
+    asyncio.run(
+        cm.collection_manager.save_collection(
+            CollectionInfo(
+                name=name, embedding_model_id="old-model", embedding_dimension=2
+            )
+        )
+    )
+
+
+def _config() -> Any:
+    from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
+
+    return IngestionConfig(embedding_model_id="new-model")
+
+
+class _FixedAdapter:
+    def __init__(self, dimension: int = 2) -> None:
+        self.dimension = dimension
+        self.calls: List[List[str]] = []
+
+    def encode(self, texts: Any) -> List[List[float]]:
+        items = texts if isinstance(texts, list) else [texts]
+        self.calls.append(list(items))
+        return [[0.5, 0.5][: self.dimension] for _ in items]
+
+
+def _source_chunks(count: int) -> List[Any]:
+    from xagent.migrations.embedding.scope import SearchableChunk
+
+    return [
+        SearchableChunk(
+            doc_id=f"doc-{index // 2}",
+            chunk_id=f"chunk-{index}",
+            parse_hash="h",
+            text=f"text {index}",
+            chunk_hash=f"ch-{index}",
+            metadata=None,
+            user_id=7,
+        )
+        for index in range(count)
+    ]
+
+
+def _indexes(model_id: str) -> List[Any]:
+    from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
+        embeddings_table_candidates,
+    )
+    from xagent.core.tools.core.RAG_tools.storage.factory import (
+        get_vector_index_store,
+    )
+
+    conn = get_vector_index_store().get_raw_connection()
+    table = conn.open_table(embeddings_table_candidates(model_id)[0])
+    return table.list_indices()
+
+
+def test_embed_writes_a_real_table_and_builds_both_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.core.tools.core.RAG_tools.core import config as core_config
+    from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
+        embeddings_table_candidates,
+    )
+    from xagent.core.tools.core.RAG_tools.storage.factory import (
+        get_vector_index_store,
+    )
+
+    _make_collection()
+    monkeypatch.setattr(
+        mod, "iter_source_chunks", lambda *a, **k: iter(_source_chunks(4))
+    )
+    # A real vector index instead of the 50k rows its default threshold needs.
+    real_policy = core_config.IndexPolicy
+
+    def _small_policy(*args: Any, **kwargs: Any) -> Any:
+        return real_policy(enable_threshold_rows=1, *args, **kwargs)
+
+    monkeypatch.setattr(core_config, "IndexPolicy", _small_policy)
+    target = EmbeddingModelConfig(id="new-model", model_name="stub", dimension=2)
+
+    report = mod.embed_collection(
+        "kb",
+        model_id="new-model",
+        embedding_config=target,
+        embedding_adapter=_FixedAdapter(),
+        cfg=_config(),
+        dry_run=False,
+        source="old-model",
+    )
+
+    assert (report.documents_embedded, report.chunks_embedded) == (2, 4)
+    assert report.failures == []
+    conn = get_vector_index_store().get_raw_connection()
+    table = conn.open_table(embeddings_table_candidates("new-model")[0])
+    rows = table.search().where("collection = 'kb'").to_arrow().to_pylist()
+    assert sorted(row["chunk_id"] for row in rows) == [
+        "chunk-0",
+        "chunk-1",
+        "chunk-2",
+        "chunk-3",
+    ]
+    assert {row["text"] for row in rows} == {"text 0", "text 1", "text 2", "text 3"}
+    assert {row["user_id"] for row in rows} == {7}
+
+    indexes = _indexes("new-model")
+    assert any(
+        index.index_type == "FTS" and "text" in index.columns for index in indexes
+    )
+    assert any("vector" in index.columns for index in indexes)
+
+
+def test_a_real_rerun_over_held_chunks_writes_nothing() -> None:
+    _make_collection()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        mod, "iter_source_chunks", lambda *a, **k: iter(_source_chunks(4))
+    )
+    monkeypatch.setattr(mod, "_ensure_indexes", lambda *a, **k: None)
+    target = EmbeddingModelConfig(id="new-model", model_name="stub", dimension=2)
+    adapter = _FixedAdapter()
+
+    def _run() -> Any:
+        return mod.embed_collection(
+            "kb",
+            model_id="new-model",
+            embedding_config=target,
+            embedding_adapter=adapter,
+            cfg=_config(),
+            dry_run=False,
+            source="old-model",
+        )
+
+    try:
+        first = _run()
+        calls = len(adapter.calls)
+        second = _run()
+    finally:
+        monkeypatch.undo()
+
+    assert (first.chunks_embedded, second.chunks_embedded) == (4, 0)
+    assert second.documents_unchanged == first.documents_embedded
+    assert len(adapter.calls) == calls
