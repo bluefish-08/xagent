@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -486,20 +487,14 @@ def test_wait_until_idle_reports_what_is_left_at_the_deadline(
 
 def test_cli_exit_codes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        mod,
-        "switch_collection",
-        lambda *args, **kwargs: mod.SwitchReport(
-            name="kb", target_model_id="new-model", result=mod.RESULT_SWITCHED
-        ),
+        mod, "switch_collections", lambda *args, **kwargs: [_report("kb")]
     )
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 0
 
     monkeypatch.setattr(
         mod,
-        "switch_collection",
-        lambda *args, **kwargs: mod.SwitchReport(
-            name="kb", target_model_id="new-model", result=mod.RESULT_REFUSED
-        ),
+        "switch_collections",
+        lambda *args, **kwargs: [_report("kb", mod.RESULT_REFUSED)],
     )
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 1
 
@@ -510,6 +505,253 @@ def test_cli_returns_2_when_the_run_cannot_start(
     def _raise(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("no model hub")
 
-    monkeypatch.setattr(mod, "switch_collection", _raise)
+    monkeypatch.setattr(mod, "switch_collections", _raise)
 
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 2
+
+
+def _report(name: str, result: str = mod.RESULT_SWITCHED) -> mod.SwitchReport:
+    return mod.SwitchReport(name=name, target_model_id="new-model", result=result)
+
+
+def test_each_window_receives_the_mode_and_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: ["a"])
+    seen: List[Dict[str, Any]] = []
+
+    def _one(name: str, *args: Any, **kwargs: Any) -> Any:
+        seen.append({"name": name, "args": args, **kwargs})
+        return _report(name)
+
+    monkeypatch.setattr(mod, "switch_collection", _one)
+
+    mod.switch_collections("new-model", mode=mod.MODE_ROLLBACK, wait_seconds=7.0)
+
+    assert seen[0]["name"] == "a"
+    assert seen[0]["args"] == ("new-model",)
+    assert seen[0]["mode"] == mod.MODE_ROLLBACK
+    assert seen[0]["wait_seconds"] == 7.0
+
+
+def test_switch_collections_keeps_the_scope_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: ["b", "a"])
+    monkeypatch.setattr(
+        mod,
+        "switch_collection",
+        lambda name, *args, **kwargs: _report(name),
+    )
+
+    reports = mod.switch_collections("new-model")
+
+    assert [report.name for report in reports] == ["b", "a"]
+
+
+def test_switch_collections_reports_nothing_out_of_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: [])
+
+    assert mod.switch_collections("new-model") == []
+
+
+def test_a_crashing_window_does_not_stop_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: ["a", "b"])
+
+    def _one(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "a":
+            raise RuntimeError("boom")
+        return _report(name)
+
+    monkeypatch.setattr(mod, "switch_collection", _one)
+
+    reports = mod.switch_collections("new-model")
+
+    assert [report.result for report in reports] == [
+        mod.RESULT_FAILED,
+        mod.RESULT_SWITCHED,
+    ]
+    assert "RuntimeError" in reports[0].reason
+
+
+def test_concurrent_windows_overlap_and_share_one_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: ["a", "b"])
+    barrier = threading.Barrier(2, timeout=5)
+    watchers: List[Any] = []
+
+    def _one(name: str, *args: Any, **kwargs: Any) -> Any:
+        watchers.append(kwargs["job_watcher"])
+        barrier.wait()
+        return _report(name)
+
+    monkeypatch.setattr(mod, "switch_collection", _one)
+
+    reports = mod.switch_collections("new-model", concurrency=2)
+
+    assert [report.name for report in reports] == ["a", "b"]
+    assert watchers[0] is not None
+    assert watchers[0] is watchers[1]
+
+
+@pytest.mark.parametrize(("names", "workers"), [(["a"], None), (["a", "b"], 2)])
+def test_concurrency_is_capped_by_the_scope(
+    monkeypatch: pytest.MonkeyPatch, names: List[str], workers: Optional[int]
+) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: names)
+    seen: List[int] = []
+    real_pool = mod.ThreadPoolExecutor
+
+    class _Pool(real_pool):  # type: ignore[misc, valid-type]
+        def __init__(self, max_workers: int) -> None:
+            seen.append(max_workers)
+            super().__init__(max_workers=max_workers)
+
+    monkeypatch.setattr(mod, "ThreadPoolExecutor", _Pool)
+    monkeypatch.setattr(mod, "switch_collection", lambda name, *a, **k: _report(name))
+
+    mod.switch_collections("new-model", concurrency=8)
+
+    assert seen == ([] if workers is None else [workers])
+
+
+def test_the_cli_forwards_scope_concurrency_and_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: List[Dict[str, Any]] = []
+    monkeypatch.setattr(
+        mod,
+        "switch_collections",
+        lambda model, **kwargs: seen.append({"model": model, **kwargs}) or [],
+    )
+
+    assert (
+        mod.run_cli(
+            mod.MODE_ROLLBACK,
+            [
+                "--model",
+                "old-model",
+                "--collection",
+                "a",
+                "--collection",
+                "b",
+                "--concurrency",
+                "3",
+                "--wait-seconds",
+                "5",
+            ],
+            description="d",
+        )
+        == 1
+    )
+
+    assert seen == [
+        {
+            "model": "old-model",
+            "collections": ["a", "b"],
+            "team": None,
+            "concurrency": 3,
+            "mode": mod.MODE_ROLLBACK,
+            "wait_seconds": 5.0,
+        }
+    ]
+
+
+def test_the_cli_exits_0_only_when_every_window_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for result, code in (
+        (mod.RESULT_SWITCHED, 0),
+        (mod.RESULT_ALREADY, 0),
+        (mod.RESULT_REFUSED, 1),
+        (mod.RESULT_FAILED, 1),
+    ):
+        monkeypatch.setattr(
+            mod, "switch_collections", lambda model, **kwargs: [_report("a", result)]
+        )
+        assert mod.run_cli(mod.MODE_SWITCH, ["--model", "m"], description="d") == code
+
+
+def test_the_switch_cli_requires_one_collection_or_a_team() -> None:
+    assert mod.main(["--model", "m"]) == 1
+
+
+def test_the_cli_rejects_a_non_positive_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: List[str] = []
+    monkeypatch.setattr(
+        mod, "switch_collections", lambda model, **kwargs: ran.append(model) or []
+    )
+
+    assert mod.main(["--model", "m", "--collection", "a", "--concurrency", "0"]) == 2
+    assert ran == []
+
+
+def test_one_refused_collection_fails_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "switch_collections",
+        lambda model, **kwargs: [_report("a"), _report("b", mod.RESULT_REFUSED)],
+    )
+
+    assert mod.run_cli(mod.MODE_SWITCH, ["--model", "m"], description="d") == 1
+
+
+def test_the_run_report_names_ownerless_documents_and_skip_reasons(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "switch_collections",
+        lambda model, **kwargs: [
+            mod.SwitchReport(
+                name="kb",
+                target_model_id="m",
+                result=mod.RESULT_SWITCHED,
+                ownerless_excluded=2,
+                skipped={"no-parse-hash": 1},
+                acceptance={"source_count": 5},
+            )
+        ],
+    )
+
+    with caplog.at_level("INFO", logger=mod.__name__):
+        assert mod.run_cli(mod.MODE_SWITCH, ["--model", "m"], description="d") == 0
+
+    assert "2 ownerless documents not migrated (admin-only legacy data)" in caplog.text
+    assert "skipped no-parse-hash=1" in caplog.text
+    assert "acceptance source_count=5" in caplog.text
+
+
+def test_rollback_is_the_same_window_with_its_own_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.migrations.embedding import rollback
+
+    seen: List[Any] = []
+    monkeypatch.setattr(
+        rollback, "run_cli", lambda mode, argv, **kwargs: seen.append(mode) or 0
+    )
+
+    assert rollback.main(["--model", "old-model", "--collection", "a"]) == 0
+    assert seen == [rollback.MODE_ROLLBACK]
+
+
+def test_a_window_carries_the_mode_into_its_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, current="new-model")
+
+    report = mod.switch_collection(
+        "kb", "old-model", job_watcher=_FakeWatcher(), mode=mod.MODE_ROLLBACK
+    )
+
+    assert report.mode == mod.MODE_ROLLBACK

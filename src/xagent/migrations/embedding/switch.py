@@ -16,10 +16,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from xagent.core.tools.core.RAG_tools.core.schemas import IngestionConfig
 from xagent.core.tools.core.RAG_tools.management.collection_manager import (
@@ -49,8 +51,10 @@ from xagent.migrations.embedding.embed import embed_collection, resolve_target_m
 from xagent.migrations.embedding.scope import (
     SKIP_OTHER_ENGINE,
     MigrationCliError,
+    add_scope_args,
     collection_backend,
     iter_scope_documents,
+    resolve_collection_names,
 )
 
 logging.basicConfig(
@@ -70,6 +74,9 @@ RESULT_ALREADY = "already-switched"
 RESULT_REFUSED = "refused"
 RESULT_FAILED = "failed"
 
+MODE_SWITCH = "switch"
+MODE_ROLLBACK = "rollback"
+
 
 class WindowRefused(Exception):
     """The collection stays on the old model; ``reason`` goes in the report."""
@@ -83,6 +90,7 @@ class WindowRefused(Exception):
 class SwitchReport:
     name: str
     target_model_id: str
+    mode: str = MODE_SWITCH
     result: str = RESULT_REFUSED
     reason: str = ""
     source_model_id: Optional[str] = None
@@ -100,6 +108,20 @@ class InflightJobWatcher:
 
     def __init__(self) -> None:
         self._session_factory: Any = None
+        self._init_lock = threading.Lock()
+
+    def _session(self) -> Any:
+        if self._session_factory is None:
+            with self._init_lock:
+                if self._session_factory is None:
+                    from xagent.web.models.database import (
+                        configure_db,
+                        get_session_local,
+                    )
+
+                    configure_db(read_only=True)
+                    self._session_factory = get_session_local()
+        return self._session_factory()
 
     def running(self, collection: str) -> List[str]:
         from xagent.web.models.background_job import (
@@ -108,12 +130,7 @@ class InflightJobWatcher:
             BackgroundJobType,
         )
 
-        if self._session_factory is None:
-            from xagent.web.models.database import configure_db, get_session_local
-
-            configure_db(read_only=True)
-            self._session_factory = get_session_local()
-        db = self._session_factory()
+        db = self._session()
         try:
             rows = (
                 db.query(BackgroundJob)
@@ -145,10 +162,11 @@ def switch_collection(
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     job_watcher: Optional[InflightJobWatcher] = None,
     acceptance: Callable[..., AcceptanceResult] = check_collection,
+    mode: str = MODE_SWITCH,
 ) -> SwitchReport:
     """Run the switch window for one collection."""
     started = time.monotonic()
-    report = SwitchReport(name=name, target_model_id=target_model_id)
+    report = SwitchReport(name=name, target_model_id=target_model_id, mode=mode)
 
     def finish(result: str, reason: str = "") -> SwitchReport:
         report.result = result
@@ -371,40 +389,53 @@ def _set_state(name: str, state: str, source_model_id: str, target: str) -> None
     logger.info("%s: %s (source %s, target %s)", name, state, source_model_id, target)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Switch one collection to a new embedding model.\n\n"
-            "Precompute its vectors first (migrations.embedding.embed). The\n"
-            "collection is frozen for the duration of the window; a re-run\n"
-            "resumes a window that was interrupted."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--model", required=True, help="Target embedding model id")
-    parser.add_argument(
-        "--collection", required=True, metavar="NAME", help="Collection to switch"
-    )
-    parser.add_argument(
-        "--wait-seconds",
-        type=float,
-        default=DEFAULT_WAIT_SECONDS,
-        metavar="N",
-        help=f"Maximum wait for in-flight writers (default {DEFAULT_WAIT_SECONDS})",
-    )
-    args = parser.parse_args(argv)
+def switch_collections(
+    target_model_id: str,
+    *,
+    collections: Optional[Sequence[str]] = None,
+    team: Optional[int] = None,
+    concurrency: int = 1,
+    mode: str = MODE_SWITCH,
+    wait_seconds: float = DEFAULT_WAIT_SECONDS,
+) -> List[SwitchReport]:
+    """Run the window over every collection in scope, ``concurrency`` at a time."""
+    names = resolve_collection_names(collections=collections, team=team)
+    if not names:
+        logger.warning("No collections in scope; check --collection/--team")
+        return []
+    watcher = InflightJobWatcher()
 
-    try:
-        report = switch_collection(
-            args.collection, args.model, wait_seconds=args.wait_seconds
-        )
-    except Exception as exc:  # noqa: BLE001 - report and exit non-zero
-        logger.error("Switch failed: %s", exc, exc_info=True)
-        return 2
+    def _one(name: str) -> SwitchReport:
+        try:
+            return switch_collection(
+                name,
+                target_model_id,
+                wait_seconds=wait_seconds,
+                job_watcher=watcher,
+                mode=mode,
+            )
+        except Exception as exc:  # noqa: BLE001 - one collection must not stop the rest
+            logger.exception("%s: window crashed", name)
+            return SwitchReport(
+                name=name,
+                target_model_id=target_model_id,
+                mode=mode,
+                result=RESULT_FAILED,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
 
+    workers = max(1, min(concurrency, len(names)))
+    if workers == 1:
+        return [_one(name) for name in names]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_one, names))
+
+
+def _describe(report: SwitchReport) -> None:
     logger.info(
-        "%s: %s%s in %.2fs (embedded %d documents/%d chunks, pruned %d rows)",
+        "%s: %s %s%s in %.2fs (embedded %d documents/%d chunks, pruned %d rows)",
         report.name,
+        report.mode,
         report.result,
         f" ({report.reason})" if report.reason else "",
         report.window_seconds,
@@ -418,9 +449,78 @@ def main(argv: Optional[List[str]] = None) -> int:
             report.name,
             report.ownerless_excluded,
         )
+    if report.skipped:
+        logger.info(
+            "%s: skipped %s",
+            report.name,
+            ", ".join(f"{k}={v}" for k, v in sorted(report.skipped.items())),
+        )
     for key, value in sorted(report.acceptance.items()):
         logger.info("%s: acceptance %s=%s", report.name, key, value)
-    return 0 if report.result in (RESULT_SWITCHED, RESULT_ALREADY) else 1
+
+
+def run_cli(mode: str, argv: Optional[List[str]], *, description: str) -> int:
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--model", required=True, help="Target embedding model id")
+    add_scope_args(parser)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Collections processed at once (default 1)",
+    )
+    parser.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=DEFAULT_WAIT_SECONDS,
+        metavar="N",
+        help=f"Maximum wait for in-flight writers (default {DEFAULT_WAIT_SECONDS})",
+    )
+    args = parser.parse_args(argv)
+    if args.concurrency <= 0:
+        logger.error("--concurrency must be positive")
+        return 2
+
+    try:
+        reports = switch_collections(
+            args.model,
+            collections=args.collection,
+            team=args.team,
+            concurrency=args.concurrency,
+            mode=mode,
+            wait_seconds=args.wait_seconds,
+        )
+    except MigrationCliError as exc:
+        logger.error("%s", exc)
+        return 2
+    except Exception as exc:  # noqa: BLE001 - report and exit non-zero
+        logger.error("Migration command failed: %s", exc, exc_info=True)
+        return 2
+
+    for report in reports:
+        _describe(report)
+    if not reports:
+        return 1
+    return (
+        0 if all(r.result in (RESULT_SWITCHED, RESULT_ALREADY) for r in reports) else 1
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    return run_cli(
+        MODE_SWITCH,
+        argv,
+        description=(
+            "Switch collections to a new embedding model.\n\n"
+            "Precompute their vectors first (migrations.embedding.embed). A\n"
+            "collection is frozen for the duration of its window; a re-run\n"
+            "resumes a window that was interrupted."
+        ),
+    )
 
 
 if __name__ == "__main__":
