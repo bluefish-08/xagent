@@ -245,7 +245,8 @@ ALLOWED: dict[str, tuple[int, str]] = {
     "core/tools/core/RAG_tools/management/migration_state.py": (
         1,
         "The freeze guard reads one state row (and opens the metadata "
-        "connection to read it); it writes no row.",
+        "connection to read it). Lease writes and releases go through "
+        "run_blocking, so they are tracked rather than audited here.",
     ),
     "core/tools/core/RAG_tools/pipelines/document_ingestion.py": (
         2,

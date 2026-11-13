@@ -134,9 +134,14 @@ async def _create_knowledge_base_from_file_impl(
         admitted_context_async,
         run_in_admitted_context,
     )
+    from ...core.RAG_tools.management.write_leases import (
+        acquire_lease_async,
+        release_leases_async,
+    )
 
     collection_name = ""
     ingested_count = 0
+    lease_id = ""
     try:
         from sqlalchemy.orm import Session
 
@@ -202,6 +207,8 @@ async def _create_knowledge_base_from_file_impl(
         # the collection is ours to clean up if every file fails.
         collection_existed_before = await kb_service.collection_exists(collection_name)
         # One admission for every file, so a freeze between files cannot strand a partial.
+        # The lease spans the same work so a migration waits for this tool too.
+        lease_id = await acquire_lease_async(collection_name, "agent-file-ingestion")
         admission = await admitted_context_async(collection_name)
 
         ingested_count = 0
@@ -353,3 +360,6 @@ async def _create_knowledge_base_from_file_impl(
             message=str(e),
             files_ingested=0,
         ).model_dump()
+    finally:
+        if lease_id:
+            await release_leases_async([lease_id])

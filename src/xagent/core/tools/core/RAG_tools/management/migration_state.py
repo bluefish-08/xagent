@@ -7,7 +7,7 @@ import functools
 import logging
 import time
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import Context, ContextVar, copy_context
+from contextvars import Context, ContextVar, Token, copy_context
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import (
@@ -16,6 +16,7 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    Iterable,
     Iterator,
     Optional,
     TypeVar,
@@ -29,6 +30,12 @@ from ..LanceDB.schema_manager import _safe_close_table
 from ..storage.factory import get_metadata_store
 from ..utils.lancedb_query_utils import list_table_names
 from ..utils.string_utils import escape_lancedb_string
+from .write_leases import (
+    acquire_lease,
+    acquire_lease_async,
+    release_leases,
+    release_leases_async,
+)
 
 MIGRATION_TABLE = "collection_migration_state"
 IDLE = "idle"
@@ -44,6 +51,10 @@ _ADMITTED: ContextVar[frozenset[str]] = ContextVar(
 )
 _PENDING: ContextVar[frozenset[str]] = ContextVar(
     "kb_pending_collections", default=frozenset()
+)
+# (collection, lease_id) pairs this scope admitted and still holds.
+_LEASES: ContextVar[tuple[tuple[str, str], ...]] = ContextVar(
+    "kb_write_leases", default=()
 )
 
 _SCHEMA = pa.schema(
@@ -214,16 +225,40 @@ def _is_admitted(collection: str) -> bool:
     return collection in _ADMITTED.get()
 
 
+def _holding_lease(collection: str) -> bool:
+    return any(name == collection for name, _ in _LEASES.get())
+
+
+def _add_lease(collection: str, lease_id: str) -> Token[tuple[tuple[str, str], ...]]:
+    return _LEASES.set(_LEASES.get() + ((collection, lease_id),))
+
+
+def _lease_ids() -> tuple[str, ...]:
+    return tuple(lease_id for _, lease_id in _LEASES.get())
+
+
+def _release_quietly(lease_ids: Iterable[str]) -> None:
+    try:
+        release_leases(lease_ids)
+    except Exception:  # noqa: BLE001 - the write already happened
+        logger.exception("Failed to release write leases: %s", sorted(lease_ids))
+
+
 @contextmanager
 def pending_collection(collection: str) -> Iterator[None]:
     """Open a scope whose first guard call decides admission for the collection."""
     token = _PENDING.set(_PENDING.get() | {collection})
     admitted_token = _ADMITTED.set(_ADMITTED.get())
+    leases_token = _LEASES.set(_LEASES.get())
+    before = set(_lease_ids())
     try:
         yield
     finally:
+        added = [lease_id for lease_id in _lease_ids() if lease_id not in before]
+        _LEASES.reset(leases_token)
         _ADMITTED.reset(admitted_token)
         _PENDING.reset(token)
+        _release_quietly(added)
 
 
 @asynccontextmanager
@@ -233,11 +268,21 @@ async def admitted_async(collection: str) -> AsyncIterator[None]:
         yield
         return
     await ensure_collection_writable_async(collection)
-    token = _ADMITTED.set(_ADMITTED.get() | {collection})
+    leases_token = _LEASES.set(_LEASES.get())
+    before = set(_lease_ids())
     try:
-        yield
+        if not _holding_lease(collection):
+            lease_id = await acquire_lease_async(collection, "admitted_async")
+            _add_lease(collection, lease_id)
+        token = _ADMITTED.set(_ADMITTED.get() | {collection})
+        try:
+            yield
+        finally:
+            _ADMITTED.reset(token)
     finally:
-        _ADMITTED.reset(token)
+        added = [lease_id for lease_id in _lease_ids() if lease_id not in before]
+        _LEASES.reset(leases_token)
+        await release_leases_async(added)
 
 
 async def admitted_context_async(collection: str) -> Context:
@@ -316,8 +361,10 @@ def ensure_collection_writable(collection_name: str) -> None:
     if _is_admitted(collection_name):
         return
     _raise_if_frozen(collection_name, read_migration_state(collection_name))
-    if collection_name in _PENDING.get():
-        _ADMITTED.set(_ADMITTED.get() | {collection_name})
+    if collection_name not in _PENDING.get():
+        return
+    _add_lease(collection_name, acquire_lease(collection_name, "write-guard"))
+    _ADMITTED.set(_ADMITTED.get() | {collection_name})
 
 
 async def ensure_collection_writable_async(collection_name: str) -> None:
@@ -326,5 +373,8 @@ async def ensure_collection_writable_async(collection_name: str) -> None:
         return
     state = await asyncio.to_thread(read_migration_state, collection_name)
     _raise_if_frozen(collection_name, state)
-    if collection_name in _PENDING.get():
-        _ADMITTED.set(_ADMITTED.get() | {collection_name})
+    if collection_name not in _PENDING.get():
+        return
+    lease_id = await acquire_lease_async(collection_name, "write-guard")
+    _add_lease(collection_name, lease_id)
+    _ADMITTED.set(_ADMITTED.get() | {collection_name})
