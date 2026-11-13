@@ -138,7 +138,7 @@ def embed_collections(
     for name in names:
         logger.info("Collection %s: starting", name)
         try:
-            item = _embed_collection(
+            item = embed_collection(
                 name,
                 model_id=embedding_config.id,
                 embedding_config=embedding_config,
@@ -165,7 +165,7 @@ def _resolve_target_model(model_id: str) -> Tuple[EmbeddingModelConfig, BaseEmbe
         return resolve_embedding_adapter(model_id)
 
 
-def _embed_collection(
+def embed_collection(
     name: str,
     *,
     model_id: str,
