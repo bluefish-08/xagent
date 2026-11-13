@@ -714,3 +714,75 @@ def test_a_scope_whose_lease_was_lost_fails_its_check() -> None:
         migration_state._LEASES.reset(leases_token)
         migration_state._LEASE_SET.reset(set_token)
         held.release()
+
+
+def _expire_lease(name: str, lease_id: str, seconds_ago: float) -> None:
+    """Move an existing lease's expiry into the past."""
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+
+    conn = get_metadata_store().get_raw_connection()
+    table = conn.open_table(LEASES_TABLE)
+    edge = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        seconds=seconds_ago
+    )
+    table.update(f"lease_id = '{lease_id}'", {"expires_at": edge})
+
+
+# --- real LanceDB: the lease table must work through the store's own API ---
+
+
+def test_lease_lifecycle_on_a_real_table() -> None:
+    lease_id = acquire_lease("kb", "document-ingestion")
+
+    live = live_leases("kb")
+    assert [lease.lease_id for lease in live] == [lease_id]
+    assert live[0].operation == "document-ingestion"
+
+    renewed, lost = renew_leases([lease_id])
+    assert (renewed, lost) == (1, [])
+    assert live_leases("kb")[0].expires_at > live[0].expires_at
+
+    assert release_leases([lease_id]) == 1
+    assert live_leases("kb") == []
+    assert renew_leases([lease_id]) == (0, [lease_id])
+
+
+def test_renewing_an_expired_row_counts_it_lost_on_a_real_table() -> None:
+    lease_id = acquire_lease("kb", "document-ingestion")
+    _expire_lease("kb", lease_id, 30)
+
+    assert renew_leases([lease_id]) == (0, [lease_id])
+    assert renew_leases([lease_id]) == (0, [lease_id])
+
+
+def test_a_lease_a_margin_past_its_expiry_still_reads_as_live() -> None:
+    lease_id = acquire_lease("kb", "document-ingestion")
+    _expire_lease("kb", lease_id, 1)
+
+    assert [lease.lease_id for lease in live_leases("kb")] == [lease_id]
+
+
+def test_purge_removes_only_expired_leases_on_a_real_table() -> None:
+    alive = acquire_lease("kb", "document-ingestion")
+    stale = acquire_lease("other", "document-ingestion")
+    _expire_lease("other", stale, 300)
+
+    assert purge_expired_leases() == 1
+    assert [lease.lease_id for lease in live_leases("kb")] == [alive]
+    assert live_leases("other") == []
+
+
+def test_the_lease_set_notices_a_real_lost_row() -> None:
+    lease_set = LeaseSet(ttl_seconds=0.05)
+    lease_id = acquire_lease("kb", "write-guard")
+    lease_set.add(lease_id)
+    release_leases([lease_id])
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not lease_set.lost:
+        time.sleep(0.02)
+    lease_set.stop()
+
+    assert lease_set.lost == [lease_id]
+    with pytest.raises(leases.LeaseLostError):
+        lease_set.verify()

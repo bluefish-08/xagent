@@ -347,6 +347,26 @@ def pending_collection(
 
 
 @asynccontextmanager
+async def pending_collection_async(
+    *collections: str, store: Optional[Any] = None
+) -> AsyncIterator[None]:
+    """``pending_collection`` for event-loop callers, releasing off the loop."""
+    token = _PENDING.set(_PENDING.get() | set(collections))
+    admitted_token = _ADMITTED.set(_ADMITTED.get())
+    leases_token = _LEASES.set(_LEASES.get())
+    lease_set = LeaseSet(store=store)
+    set_token = _LEASE_SET.set(lease_set)
+    try:
+        yield
+    finally:
+        _LEASE_SET.reset(set_token)
+        _LEASES.reset(leases_token)
+        _ADMITTED.reset(admitted_token)
+        _PENDING.reset(token)
+        await release_leases_async(lease_set.stop())
+
+
+@asynccontextmanager
 async def admitted_async(collection: str) -> AsyncIterator[None]:
     """Check the freeze and mark the collection admitted for this scope.
 

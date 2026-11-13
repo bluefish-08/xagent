@@ -97,7 +97,7 @@ from ...core.tools.core.RAG_tools.management.migration_state import (
     admitted_context_async,
     ensure_collection_writable,
     ensure_collection_writable_async,
-    pending_collection,
+    pending_collection_async,
     run_in_admitted_context,
 )
 from ...core.tools.core.RAG_tools.management.status import clear_ingestion_status
@@ -6469,7 +6469,7 @@ async def batch_delete_collections_api(
                         safe_name, int(effective_user.id), is_admin=False
                     )
                 )
-                with pending_collection(safe_name):
+                async with pending_collection_async(safe_name):
                     # A config-only delete removes just the caller's config row; gate data deletes only.
                     if delete_mode == "full":
                         await ensure_collection_writable_async(safe_name)
