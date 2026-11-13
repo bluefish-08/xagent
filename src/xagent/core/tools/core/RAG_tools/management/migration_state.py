@@ -68,6 +68,8 @@ _SCHEMA = pa.schema(
         ("source_model_id", pa.string()),
         ("target_model_id", pa.string()),
         ("updated_at", pa.timestamp("us")),
+        ("owner", pa.string()),
+        ("mode", pa.string()),
     ]
 )
 
@@ -80,6 +82,8 @@ class CollectionMigrationState:
     source_model_id: Optional[str] = None
     target_model_id: Optional[str] = None
     updated_at: Optional[datetime] = None
+    owner: Optional[str] = None
+    mode: Optional[str] = None
 
     def to_row(self) -> Dict[str, Any]:
         return {
@@ -87,6 +91,8 @@ class CollectionMigrationState:
             "source_model_id": self.source_model_id,
             "target_model_id": self.target_model_id,
             "updated_at": self.updated_at,
+            "owner": self.owner,
+            "mode": self.mode,
         }
 
 
@@ -100,12 +106,26 @@ def _row_state(row: Dict[str, Any]) -> str:
 
 def _ensure_table(conn: Any) -> None:
     if MIGRATION_TABLE in list_table_names(conn):
+        _ensure_columns(conn)
         return
     try:
         conn.create_table(MIGRATION_TABLE, schema=_SCHEMA)
     except Exception:
         if MIGRATION_TABLE not in list_table_names(conn):
             raise
+
+
+def _ensure_columns(conn: Any) -> None:
+    """Add the columns a table created by an older version lacks."""
+    table = conn.open_table(MIGRATION_TABLE)
+    try:
+        missing = {
+            field.name for field in _SCHEMA if field.name not in table.schema.names
+        }
+        if missing:
+            table.add_columns({name: "NULL" for name in missing})
+    finally:
+        _safe_close_table(table)
 
 
 def _read_row(
@@ -135,6 +155,8 @@ def read_migration_state(
         source_model_id=row.get("source_model_id"),
         target_model_id=row.get("target_model_id"),
         updated_at=row.get("updated_at"),
+        owner=row.get("owner"),
+        mode=row.get("mode"),
     )
 
 
