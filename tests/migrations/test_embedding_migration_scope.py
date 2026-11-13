@@ -29,8 +29,37 @@ class _Table:
             if rows:
                 yield pa.RecordBatch.from_pylist(rows)
 
+    def search(self) -> "_Query":
+        return _Query(self)
+
     def close(self) -> None:  # pragma: no cover - close is best-effort
         pass
+
+
+class _Query:
+    """The slice of LanceDB's query builder ``iter_rows`` uses."""
+
+    def __init__(self, table: Any) -> None:
+        self.table = table
+        self.filter = ""
+        self.columns: List[str] = []
+
+    def where(self, filter: str) -> "_Query":
+        self.filter = filter
+        return self
+
+    def select(self, columns: List[str]) -> "_Query":
+        self.columns = list(columns)
+        return self
+
+    def limit(self, value: Any) -> "_Query":
+        return self
+
+    def to_batches(self, batch_size: int) -> Iterator[Any]:
+        for batch in self.table.to_batches(filter=self.filter, batch_size=batch_size):
+            yield pa.RecordBatch.from_pylist(
+                [{k: row.get(k) for k in self.columns} for row in batch.to_pylist()]
+            )
 
 
 class _Conn:
@@ -567,3 +596,124 @@ def test_a_table_without_a_text_column_is_a_hard_failure(
 
     with pytest.raises(MigrationCliError, match="no text column"):
         list(mod.iter_source_chunks("kb", "old", conn=conn))
+
+
+# --- real LanceDB: the reader must work on the store's own table API ---
+
+
+def _real_table(conn: Any, name: str, rows: List[Dict[str, Any]]) -> None:
+    conn.create_table(name, data=pa.Table.from_pylist(rows))
+
+
+def _chunk_row(**overrides: Any) -> Dict[str, Any]:
+    return {
+        "collection": "kb",
+        "doc_id": "doc-1",
+        "chunk_id": "chunk-1",
+        "parse_hash": "hash-1",
+        "text": "hello",
+        "chunk_hash": "ch-1",
+        "metadata": None,
+        "user_id": 7,
+        "vector": [0.5, 0.5],
+        **overrides,
+    }
+
+
+def _model(model_id: str, model_name: str, dimension: int = 2) -> Any:
+    return SimpleNamespace(id=model_id, model_name=model_name, dimension=dimension)
+
+
+def test_iter_source_chunks_reads_a_real_table() -> None:
+    from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import (
+        embeddings_table_candidates,
+    )
+
+    conn = mod.connection()
+    table = embeddings_table_candidates("old-model")[0]
+    _real_table(
+        conn,
+        table,
+        [
+            _chunk_row(),
+            _chunk_row(chunk_id="chunk-2", collection="other"),
+            _chunk_row(chunk_id="chunk-3", text=None),
+        ],
+    )
+
+    chunks = list(mod.iter_source_chunks("kb", "old-model", conn=conn))
+
+    assert [chunk.chunk_id for chunk in chunks] == ["chunk-1", "chunk-3"]
+    assert chunks[0].doc_id == "doc-1"
+    assert chunks[0].chunk_hash == "ch-1"
+    assert chunks[0].user_id == 7
+    assert chunks[1].text == ""
+
+
+def test_scope_reads_the_legacy_table_search_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.core.tools.core.RAG_tools.LanceDB.model_tag_utils import to_model_tag
+    from xagent.core.tools.core.RAG_tools.storage.factory import (
+        get_vector_index_store,
+    )
+    from xagent.core.tools.core.RAG_tools.utils import model_resolver
+
+    model = _model("old-model", "legacy name")
+    monkeypatch.setattr(
+        model_resolver, "resolve_embedding_adapter", lambda model_id: (model, object())
+    )
+    legacy = f"embeddings_{to_model_tag('legacy name')}"
+    store = get_vector_index_store()
+    conn = store.get_raw_connection()
+    _real_table(conn, legacy, [_chunk_row(), _chunk_row(chunk_id="chunk-2")])
+
+    _, search_table = store.open_embeddings_table("old-model")
+
+    assert search_table == legacy
+    assert mod.source_embeddings_table("old-model", conn) == search_table
+    assert len(list(mod.iter_source_chunks("kb", "old-model", conn=conn))) == 2
+
+
+def test_a_config_only_binding_resolves_like_search() -> None:
+    import asyncio
+
+    from xagent.core.tools.core.RAG_tools.core.schemas import (
+        CollectionInfo,
+        IngestionConfig,
+    )
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        get_collection_sync,
+        resolve_effective_embedding_model_sync,
+    )
+
+    asyncio.run(
+        cm.collection_manager.save_collection(
+            CollectionInfo(
+                name="kb",
+                ingestion_config=IngestionConfig(embedding_model_id="old-model"),
+            )
+        )
+    )
+
+    assert mod.source_model_id("kb", get_collection_sync("kb")) == "old-model"
+    assert resolve_effective_embedding_model_sync("kb") == "old-model"
+
+
+def test_a_tool_layer_none_binding_is_not_a_model() -> None:
+    import asyncio
+
+    from xagent.core.tools.core.RAG_tools.core.schemas import CollectionInfo
+    from xagent.core.tools.core.RAG_tools.management import collection_manager as cm
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        get_collection_sync,
+    )
+
+    asyncio.run(
+        cm.collection_manager.save_collection(
+            CollectionInfo(name="kb", embedding_model_id="none")
+        )
+    )
+
+    assert mod.source_model_id("kb", get_collection_sync("kb")) is None

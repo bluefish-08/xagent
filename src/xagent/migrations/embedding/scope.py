@@ -144,16 +144,21 @@ def iter_rows(
     """Stream rows of ``table``, raising instead of reporting a failed read as empty."""
     opened = conn.open_table(table)
     try:
-        batches = opened.to_batches(filter=where, batch_size=batch_size)
-        for batch in batches:
-            present = [name for name in columns if name in batch.schema.names]
-            for row in batch.select(present).to_pylist():
-                yield row
+        present = [name for name in columns if name in opened.schema.names]
+        reader = (
+            opened.search()
+            .where(where)
+            .select(present)
+            .limit(None)
+            .to_batches(batch_size)
+        )
+        for batch in reader:
+            yield from batch.to_pylist()
     finally:
         _safe_close_table(opened)
 
 
-def _schema_names(conn: Any, table: str) -> List[str]:
+def schema_names(conn: Any, table: str) -> List[str]:
     opened = conn.open_table(table)
     try:
         return list(opened.schema.names)
@@ -161,7 +166,7 @@ def _schema_names(conn: Any, table: str) -> List[str]:
         _safe_close_table(opened)
 
 
-def _collection_filter(collection: str) -> str:
+def collection_filter(collection: str) -> str:
     return f"collection = '{escape_lancedb_string(collection)}'"
 
 
@@ -227,14 +232,14 @@ def iter_source_chunks(
     table = source_embeddings_table(model_id, conn)
     if table is None:
         return
-    if "text" not in set(_schema_names(conn, table)):
+    if "text" not in set(schema_names(conn, table)):
         # Without the text column every row would look textless and the
         # migration would flip an empty target; that is a broken table.
         raise MigrationCliError(
             f"embeddings table '{table}' has no text column; cannot migrate "
             f"collection '{collection}'"
         )
-    for row in iter_rows(conn, table, _collection_filter(collection), CHUNK_COLUMNS):
+    for row in iter_rows(conn, table, collection_filter(collection), CHUNK_COLUMNS):
         doc_id = str(row.get("doc_id") or "").strip()
         chunk_id = str(row.get("chunk_id") or "").strip()
         if not doc_id or not chunk_id:
@@ -296,7 +301,7 @@ def target_chunk_ids(
     return {
         str(row.get("chunk_id") or "")
         for row in iter_rows(
-            conn, table, _collection_filter(collection), ["chunk_id", "vector"]
+            conn, table, collection_filter(collection), ["chunk_id", "vector"]
         )
         if row.get("chunk_id") and row.get("vector") is not None
     }
