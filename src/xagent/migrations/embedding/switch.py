@@ -22,9 +22,10 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from xagent.core.model.embedding.base import BaseEmbedding
 from xagent.core.model.model import EmbeddingModelConfig
@@ -64,12 +65,14 @@ from xagent.migrations.embedding.scope import (
     METADATA_TABLE,
     SKIP_OTHER_ENGINE,
     MigrationCliError,
+    add_scope_args,
     collection_engine,
     collection_filter,
     collection_info,
     connection,
     embeddings_table,
     iter_rows,
+    resolve_collection_names,
     source_embeddings_table,
     source_model_id,
     table_names,
@@ -93,6 +96,7 @@ RESULT_ALREADY = "already-switched"
 RESULT_REFUSED = "refused"
 RESULT_FAILED = "failed"
 RESULT_INTERRUPTED = "interrupted-restored"
+RESULT_NOT_STARTED = "not-started"
 
 MODE_SWITCH = "switch"
 MODE_ROLLBACK = "rollback"
@@ -664,6 +668,108 @@ def describe(report: SwitchReport) -> None:
         logger.info("%s: acceptance %s=%s", report.name, key, value)
 
 
+def switch_collections(
+    target_model_id: str,
+    *,
+    collections: Optional[Sequence[str]] = None,
+    team: Optional[int] = None,
+    concurrency: int = 1,
+    mode: str = MODE_SWITCH,
+    wait_seconds: float = DEFAULT_WAIT_SECONDS,
+    cfg: Optional[IngestionConfig] = None,
+    rate_limit: float = 0.0,
+) -> List[SwitchReport]:
+    """Run the window over every collection in scope, ``concurrency`` at a time.
+
+    One run id owns every window, and one rate limiter paces them all. Ctrl-C
+    stops new windows; the one that was interrupted reports what it did with
+    its row, and the rest are reported ``not-started``.
+    """
+    names = resolve_collection_names(collections=collections, team=team)
+    if not names:
+        logger.warning("No collections in scope; check --collection/--team")
+        return []
+    watcher = InflightJobWatcher()
+    owner = _run_owner()
+    limiter = RateLimiter(rate_limit)
+    stop = threading.Event()
+    reports: Dict[str, SwitchReport] = {}
+
+    def _one(name: str) -> SwitchReport:
+        if stop.is_set():
+            return _not_started(name, target_model_id, mode)
+        try:
+            return switch_collection(
+                name,
+                target_model_id,
+                wait_seconds=wait_seconds,
+                job_watcher=watcher,
+                mode=mode,
+                cfg=cfg,
+                rate_limiter=limiter,
+                owner=owner,
+            )
+        except WindowInterrupted as exc:
+            stop.set()
+            return exc.report
+        except Exception as exc:  # noqa: BLE001 - one collection must not stop the rest
+            logger.exception("%s: window crashed", name)
+            return SwitchReport(
+                name=name,
+                target_model_id=target_model_id,
+                mode=mode,
+                result=RESULT_FAILED,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+
+    workers = max(1, min(concurrency, len(names)))
+    if workers == 1:
+        for name in names:
+            try:
+                reports[name] = _one(name)
+            except KeyboardInterrupt:
+                # Outside any window now: start nothing more.
+                stop.set()
+                break
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_one, name): name for name in names}
+            try:
+                for future, name in futures.items():
+                    reports[name] = future.result()
+            except KeyboardInterrupt:
+                logger.warning("Interrupted: finishing the windows already running")
+                stop.set()
+                for future in futures:
+                    future.cancel()
+                for future, name in futures.items():
+                    if future.cancelled() or name in reports:
+                        continue
+                    try:
+                        reports[name] = future.result()
+                    except BaseException as exc:  # noqa: BLE001 - the crashed window
+                        reports[name] = SwitchReport(
+                            name=name,
+                            target_model_id=target_model_id,
+                            mode=mode,
+                            result=RESULT_FAILED,
+                            reason=f"{type(exc).__name__}: {exc}",
+                        )
+    return [
+        reports.get(name) or _not_started(name, target_model_id, mode) for name in names
+    ]
+
+
+def _not_started(name: str, target_model_id: str, mode: str) -> SwitchReport:
+    return SwitchReport(
+        name=name,
+        target_model_id=target_model_id,
+        mode=mode,
+        result=RESULT_NOT_STARTED,
+        reason="interrupted",
+    )
+
+
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", required=True, help="Target embedding model id")
     parser.add_argument(
@@ -702,35 +808,43 @@ def _run_config(args: argparse.Namespace) -> IngestionConfig:
     )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def run_cli(mode: str, argv: Optional[List[str]], *, description: str) -> int:
+    """The multi-collection entry point both commands use."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Switch one collection to a new embedding model.\n\n"
-            "Precompute its vectors first (migrations.embedding.embed). The\n"
-            "collection is frozen for the duration of the window; a re-run\n"
-            "resumes a window that was interrupted."
-        ),
+        description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_run_args(parser)
+    add_scope_args(parser)
     parser.add_argument(
-        "--collection", required=True, metavar="NAME", help="Collection to switch"
+        "--concurrency",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Collections processed at once (default 1)",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
-    if args.batch_size <= 0:
-        logger.error("--batch-size must be positive")
-        return 2
+    for flag, value in (
+        ("--concurrency", args.concurrency),
+        ("--batch-size", args.batch_size),
+    ):
+        if value <= 0:
+            logger.error("%s must be positive", flag)
+            return 2
     if not math.isfinite(args.rate_limit) or args.rate_limit < 0:
         logger.error("--rate-limit must be a finite, non-negative number")
         return 2
 
     try:
-        report = switch_collection(
-            args.collection,
+        reports = switch_collections(
             args.model,
+            collections=args.collection,
+            team=args.team,
+            concurrency=args.concurrency,
+            mode=mode,
             wait_seconds=args.wait_seconds,
             cfg=_run_config(args),
             rate_limit=args.rate_limit,
@@ -739,11 +853,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("%s", exc)
         return 2
     except Exception as exc:  # noqa: BLE001 - report and exit non-zero
-        logger.error("Switch failed: %s", exc, exc_info=True)
+        logger.error("Migration command failed: %s", exc, exc_info=True)
         return 2
 
-    describe(report)
-    return 0 if report.result in (RESULT_SWITCHED, RESULT_ALREADY) else 1
+    if not reports:
+        return 1
+    for report in reports:
+        describe(report)
+    return (
+        0 if all(r.result in (RESULT_SWITCHED, RESULT_ALREADY) for r in reports) else 1
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    return run_cli(
+        MODE_SWITCH,
+        argv,
+        description=(
+            "Switch collections to a new embedding model.\n\n"
+            "Precompute their vectors first (migrations.embedding.embed). Each\n"
+            "collection is frozen for the duration of its window; a re-run\n"
+            "resumes a window that was interrupted."
+        ),
+    )
 
 
 if __name__ == "__main__":
