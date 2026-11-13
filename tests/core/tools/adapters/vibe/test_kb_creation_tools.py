@@ -43,6 +43,11 @@ class _FakeMetadataStore:
         self.saved_collections: list[CollectionInfo] = []
         self.deleted_collections: list[str] = []
 
+    def get_raw_connection(self) -> object:
+        from xagent.providers.vector_store.lancedb import get_connection_from_env
+
+        return get_connection_from_env()
+
     async def save_collection_config(
         self,
         collection: str,
