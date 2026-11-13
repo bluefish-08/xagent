@@ -428,19 +428,23 @@ def test_wait_until_idle_reports_what_is_left_at_the_deadline(
 def test_cli_exit_codes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         mod,
-        "switch_collection",
-        lambda *args, **kwargs: mod.SwitchReport(
-            name="kb", target_model_id="new-model", result=mod.RESULT_SWITCHED
-        ),
+        "switch_collections",
+        lambda *args, **kwargs: [
+            mod.SwitchReport(
+                name="kb", target_model_id="new-model", result=mod.RESULT_SWITCHED
+            )
+        ],
     )
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 0
 
     monkeypatch.setattr(
         mod,
-        "switch_collection",
-        lambda *args, **kwargs: mod.SwitchReport(
-            name="kb", target_model_id="new-model", result=mod.RESULT_REFUSED
-        ),
+        "switch_collections",
+        lambda *args, **kwargs: [
+            mod.SwitchReport(
+                name="kb", target_model_id="new-model", result=mod.RESULT_REFUSED
+            )
+        ],
     )
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 1
 
@@ -451,6 +455,180 @@ def test_cli_returns_2_when_the_run_cannot_start(
     def _raise(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("no model hub")
 
-    monkeypatch.setattr(mod, "switch_collection", _raise)
+    monkeypatch.setattr(mod, "switch_collections", _raise)
 
     assert mod.main(["--model", "new-model", "--collection", "kb"]) == 2
+
+
+def test_multi_collection_runs_process_every_collection_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: List[str] = []
+
+    def _switch(name: str, target: str, **kwargs: Any) -> mod.SwitchReport:
+        seen.append(name)
+        return mod.SwitchReport(
+            name=name, target_model_id=target, result=mod.RESULT_SWITCHED
+        )
+
+    monkeypatch.setattr(mod, "switch_collection", _switch)
+    monkeypatch.setattr(
+        mod, "resolve_collection_names", lambda **kwargs: ["kb-1", "kb-2", "kb-3"]
+    )
+
+    reports = mod.switch_collections("new-model")
+
+    assert seen == ["kb-1", "kb-2", "kb-3"]
+    assert [report.name for report in reports] == ["kb-1", "kb-2", "kb-3"]
+
+
+def test_multi_collection_runs_overlap_when_concurrency_allows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    threads: set = set()
+
+    def _switch(name: str, target: str, **kwargs: Any) -> mod.SwitchReport:
+        threads.add(threading.current_thread().name)
+        time.sleep(0.02)
+        return mod.SwitchReport(
+            name=name, target_model_id=target, result=mod.RESULT_SWITCHED
+        )
+
+    monkeypatch.setattr(mod, "switch_collection", _switch)
+    monkeypatch.setattr(
+        mod, "resolve_collection_names", lambda **kwargs: ["kb-1", "kb-2", "kb-3"]
+    )
+
+    reports = mod.switch_collections("new-model", concurrency=2)
+
+    assert len(reports) == 3
+    assert len(threads) > 1
+
+
+def test_one_collection_crashing_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _switch(name: str, target: str, **kwargs: Any) -> mod.SwitchReport:
+        if name == "kb-bad":
+            raise RuntimeError("window exploded")
+        return mod.SwitchReport(
+            name=name, target_model_id=target, result=mod.RESULT_SWITCHED
+        )
+
+    monkeypatch.setattr(mod, "switch_collection", _switch)
+    monkeypatch.setattr(
+        mod, "resolve_collection_names", lambda **kwargs: ["kb-bad", "kb-good"]
+    )
+
+    reports = mod.switch_collections("new-model")
+
+    assert reports[0].result == mod.RESULT_FAILED
+    assert "RuntimeError" in reports[0].reason
+    assert reports[1].result == mod.RESULT_SWITCHED
+
+
+def test_an_empty_scope_reports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: [])
+
+    assert mod.switch_collections("new-model") == []
+
+
+def test_cli_forwards_scope_and_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: Dict[str, Any] = {}
+
+    def _switch_collections(model_id: str, **kwargs: Any) -> List[mod.SwitchReport]:
+        seen["model_id"] = model_id
+        seen.update(kwargs)
+        return [
+            mod.SwitchReport(
+                name="kb", target_model_id=model_id, result=mod.RESULT_SWITCHED
+            )
+        ]
+
+    monkeypatch.setattr(mod, "switch_collections", _switch_collections)
+
+    assert (
+        mod.main(
+            [
+                "--model",
+                "new-model",
+                "--collection",
+                "kb-1",
+                "--collection",
+                "kb-2",
+                "--concurrency",
+                "3",
+                "--wait-seconds",
+                "60",
+            ]
+        )
+        == 0
+    )
+    assert seen["collections"] == ["kb-1", "kb-2"]
+    assert seen["team"] is None
+    assert seen["concurrency"] == 3
+    assert seen["wait_seconds"] == 60.0
+    assert seen["mode"] == mod.MODE_SWITCH
+
+
+def test_cli_returns_2_for_a_non_positive_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: List[Any] = []
+
+    def _record(*args: Any, **kwargs: Any) -> Any:
+        called.append(args)
+        return []
+
+    monkeypatch.setattr(mod, "switch_collections", _record)
+
+    assert mod.main(["--model", "new-model", "--concurrency", "0"]) == 2
+    assert called == []
+
+
+def test_run_cli_forwards_the_requested_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: Dict[str, Any] = {}
+
+    def _switch_collections(model_id: str, **kwargs: Any) -> List[mod.SwitchReport]:
+        seen.update(kwargs)
+        return [
+            mod.SwitchReport(
+                name="kb", target_model_id=model_id, result=mod.RESULT_SWITCHED
+            )
+        ]
+
+    monkeypatch.setattr(mod, "switch_collections", _switch_collections)
+
+    assert (
+        mod.run_cli(
+            mod.MODE_ROLLBACK,
+            ["--model", "old-model", "--collection", "kb"],
+            description="rollback",
+        )
+        == 0
+    )
+    assert seen["mode"] == mod.MODE_ROLLBACK
+
+
+def test_rollback_runs_the_same_window_in_rollback_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.migrations.embedding import rollback as rollback_mod
+
+    seen: Dict[str, Any] = {}
+
+    def _run_cli(mode: str, argv: Any, *, description: str) -> int:
+        seen["mode"] = mode
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(rollback_mod, "run_cli", _run_cli)
+
+    assert rollback_mod.main(["--model", "old-model", "--collection", "kb"]) == 0
+    assert seen["mode"] == mod.MODE_ROLLBACK
+    assert seen["argv"] == ["--model", "old-model", "--collection", "kb"]
