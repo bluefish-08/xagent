@@ -242,10 +242,19 @@ ALLOWED: dict[str, tuple[int, str]] = {
         "immediately in the sync-to-async bridge.",
     ),
     "core/tools/core/RAG_tools/management/collections.py": (2, READ),
+    "core/tools/core/RAG_tools/management/write_leases.py": (
+        1,
+        "Lease heartbeat: a daemon thread that renews the operation's own "
+        "lease rows while its scope runs. The scope stops and joins it before "
+        "releasing; a release lost to cancellation leaves rows that expire "
+        "after the TTL. It belongs to the HTTP-route and execution classes "
+        "retire_writers lists under 'Not covered'.",
+    ),
     "core/tools/core/RAG_tools/management/migration_state.py": (
         1,
         "The freeze guard reads one state row (and opens the metadata "
-        "connection to read it); it writes no row.",
+        "connection to read it). Lease writes go off the loop through "
+        "run_blocking, and a scope releases on its own exit.",
     ),
     "core/tools/core/RAG_tools/pipelines/document_ingestion.py": (
         2,

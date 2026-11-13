@@ -31,6 +31,12 @@ from ..LanceDB.schema_manager import _safe_close_table
 from ..storage.factory import get_metadata_store
 from ..utils.lancedb_query_utils import list_table_names
 from ..utils.string_utils import escape_lancedb_string
+from .write_leases import (
+    LeaseSet,
+    acquire_lease,
+    acquire_lease_async,
+    release_leases_async,
+)
 
 MIGRATION_TABLE = "collection_migration_state"
 IDLE = "idle"
@@ -47,6 +53,12 @@ _ADMITTED: ContextVar[frozenset[str]] = ContextVar(
 _PENDING: ContextVar[frozenset[str]] = ContextVar(
     "kb_pending_collections", default=frozenset()
 )
+# (collection, lease_id) pairs this operation already holds, and the set that
+# renews and releases them when the operation ends.
+_LEASES: ContextVar[tuple[tuple[str, str], ...]] = ContextVar(
+    "kb_write_leases", default=()
+)
+_LEASE_SET: ContextVar[Optional[LeaseSet]] = ContextVar("kb_lease_set", default=None)
 
 _SCHEMA = pa.schema(
     [
@@ -220,30 +232,85 @@ def _is_admitted(collection: str) -> bool:
     return collection in _ADMITTED.get()
 
 
+def _holding_lease(collection: str) -> bool:
+    return any(name == collection for name, _ in _LEASES.get())
+
+
+def _record_lease(collection: str, lease_id: str) -> None:
+    _LEASES.set(_LEASES.get() + ((collection, lease_id),))
+    lease_set = _LEASE_SET.get()
+    if lease_set is not None:
+        lease_set.add(lease_id)
+
+
+def _lease_for_guard(collection: str, *, store: Optional[Any] = None) -> Optional[str]:
+    """Take the operation's lease before the freeze read, when one is due."""
+    if collection not in _PENDING.get() or _holding_lease(collection):
+        return None
+    lease_id = acquire_lease(collection, "write-guard", store=store)
+    _record_lease(collection, lease_id)
+    return lease_id
+
+
+async def _lease_for_guard_async(
+    collection: str, *, store: Optional[Any] = None
+) -> Optional[str]:
+    if collection not in _PENDING.get() or _holding_lease(collection):
+        return None
+    lease_id = await acquire_lease_async(collection, "write-guard", store=store)
+    _record_lease(collection, lease_id)
+    return lease_id
+
+
 @contextmanager
 def pending_collection(*collections: str) -> Iterator[None]:
     """Open a scope whose first guard call per collection decides its admission."""
     token = _PENDING.set(_PENDING.get() | set(collections))
     admitted_token = _ADMITTED.set(_ADMITTED.get())
+    leases_token = _LEASES.set(_LEASES.get())
+    lease_set = LeaseSet()
+    set_token = _LEASE_SET.set(lease_set)
     try:
         yield
     finally:
+        _LEASE_SET.reset(set_token)
+        _LEASES.reset(leases_token)
         _ADMITTED.reset(admitted_token)
         _PENDING.reset(token)
+        lease_set.release()
 
 
 @asynccontextmanager
 async def admitted_async(collection: str) -> AsyncIterator[None]:
-    """Check the freeze and mark the collection admitted for this scope."""
+    """Check the freeze and mark the collection admitted for this scope.
+
+    The lease goes in first: an operation that finds the collection frozen has
+    already been visible to the migration, which is what closes the gap between
+    checking and freezing.
+    """
     if _is_admitted(collection):
         yield
         return
-    await ensure_collection_writable_async(collection)
-    token = _ADMITTED.set(_ADMITTED.get() | {collection})
+    leases_token = _LEASES.set(_LEASES.get())
+    lease_set = LeaseSet()
+    set_token = _LEASE_SET.set(lease_set)
     try:
-        yield
+        if not _holding_lease(collection):
+            _record_lease(
+                collection, await acquire_lease_async(collection, "admitted_async")
+            )
+        await ensure_collection_writable_async(collection)
+        token = _ADMITTED.set(_ADMITTED.get() | {collection})
+        try:
+            yield
+        finally:
+            _ADMITTED.reset(token)
     finally:
-        _ADMITTED.reset(token)
+        _LEASE_SET.reset(set_token)
+        _LEASES.reset(leases_token)
+        # Stop renewing before awaiting: a cancelled release still lets the
+        # rows expire instead of a heartbeat renewing them forever.
+        await release_leases_async(lease_set.stop())
 
 
 async def admitted_context_async(collection: str) -> Context:
@@ -332,6 +399,7 @@ def ensure_collection_writable(
     """Raise before a write when the collection is frozen for migration."""
     if _is_admitted(collection_name):
         return
+    _lease_for_guard(collection_name, store=store)
     _raise_if_frozen(collection_name, read_migration_state(collection_name, store))
     if collection_name in _PENDING.get():
         _ADMITTED.set(_ADMITTED.get() | {collection_name})
@@ -343,6 +411,7 @@ async def ensure_collection_writable_async(
     """Async guard: runs the blocking state read off the event loop."""
     if _is_admitted(collection_name):
         return
+    await _lease_for_guard_async(collection_name, store=store)
     state = await asyncio.to_thread(read_migration_state, collection_name, store)
     _raise_if_frozen(collection_name, state)
     if collection_name in _PENDING.get():
