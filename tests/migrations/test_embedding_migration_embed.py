@@ -70,6 +70,7 @@ def _wire(
     monkeypatch.setattr(
         mod, "load_successful_parse_hashes", lambda name, **kwargs: dict(hashes)
     )
+    monkeypatch.setattr(mod, "collection_backend", lambda name: "lancedb")
 
 
 def _record_stage(
@@ -143,6 +144,34 @@ def test_a_rerun_over_embedded_chunks_writes_nothing_and_reports_unchanged(
     assert item.documents_unchanged == 1
     assert item.documents_embedded == 0
     assert item.chunks_embedded == 0
+
+
+def test_collections_on_another_engine_are_skipped_and_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[Dict[str, Any]] = []
+    _wire(
+        monkeypatch,
+        docs=[DocumentScope("doc-1", 42, "/data/a.pdf")],
+        hashes={"doc-1": "hash-1"},
+        names=("milvus-kb", "kb"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "collection_backend",
+        lambda name: "milvus" if name == "milvus-kb" else "lancedb",
+    )
+    _record_stage(monkeypatch, calls)
+
+    report = mod.embed_collections("target-model")
+
+    skipped = report.collections[0]
+    assert skipped.collection_skip == mod.SKIP_OTHER_ENGINE
+    assert skipped.engine == "milvus"
+    assert skipped.documents_total == 0
+    assert report.collections[1].documents_embedded == 1
+    assert [call["collection"] for call in calls] == ["kb"]
+    assert report.failed is False
 
 
 def test_documents_without_an_owner_are_skipped_before_anything_else(
@@ -650,6 +679,60 @@ def test_team_scope_maps_hook_answers_to_collection_names(
     assert seen["team_id"] == 7
     assert seen["configure_db"] == {"read_only": True}
     assert seen["closed"] is True
+
+
+def test_collection_backend_reads_the_stored_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.core.tools.core.RAG_tools.kb import coordinator as coordinator_mod
+    from xagent.core.tools.core.RAG_tools.management import (
+        collection_manager as collection_manager_mod,
+    )
+    from xagent.core.tools.core.RAG_tools.storage.vector_backend import (
+        KBStorageBackend,
+    )
+
+    info = SimpleNamespace(extra_metadata={"kb_storage": {"backend": "milvus"}})
+    seen: Dict[str, Any] = {}
+
+    def _resolve(collection_info: object | None) -> Any:
+        seen["info"] = collection_info
+        return KBStorageBackend.MILVUS
+
+    monkeypatch.setattr(
+        collection_manager_mod, "get_collection_sync", lambda name: info
+    )
+    monkeypatch.setattr(coordinator_mod, "resolve_collection_backend", _resolve)
+
+    assert common.collection_backend("kb") == "milvus"
+    assert seen["info"] is info
+
+
+def test_collection_backend_defaults_for_unknown_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.core.tools.core.RAG_tools.kb import coordinator as coordinator_mod
+    from xagent.core.tools.core.RAG_tools.management import (
+        collection_manager as collection_manager_mod,
+    )
+    from xagent.core.tools.core.RAG_tools.storage.vector_backend import (
+        KBStorageBackend,
+    )
+
+    def _missing(name: str) -> Any:
+        raise ValueError("Collection not found")
+
+    seen: Dict[str, Any] = {}
+
+    def _resolve(collection_info: object | None) -> Any:
+        seen["info"] = collection_info
+        return KBStorageBackend.LANCEDB
+
+    monkeypatch.setattr(collection_manager_mod, "get_collection_sync", _missing)
+    monkeypatch.setattr(coordinator_mod, "resolve_collection_backend", _resolve)
+
+    assert common.collection_backend("kb") == "lancedb"
+    assert seen["info"] is None
 
 
 def test_rate_limiter_spaces_calls_at_the_configured_rate(
