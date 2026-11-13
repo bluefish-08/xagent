@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 
 import pyarrow as pa  # type: ignore
 
@@ -60,6 +60,7 @@ _SCHEMA = pa.schema(
 
 _acquire_count = 0
 _acquire_lock = threading.Lock()
+_compact_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -111,9 +112,10 @@ def _maybe_compact() -> None:
     with _acquire_lock:
         _acquire_count += 1
         due = _acquire_count % COMPACT_EVERY_ACQUIRES == 0
-    if not due:
+    if not due or _compact_lock.locked():
         return
-    threading.Thread(target=_compact, name="kb-lease-compact", daemon=True).start()
+    with _compact_lock:
+        threading.Thread(target=_compact, name="kb-lease-compact", daemon=True).start()
 
 
 def acquire_lease(
@@ -164,28 +166,43 @@ def renew_leases(
     *,
     ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS,
     store: Optional[Any] = None,
-) -> int:
-    """Extend these leases; returns how many rows were updated."""
+) -> Tuple[int, List[str]]:
+    """Extend these leases; returns (renewed, lost ids).
+
+    A lease whose row is gone, or whose expiry has already passed, is lost: it
+    must not be revived, or a migration that saw it expire would never learn
+    that its owner is still writing.
+    """
     ids = [lease_id for lease_id in lease_ids if lease_id]
     if not ids:
-        return 0
+        return 0, []
     conn = _store_connection(store)
     if LEASES_TABLE not in list_table_names(conn):
-        return 0
+        return 0, list(ids)
     table = conn.open_table(LEASES_TABLE)
+    renewed = 0
+    lost: List[str] = []
+    now = _now()
     try:
-        updated = 0
         for lease_id in ids:
             where = f"lease_id = '{escape_lancedb_string(lease_id)}'"
             rows = table.search().where(where).to_arrow().to_pylist()
             if not rows:
+                lost.append(lease_id)
                 continue
             expires_at = rows[0].get("expires_at")
-            target = _now() + timedelta(seconds=max(1.0, float(ttl_seconds)))
-            if isinstance(expires_at, datetime) and expires_at >= target:
+            if not isinstance(expires_at, datetime) or expires_at <= now:
+                lost.append(lease_id)
                 continue
-            updated += int(table.update(where, {"expires_at": target}).rows_updated)
-        return updated
+            target = now + timedelta(seconds=max(1.0, float(ttl_seconds)))
+            if expires_at >= target:
+                renewed += 1
+                continue
+            renewed += int(
+                getattr(table.update(where, {"expires_at": target}), "rows_updated", 0)
+                or 0
+            )
+        return renewed, lost
     finally:
         _safe_close_table(table)
 
@@ -218,7 +235,8 @@ def live_leases(name: str, *, store: Optional[Any] = None) -> List[WriteLease]:
         rows = table.search().where(where).to_arrow().to_pylist()
     finally:
         _safe_close_table(table)
-    cutoff = _now() + timedelta(seconds=EXPIRY_SKEW_MARGIN_SECONDS)
+    # Err towards alive: a lease is live until it is a margin past its expiry.
+    cutoff = _now() - timedelta(seconds=EXPIRY_SKEW_MARGIN_SECONDS)
     live: List[WriteLease] = []
     for row in rows:
         expires_at = row.get("expires_at")
@@ -371,28 +389,35 @@ class LeaseSet:
         while not self._stop.wait(interval):
             ids = self.lease_ids
             try:
-                renewed = renew_leases(ids, ttl_seconds=self._ttl, store=self._store)
+                _renewed, lost = renew_leases(
+                    ids, ttl_seconds=self._ttl, store=self._store
+                )
             except Exception:  # noqa: BLE001 - keep trying until the scope ends
+                # A renewal we cannot perform is a lease we cannot prove we hold.
                 logger.exception("Failed to renew write leases")
-                continue
-            if renewed < len(ids):
-                # A row we could not renew was purged as expired; the scope's
-                # writes are no longer covered by a lease.
+                lost = ids
+            if lost:
                 with self._lock:
-                    for lease_id in ids:
+                    for lease_id in lost:
                         if lease_id not in self._lost:
                             self._lost.append(lease_id)
                 logger.error(
                     "Lost %d of %d write leases; the operation must stop",
-                    len(ids) - renewed,
+                    len(lost),
                     len(ids),
                 )
             self._renewals += 1
             if self._renewals % GC_EVERY_RENEWALS == 0:
-                try:
-                    purge_expired_leases(store=self._store)
-                except Exception:  # noqa: BLE001 - GC must never fail a scope
-                    logger.exception("Failed to purge expired write leases")
+                # Off this thread: GC must not delay the next renewal.
+                threading.Thread(
+                    target=self._gc, name="kb-lease-gc", daemon=True
+                ).start()
+
+    def _gc(self) -> None:
+        try:
+            purge_expired_leases(store=self._store)
+        except Exception:  # noqa: BLE001 - GC must never fail a scope
+            logger.exception("Failed to purge expired write leases")
 
     def verify(self) -> None:
         """Raise when this scope no longer holds every lease it took.

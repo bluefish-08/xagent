@@ -32,6 +32,7 @@ from ..storage.factory import get_metadata_store
 from ..utils.lancedb_query_utils import list_table_names
 from ..utils.string_utils import escape_lancedb_string
 from .write_leases import (
+    LeaseLostError,
     LeaseSet,
     acquire_lease,
     acquire_lease_async,
@@ -224,6 +225,30 @@ def clear_migration_state(collection_name: str) -> None:
         _safe_close_table(table)
 
 
+def verify_active_leases(collection: Optional[str] = None) -> None:
+    """Raise when the current scope's lease set is broken.
+
+    Long writers call this at their commit points: a lease the migration has
+    already seen expire means the migration may have started its window, so the
+    operation must stop instead of writing behind it.
+    """
+    lease_set = _LEASE_SET.get()
+    if lease_set is None:
+        return
+    try:
+        lease_set.verify()
+    except LeaseLostError as exc:
+        raise CollectionMigratingError(
+            "Knowledge base write lease was lost; the operation must stop",
+            details={"collection": collection, "error": str(exc)},
+        ) from exc
+
+
+def holds_lease(collection: str) -> bool:
+    """Whether this scope already holds ``collection``'s lease."""
+    return _holding_lease(collection)
+
+
 @asynccontextmanager
 async def holding_leases(
     *names: str, operation: str, store: Optional[Any] = None
@@ -390,8 +415,21 @@ def admits_collection(
             names = _as_names(get_name(*args, **kwargs))
             if not names:
                 return await func(*args, **kwargs)
-            with pending_collection(*names):
+            token = _PENDING.set(_PENDING.get() | set(names))
+            admitted_token = _ADMITTED.set(_ADMITTED.get())
+            leases_token = _LEASES.set(_LEASES.get())
+            lease_set = LeaseSet()
+            set_token = _LEASE_SET.set(lease_set)
+            try:
                 return await func(*args, **kwargs)
+            finally:
+                _LEASE_SET.reset(set_token)
+                _LEASES.reset(leases_token)
+                _ADMITTED.reset(admitted_token)
+                _PENDING.reset(token)
+                # Async release: the sync one joins the heartbeat thread and
+                # would block the event loop for up to its timeout.
+                await release_leases_async(lease_set.stop())
 
         return cast(F, wrapper)
 

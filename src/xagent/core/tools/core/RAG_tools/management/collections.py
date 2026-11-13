@@ -50,7 +50,11 @@ from ..utils.lancedb_query_utils import _safe_count_rows, list_table_names
 from ..utils.string_utils import build_lancedb_filter_expression, escape_lancedb_string
 from ..utils.user_permissions import UserPermissions
 from ..utils.user_scope import resolve_user_scope
-from .migration_state import ensure_collection_writable, leased_collections
+from .migration_state import (
+    ensure_collection_writable,
+    leased_collections,
+    verify_active_leases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1266,6 +1270,7 @@ def _delete_document_impl(
     """
     with leased_collections(collection, operation="document-delete"):
         ensure_collection_writable(collection)
+        verify_active_leases(collection)
 
         vector_store = get_vector_index_store()
 

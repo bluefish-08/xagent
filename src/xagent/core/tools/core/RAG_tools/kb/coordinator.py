@@ -33,6 +33,7 @@ from ..core.schemas import (
 from ..management.migration_state import (
     ensure_collection_writable_async,
     holding_leases,
+    verify_active_leases,
 )
 from ..storage.factory import StorageFactory
 from ..utils.user_scope import resolve_user_scope
@@ -1085,6 +1086,7 @@ class KBCoordinator:
             if not is_admin and effective_doc_ids is None:
                 effective_doc_ids = affected_doc_ids
 
+            verify_active_leases(collection)
             try:
                 if is_admin:
                     result_counts = await run_blocking(
@@ -1266,6 +1268,8 @@ class KBCoordinator:
             # gate: a hard exception (e.g. no DB connection) propagates out, and
             # per-table failures are returned as a non-empty warnings list (the store
             # catches them per table rather than raising) — short-circuit on those too.
+            verify_active_leases(old_name)
+            verify_active_leases(new_name)
             data_warnings = await run_blocking(
                 handle.rename_collection_data,
                 new_name,

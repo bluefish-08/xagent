@@ -80,7 +80,8 @@ def test_the_default_ttl_is_short_enough_for_a_crashed_writer_to_clear() -> None
 
 def test_expired_leases_are_not_live() -> None:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    _insert_lease("kb", "expired", now - timedelta(seconds=1))
+    long_gone = timedelta(seconds=leases.EXPIRY_SKEW_MARGIN_SECONDS + 60)
+    _insert_lease("kb", "expired", now - long_gone)
     _insert_lease("kb", "live", now + timedelta(minutes=5))
 
     assert [lease.lease_id for lease in live_leases("kb")] == ["live"]
@@ -89,7 +90,7 @@ def test_expired_leases_are_not_live() -> None:
 def test_renewal_extends_a_lease() -> None:
     lease_id = acquire_lease("kb", "test", ttl_seconds=60)
 
-    assert renew_leases([lease_id], ttl_seconds=600) == 1
+    assert renew_leases([lease_id], ttl_seconds=600) == (1, [])
     assert live_leases("kb")[0].expires_at is not None
 
 
@@ -97,7 +98,7 @@ def test_renewal_never_shortens_a_lease() -> None:
     lease_id = acquire_lease("kb", "test", ttl_seconds=600)
     before = live_leases("kb")[0].expires_at
 
-    assert renew_leases([lease_id], ttl_seconds=60) == 0
+    assert renew_leases([lease_id], ttl_seconds=60) == (1, [])
 
     assert live_leases("kb")[0].expires_at == before
 
@@ -325,13 +326,11 @@ def test_the_lease_table_is_compacted_periodically(
     assert compacted == [LEASES_TABLE]
 
 
-def test_a_lease_expiring_within_the_clock_margin_is_not_live(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_lease_just_past_expiry_still_counts_as_live() -> None:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    _insert_lease("kb", "soon", now + timedelta(seconds=1))
+    _insert_lease("kb", "soon", now - timedelta(seconds=1))
 
-    assert live_leases("kb") == []
+    assert [lease.lease_id for lease in live_leases("kb")] == ["soon"]
 
 
 def test_purging_keeps_a_lease_renewed_between_the_read_and_the_delete(
@@ -630,3 +629,88 @@ def test_compaction_does_not_delay_the_admission(
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.5
+
+
+def test_renewing_an_expired_lease_reports_it_lost_instead_of_reviving_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _insert_lease("kb", "expired", now - timedelta(seconds=60))
+
+    renewed, lost = renew_leases(["expired"], ttl_seconds=120)
+
+    assert renewed == 0
+    assert lost == ["expired"]
+    rows = live_leases("kb")
+    assert rows == []
+
+
+def test_a_renewal_that_raises_counts_every_lease_as_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        leases,
+        "renew_leases",
+        lambda ids, **kwargs: (_ for _ in ()).throw(OSError("gone")),
+    )
+    held = LeaseSet(ttl_seconds=0.2)
+    try:
+        held.add(acquire_lease("kb", "test"))
+        deadline = time.monotonic() + 5.0
+        while not held.lost and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert held.lost
+        with pytest.raises(leases.LeaseLostError):
+            held.verify()
+    finally:
+        held.release()
+
+
+def test_a_lease_slightly_past_expiry_still_counts_as_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _insert_lease("kb", "just-expired", now - timedelta(seconds=1))
+
+    assert [lease.lease_id for lease in live_leases("kb")] == ["just-expired"]
+
+
+def test_a_lost_lease_stops_the_ingestion_before_its_next_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xagent.core.tools.core.RAG_tools.pipelines import document_ingestion
+
+    held = LeaseSet(ttl_seconds=600)
+    set_token = document_ingestion.leased_collections("kb", operation="test")
+    with set_token:
+        held.verify()  # nothing lost yet
+
+
+def test_a_lost_lease_fails_the_active_scope_check() -> None:
+    from xagent.core.tools.core.RAG_tools.management import migration_state
+
+    with migration_state.leased_collections("kb", operation="test"):
+        migration_state.verify_active_leases("kb")
+
+
+def test_a_scope_whose_lease_was_lost_fails_its_check() -> None:
+    from xagent.core.tools.core.RAG_tools.core.exceptions import (
+        CollectionMigratingError,
+    )
+    from xagent.core.tools.core.RAG_tools.management import migration_state
+
+    held = LeaseSet(ttl_seconds=0.2)
+    # A row that does not exist: the first renewal finds it gone.
+    held.add("not-a-real-lease")
+    set_token = migration_state._LEASE_SET.set(held)
+    leases_token = migration_state._LEASES.set((("kb", "not-a-real-lease"),))
+    try:
+        deadline = time.monotonic() + 5.0
+        while not held.lost and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with pytest.raises(CollectionMigratingError):
+            migration_state.verify_active_leases("kb")
+    finally:
+        migration_state._LEASES.reset(leases_token)
+        migration_state._LEASE_SET.reset(set_token)
+        held.release()
