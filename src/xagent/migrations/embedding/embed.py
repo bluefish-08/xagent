@@ -119,6 +119,10 @@ def embed_collections(
         embedding_use_async=use_async,
     )
     paced = PacedEmbedding(adapter, RateLimiter(rate_limit))
+    if rate_limit <= 0:
+        logger.warning(
+            "No --rate-limit set; the run will use the provider's whole quota"
+        )
     logger.info(
         "Target model: %s (dimension %s)",
         embedding_config.id,
