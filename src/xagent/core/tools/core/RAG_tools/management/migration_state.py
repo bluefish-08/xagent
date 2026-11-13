@@ -224,6 +224,45 @@ def clear_migration_state(collection_name: str) -> None:
         _safe_close_table(table)
 
 
+@asynccontextmanager
+async def holding_leases(
+    *names: str, operation: str, store: Optional[Any] = None
+) -> AsyncIterator[LeaseSet]:
+    """Lease collections for a long operation that starts outside a request scope.
+
+    The coordinator's delete and rename paths do their work after a guard that
+    returned immediately, so they hold nothing the freeze can see. They wrap
+    their whole body in this instead, and the leases then cover every write.
+    """
+    lease_set = LeaseSet(store=store)
+    set_token = _LEASE_SET.set(lease_set)
+    leases_token = _LEASES.set(_LEASES.get())
+    try:
+        for name in dict.fromkeys(names):
+            _record_lease(name, await acquire_lease_async(name, operation, store=store))
+        yield lease_set
+    finally:
+        _LEASE_SET.reset(set_token)
+        _LEASES.reset(leases_token)
+        await release_leases_async(lease_set.stop())
+
+
+@contextmanager
+def leased_collections(*names: str, operation: str) -> Iterator[LeaseSet]:
+    """Sync counterpart of :func:`holding_leases`."""
+    lease_set = LeaseSet()
+    set_token = _LEASE_SET.set(lease_set)
+    leases_token = _LEASES.set(_LEASES.get())
+    try:
+        for name in dict.fromkeys(names):
+            _record_lease(name, acquire_lease(name, operation))
+        yield lease_set
+    finally:
+        _LEASE_SET.reset(set_token)
+        _LEASES.reset(leases_token)
+        lease_set.release()
+
+
 def _admit(collection: str) -> None:
     _ADMITTED.set(_ADMITTED.get() | {collection})
 
@@ -263,12 +302,14 @@ async def _lease_for_guard_async(
 
 
 @contextmanager
-def pending_collection(*collections: str) -> Iterator[None]:
+def pending_collection(
+    *collections: str, store: Optional[Any] = None
+) -> Iterator[None]:
     """Open a scope whose first guard call per collection decides its admission."""
     token = _PENDING.set(_PENDING.get() | set(collections))
     admitted_token = _ADMITTED.set(_ADMITTED.get())
     leases_token = _LEASES.set(_LEASES.get())
-    lease_set = LeaseSet()
+    lease_set = LeaseSet(store=store)
     set_token = _LEASE_SET.set(lease_set)
     try:
         yield
@@ -292,6 +333,7 @@ async def admitted_async(collection: str) -> AsyncIterator[None]:
         yield
         return
     leases_token = _LEASES.set(_LEASES.get())
+    admitted_token = _ADMITTED.set(_ADMITTED.get())
     lease_set = LeaseSet()
     set_token = _LEASE_SET.set(lease_set)
     try:
@@ -300,11 +342,13 @@ async def admitted_async(collection: str) -> AsyncIterator[None]:
                 collection, await acquire_lease_async(collection, "admitted_async")
             )
         await ensure_collection_writable_async(collection)
-        token = _ADMITTED.set(_ADMITTED.get() | {collection})
+        _ADMITTED.set(_ADMITTED.get() | {collection})
         try:
             yield
         finally:
-            _ADMITTED.reset(token)
+            # Restore, don't subtract: an outer pending scope may have admitted
+            # this name before us, and that admission belongs to the outer scope.
+            _ADMITTED.reset(admitted_token)
     finally:
         _LEASE_SET.reset(set_token)
         _LEASES.reset(leases_token)

@@ -266,6 +266,9 @@ async def _create_knowledge_base_from_file_impl(
                 user_id=user_id,
                 is_admin=is_admin,
                 file_id=str(record.file_id),
+                # Before every write: a lease lost to a stalled process means a
+                # migration may already have started switching this collection.
+                commit_gate=lease_set.verify,
             )
             try:
                 result = await run_blocking(run_in_admitted_context, admission, func)

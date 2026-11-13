@@ -38,6 +38,12 @@ LEASES_TABLE = "collection_write_leases"
 DEFAULT_LEASE_TTL_SECONDS = 120.0
 DEFAULT_WAIT_POLL_SECONDS = 1.0
 COMPACT_EVERY_ACQUIRES = 200
+# Writers and the migration compare wall clocks. Rows expire and are judged
+# expired with this much slack, so a clock that runs ahead cannot make another
+# host's live lease look dead; the cost is a slightly longer wait.
+EXPIRY_SKEW_MARGIN_SECONDS = 5.0
+LEASE_WRITE_RETRIES = 3
+GC_EVERY_RENEWALS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +92,20 @@ def _ensure_table(conn: Any) -> None:
             raise
 
 
+def _compact() -> None:
+    try:
+        get_vector_index_store().trigger_reindex(LEASES_TABLE)
+    except Exception:  # noqa: BLE001 - compaction must never fail a write
+        logger.exception("Failed to compact %s", LEASES_TABLE)
+
+
 def _maybe_compact() -> None:
-    """Merge the lease table's fragments once every few hundred operations.
+    """Compact the lease table once every few hundred operations, off the caller.
 
     Rows are deleted on release, so the table only ever holds in-flight leases;
     what accumulates is fragments and versions from the add/delete/heartbeat
-    writes. `trigger_reindex` compacts and prunes versions for us.
+    writes. Compaction runs on a daemon thread so a slow merge never delays an
+    admission.
     """
     global _acquire_count
     with _acquire_lock:
@@ -99,10 +113,7 @@ def _maybe_compact() -> None:
         due = _acquire_count % COMPACT_EVERY_ACQUIRES == 0
     if not due:
         return
-    try:
-        get_vector_index_store().trigger_reindex(LEASES_TABLE)
-    except Exception:  # noqa: BLE001 - compaction must never fail a write
-        logger.exception("Failed to compact %s", LEASES_TABLE)
+    threading.Thread(target=_compact, name="kb-lease-compact", daemon=True).start()
 
 
 def acquire_lease(
@@ -131,7 +142,17 @@ def acquire_lease(
     }
     table = conn.open_table(LEASES_TABLE)
     try:
-        table.add([row])
+        for attempt in range(LEASE_WRITE_RETRIES):
+            try:
+                table.add([row])
+                break
+            except Exception as exc:
+                # A concurrent commit conflicts with ours; retry like the freeze
+                # table's writer, and only then let the admission fail.
+                if attempt == LEASE_WRITE_RETRIES - 1:
+                    raise
+                logger.warning("Retrying lease insert for %s: %s", name, exc)
+                time.sleep(0.1 * (2**attempt))
     finally:
         _safe_close_table(table)
     _maybe_compact()
@@ -197,11 +218,11 @@ def live_leases(name: str, *, store: Optional[Any] = None) -> List[WriteLease]:
         rows = table.search().where(where).to_arrow().to_pylist()
     finally:
         _safe_close_table(table)
-    now = _now()
+    cutoff = _now() + timedelta(seconds=EXPIRY_SKEW_MARGIN_SECONDS)
     live: List[WriteLease] = []
     for row in rows:
         expires_at = row.get("expires_at")
-        if not isinstance(expires_at, datetime) or expires_at <= now:
+        if not isinstance(expires_at, datetime) or expires_at <= cutoff:
             continue
         live.append(
             WriteLease(
@@ -216,25 +237,45 @@ def live_leases(name: str, *, store: Optional[Any] = None) -> List[WriteLease]:
     return live
 
 
-def purge_expired_leases(name: str, *, store: Optional[Any] = None) -> int:
-    """Delete ``name``'s expired rows only; live rows of any process stay."""
+def purge_expired_leases(
+    name: Optional[str] = None, *, store: Optional[Any] = None
+) -> int:
+    """Delete expired rows, of ``name`` or of every collection; live rows stay.
+
+    The delete repeats the expiry test in its own predicate, so a lease renewed
+    between the read and the delete is not removed.
+    """
     conn = _store_connection(store)
     if LEASES_TABLE not in list_table_names(conn):
         return 0
     table = conn.open_table(LEASES_TABLE)
     try:
-        where = f"name = '{escape_lancedb_string(name)}'"
+        where = (
+            f"name = '{escape_lancedb_string(name)}'"
+            if name is not None
+            else "lease_id IS NOT NULL"
+        )
         rows = table.search().where(where).to_arrow().to_pylist()
-        now = _now()
-        expired = [
-            str(row.get("lease_id") or "")
-            for row in rows
-            if isinstance(row.get("expires_at"), datetime) and row["expires_at"] <= now
-        ]
-        for lease_id in expired:
-            if lease_id:
-                table.delete(f"lease_id = '{escape_lancedb_string(lease_id)}'")
-        return len([lease_id for lease_id in expired if lease_id])
+        cutoff = _now() - timedelta(seconds=EXPIRY_SKEW_MARGIN_SECONDS)
+        purged = 0
+        for row in rows:
+            lease_id = str(row.get("lease_id") or "")
+            expires_at = row.get("expires_at")
+            if not lease_id or not isinstance(expires_at, datetime):
+                continue
+            if expires_at > cutoff:
+                continue
+            lease_where = (
+                f"lease_id = '{escape_lancedb_string(lease_id)}' "
+                f"AND expires_at <= TIMESTAMP '{cutoff:%Y-%m-%d %H:%M:%S.%f}'"
+            )
+            try:
+                result = table.delete(lease_where)
+            except Exception:  # noqa: BLE001 - a raced renewal keeps its row
+                logger.debug("Lease %s was renewed before it could be purged", lease_id)
+                continue
+            purged += int(getattr(result, "num_deleted_rows", 0) or 0)
+        return purged
     finally:
         _safe_close_table(table)
 
@@ -281,6 +322,10 @@ async def release_leases_async(
         logger.exception("Failed to release write leases: %s", sorted(ids))
 
 
+class LeaseLostError(RuntimeError):
+    """A lease this operation held was purged; it must stop writing."""
+
+
 class LeaseSet:
     """The leases one operation holds, kept alive for as long as it runs."""
 
@@ -293,6 +338,8 @@ class LeaseSet:
         self._ttl = ttl_seconds
         self._store = store
         self._ids: List[str] = []
+        self._lost: List[str] = []
+        self._renewals = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -301,6 +348,12 @@ class LeaseSet:
     def lease_ids(self) -> List[str]:
         with self._lock:
             return list(self._ids)
+
+    @property
+    def lost(self) -> List[str]:
+        """Leases this scope could not renew: they are no longer held."""
+        with self._lock:
+            return list(self._lost)
 
     def add(self, lease_id: str) -> None:
         with self._lock:
@@ -316,10 +369,43 @@ class LeaseSet:
     def _renew_loop(self) -> None:
         interval = max(0.05, float(self._ttl) / 3.0)
         while not self._stop.wait(interval):
+            ids = self.lease_ids
             try:
-                renew_leases(self.lease_ids, ttl_seconds=self._ttl, store=self._store)
+                renewed = renew_leases(ids, ttl_seconds=self._ttl, store=self._store)
             except Exception:  # noqa: BLE001 - keep trying until the scope ends
                 logger.exception("Failed to renew write leases")
+                continue
+            if renewed < len(ids):
+                # A row we could not renew was purged as expired; the scope's
+                # writes are no longer covered by a lease.
+                with self._lock:
+                    for lease_id in ids:
+                        if lease_id not in self._lost:
+                            self._lost.append(lease_id)
+                logger.error(
+                    "Lost %d of %d write leases; the operation must stop",
+                    len(ids) - renewed,
+                    len(ids),
+                )
+            self._renewals += 1
+            if self._renewals % GC_EVERY_RENEWALS == 0:
+                try:
+                    purge_expired_leases(store=self._store)
+                except Exception:  # noqa: BLE001 - GC must never fail a scope
+                    logger.exception("Failed to purge expired write leases")
+
+    def verify(self) -> None:
+        """Raise when this scope no longer holds every lease it took.
+
+        Writers call this at their commit points: a lease lost to a stalled
+        process would otherwise let it write while the migration believes the
+        collection is quiet.
+        """
+        lost = self.lost
+        if lost:
+            raise LeaseLostError(
+                f"Lost {len(lost)} write lease(s): {', '.join(sorted(lost))}"
+            )
 
     def stop(self) -> List[str]:
         """Stop renewing and return the ids; safe to call more than once."""

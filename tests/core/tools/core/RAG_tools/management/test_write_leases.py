@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -103,9 +104,10 @@ def test_renewal_never_shortens_a_lease() -> None:
 
 def test_purging_removes_only_expired_rows_of_that_collection() -> None:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    _insert_lease("kb", "expired", now - timedelta(seconds=1))
+    long_gone = timedelta(seconds=leases.EXPIRY_SKEW_MARGIN_SECONDS + 60)
+    _insert_lease("kb", "expired", now - long_gone)
     _insert_lease("kb", "live", now + timedelta(minutes=5))
-    _insert_lease("other", "expired-other", now - timedelta(seconds=1))
+    _insert_lease("other", "expired-other", now - long_gone)
 
     assert purge_expired_leases("kb") == 1
 
@@ -256,7 +258,9 @@ async def test_admitted_async_takes_the_lease_before_it_reads_the_freeze_state(
 
 def test_a_waiter_clears_expired_rows_it_finds_nothing_live_for() -> None:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    _insert_lease("kb", "expired", now - timedelta(seconds=1))
+    _insert_lease(
+        "kb", "expired", now - timedelta(seconds=leases.EXPIRY_SKEW_MARGIN_SECONDS + 60)
+    )
 
     assert wait_for_no_leases("kb", timeout_seconds=0.0) == []
 
@@ -281,7 +285,10 @@ async def test_admitted_async_inside_a_pending_scope_keeps_one_lease() -> None:
     assert live_leases("kb") == []
 
 
-def test_the_heartbeat_extends_a_held_lease() -> None:
+def test_the_heartbeat_extends_a_held_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(leases, "EXPIRY_SKEW_MARGIN_SECONDS", 0.0)
     held = LeaseSet(ttl_seconds=0.5)
     try:
         held.add(acquire_lease("kb", "test", ttl_seconds=0.5))
@@ -312,4 +319,314 @@ def test_the_lease_table_is_compacted_periodically(
 
     acquire_lease("kb", "test")
 
+    deadline = time.monotonic() + 3.0
+    while not compacted and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert compacted == [LEASES_TABLE]
+
+
+def test_a_lease_expiring_within_the_clock_margin_is_not_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _insert_lease("kb", "soon", now + timedelta(seconds=1))
+
+    assert live_leases("kb") == []
+
+
+def test_purging_keeps_a_lease_renewed_between_the_read_and_the_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _insert_lease(
+        "kb", "expired", now - timedelta(seconds=leases.EXPIRY_SKEW_MARGIN_SECONDS + 60)
+    )
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+
+    conn = get_metadata_store().get_raw_connection()
+    table = conn.open_table(LEASES_TABLE)
+    state = {"renewed": False}
+    original_delete = table.delete
+
+    def _delete(where: str):
+        if not state["renewed"]:
+            state["renewed"] = True
+            # Another host renews its lease before our delete lands.
+            table.update(
+                "lease_id = 'expired'",
+                {"expires_at": now + timedelta(minutes=5)},
+            )
+        return original_delete(where)
+
+    class _Conn:
+        def __getattr__(self, name: str):
+            return getattr(conn, name)
+
+        def open_table(self, name: str):
+            if name == LEASES_TABLE:
+                return _Instrumented(table, _delete)
+            return conn.open_table(name)
+
+    monkeypatch.setattr(leases, "_store_connection", lambda store: _Conn())
+
+    purged = purge_expired_leases("kb")
+
+    assert state["renewed"] is True
+    assert purged == 0
+    assert [lease.lease_id for lease in live_leases("kb")] == ["expired"]
+
+
+class _Instrumented:
+    def __init__(self, table, delete) -> None:
+        self._table = table
+        self._delete = delete
+
+    def __getattr__(self, name: str):
+        return getattr(self._table, name)
+
+    def delete(self, where: str):
+        return self._delete(where)
+
+
+def test_a_scope_reports_a_lease_it_could_not_renew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(leases, "renew_leases", lambda ids, **kwargs: 0)
+    held = LeaseSet(ttl_seconds=0.2)
+    try:
+        held.add(acquire_lease("kb", "test"))
+        deadline = time.monotonic() + 5.0
+        while not held.lost and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert held.lost
+        with pytest.raises(leases.LeaseLostError):
+            held.verify()
+    finally:
+        held.release()
+
+
+def test_a_scope_that_keeps_its_leases_verifies_clean() -> None:
+    held = LeaseSet()
+    try:
+        held.add(acquire_lease("kb", "test"))
+        held.verify()
+    finally:
+        held.release()
+
+
+def test_a_lease_insert_conflict_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+
+    table = get_metadata_store().get_raw_connection()
+    leases._ensure_table(table)
+    real_table = table.open_table(LEASES_TABLE)
+    calls = {"n": 0}
+    original_add = real_table.add
+
+    def _add(rows):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("CommitConflict")
+        return original_add(rows)
+
+    monkeypatch.setattr(real_table, "add", _add)
+
+    class _Conn:
+        def __getattr__(self, name):
+            return getattr(table, name)
+
+        def open_table(self, name):
+            return real_table
+
+    monkeypatch.setattr(leases, "_store_connection", lambda store: _Conn())
+
+    assert acquire_lease("kb", "test")
+    assert calls["n"] == 2
+
+
+async def test_admitted_async_hands_its_admission_back_to_the_outer_scope() -> None:
+    with pending_collection("kb"):
+        async with admitted_async("kb"):
+            pass
+        # The outer scope still owns the admission it granted.
+        ensure_collection_writable("kb")
+
+    _freeze()
+    with pytest.raises(CollectionMigratingError):
+        ensure_collection_writable("kb")
+
+
+async def test_holding_leases_covers_the_work_and_never_leaks() -> None:
+    from xagent.core.tools.core.RAG_tools.management.migration_state import (
+        holding_leases,
+    )
+
+    async with holding_leases("kb", "other", operation="collection-delete"):
+        assert {lease.name for lease in live_leases("kb")} == {"kb"}
+        assert len(live_leases("other")) == 1
+
+    assert live_leases("kb") == []
+    assert live_leases("other") == []
+
+
+async def test_holding_leases_releases_on_failure() -> None:
+    from xagent.core.tools.core.RAG_tools.management.migration_state import (
+        holding_leases,
+    )
+
+    with pytest.raises(RuntimeError):
+        async with holding_leases("kb", operation="collection-rename"):
+            raise RuntimeError("rename exploded")
+
+    assert live_leases("kb") == []
+
+
+def test_leased_collections_covers_sync_work_and_never_leaks() -> None:
+    from xagent.core.tools.core.RAG_tools.management.migration_state import (
+        leased_collections,
+    )
+
+    with leased_collections("kb", operation="document-delete"):
+        assert len(live_leases("kb")) == 1
+
+    assert live_leases("kb") == []
+
+
+async def test_a_collection_delete_holds_its_lease_for_the_whole_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from xagent.core.tools.core.RAG_tools.kb.coordinator import KBCoordinator
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+
+    coordinator = KBCoordinator()
+    store = get_metadata_store()
+
+    async def _context(request):
+        return SimpleNamespace(metadata_store=store)
+
+    seen = []
+    handle = MagicMock()
+    handle.list_collection_documents = MagicMock(
+        side_effect=lambda *args, **kwargs: seen.append(len(live_leases("kb"))) or []
+    )
+    handle.delete_collection_data = MagicMock(return_value={})
+    handle.delete_collection_config = MagicMock()
+
+    monkeypatch.setattr(coordinator, "get_context", _context)
+    monkeypatch.setattr(coordinator, "_ensure_writable", AsyncMock())
+    monkeypatch.setattr(coordinator, "open_collection", AsyncMock(return_value=handle))
+
+    await coordinator.delete_collection("kb", user_id=1, is_admin=True)
+
+    assert seen == [1]
+    assert live_leases("kb") == []
+
+
+async def test_a_collection_rename_leases_both_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from xagent.core.tools.core.RAG_tools.kb.coordinator import KBCoordinator
+    from xagent.core.tools.core.RAG_tools.storage.factory import get_metadata_store
+
+    coordinator = KBCoordinator()
+    store = get_metadata_store()
+
+    async def _context(request):
+        return SimpleNamespace(metadata_store=store)
+
+    during = []
+    handle = MagicMock()
+
+    def _rename_data(*args, **kwargs):
+        during.append((len(live_leases("old")), len(live_leases("new"))))
+        return []
+
+    handle.rename_collection_data = MagicMock(side_effect=_rename_data)
+    handle.rename_collection_status = AsyncMock(return_value=[])
+    handle.rename_collection_metadata = AsyncMock()
+
+    monkeypatch.setattr(coordinator, "get_context", _context)
+    monkeypatch.setattr(coordinator, "_ensure_writable", AsyncMock())
+    monkeypatch.setattr(coordinator, "open_collection", AsyncMock(return_value=handle))
+
+    await coordinator.rename_collection("old", "new", user_id=1, is_admin=False)
+
+    assert during == [(1, 1)]
+    assert live_leases("old") == []
+    assert live_leases("new") == []
+
+
+def test_a_document_delete_holds_its_lease_for_the_whole_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from xagent.core.tools.core.RAG_tools.management import collections as manager
+
+    seen = []
+
+    class _Store:
+        def count_rows(self, **kwargs):
+            seen.append(len(live_leases("kb")))
+            return 0
+
+        def __getattr__(self, name):
+            return MagicMock()
+
+    monkeypatch.setattr(manager, "get_vector_index_store", lambda: _Store())
+
+    manager._delete_document_impl("kb", "doc-1", 7, False, coordinator=MagicMock())
+
+    assert seen == [1]
+    assert live_leases("kb") == []
+
+
+async def test_admitted_async_does_not_leave_the_name_admitted() -> None:
+    async with admitted_async("kb"):
+        pass
+
+    _freeze()
+    with pytest.raises(CollectionMigratingError):
+        ensure_collection_writable("kb")
+
+
+def test_the_heartbeat_collects_expired_rows_of_other_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    purged = []
+    monkeypatch.setattr(leases, "renew_leases", lambda ids, **kwargs: len(ids))
+    monkeypatch.setattr(
+        leases, "purge_expired_leases", lambda name=None, **kwargs: purged.append(name)
+    )
+    monkeypatch.setattr(leases, "GC_EVERY_RENEWALS", 1)
+    held = LeaseSet(ttl_seconds=0.2)
+    try:
+        held.add(acquire_lease("kb", "test"))
+        deadline = time.monotonic() + 5.0
+        while not purged and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert purged == [None]
+    finally:
+        held.release()
+
+
+def test_compaction_does_not_delay_the_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SlowStore:
+        def trigger_reindex(self, table: str) -> bool:
+            time.sleep(1.0)
+            return True
+
+    monkeypatch.setattr(leases, "get_vector_index_store", lambda: _SlowStore())
+    monkeypatch.setattr(leases, "_acquire_count", leases.COMPACT_EVERY_ACQUIRES - 1)
+
+    started = time.monotonic()
+    acquire_lease("kb", "test")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
