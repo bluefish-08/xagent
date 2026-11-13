@@ -157,7 +157,7 @@ def embed_collections(
         logger.warning("No collections in scope; check --collection/--team")
         return report
 
-    embedding_config, adapter = _resolve_target_model(model_id)
+    embedding_config, adapter = resolve_target_model(model_id)
     cfg = IngestionConfig(
         embedding_model_id=embedding_config.id,
         embedding_batch_size=batch_size,
@@ -198,7 +198,7 @@ def embed_collections(
     return report
 
 
-def _resolve_target_model(model_id: str) -> Tuple[EmbeddingModelConfig, BaseEmbedding]:
+def resolve_target_model(model_id: str) -> Tuple[EmbeddingModelConfig, BaseEmbedding]:
     # The hub resolves a bare name only among the models the scope may use;
     # the command acts for the deployment, so it resolves as an admin.
     with user_scope_context(None, True):

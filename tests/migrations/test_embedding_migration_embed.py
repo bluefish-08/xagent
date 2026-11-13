@@ -55,7 +55,7 @@ def _wire(
     monkeypatch.setattr(mod, "resolve_collection_names", lambda **kwargs: list(names))
     monkeypatch.setattr(
         mod,
-        "_resolve_target_model",
+        "resolve_target_model",
         lambda model_id: (
             EmbeddingModelConfig(id=model_id, model_name="stub", dimension=2),
             _StubAdapter(),
@@ -351,7 +351,7 @@ def test_reads_use_the_canonical_model_id_the_adapter_resolved(
     )
     monkeypatch.setattr(
         mod,
-        "_resolve_target_model",
+        "resolve_target_model",
         lambda model_id: (
             EmbeddingModelConfig(id="canonical", model_name="stub", dimension=2),
             _StubAdapter(),
