@@ -76,7 +76,7 @@ _SPREADSHEET_CHUNK_SIZE_TOKENS = 512
 _SPREADSHEET_CHUNK_OVERLAP_TOKENS = 64
 
 
-def _is_spreadsheet_source(source_path: str) -> bool:
+def is_spreadsheet_source(source_path: str) -> bool:
     return Path(source_path).suffix.lower() in _SPREADSHEET_EXTENSIONS
 
 
@@ -1590,7 +1590,7 @@ def _process_document_impl(
                 cfg=cfg,
                 user_id=user_id,
                 is_admin=is_admin,
-                is_spreadsheet=_is_spreadsheet_source(source_path),
+                is_spreadsheet=is_spreadsheet_source(source_path),
                 commit_gate=commit_gate,
                 progress_tracker=progress_tracker,
                 result=embedding_stage,
