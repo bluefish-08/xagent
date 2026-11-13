@@ -1,204 +1,243 @@
-"""Tests for the switch's per-document acceptance check."""
+"""Tests for the switch's per-row acceptance check, on a real LanceDB."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
+import lancedb
 import pyarrow as pa
 import pytest
 
 from xagent.migrations.embedding import acceptance as mod
+from xagent.migrations.embedding import scope as scope_mod
 
 Row = Tuple[str, str, Optional[int]]
+GOOD = [0.5, 0.5]
+
+_SCHEMA = pa.schema(
+    [
+        ("collection", pa.string()),
+        ("doc_id", pa.string()),
+        ("chunk_id", pa.string()),
+        ("user_id", pa.int64()),
+        ("text", pa.string()),
+        ("vector", pa.list_(pa.float32())),
+    ]
+)
 
 
-class _Table:
-    def __init__(self, rows: List[Dict[str, Any]], *, nulls: int = 0) -> None:
-        self._rows = rows
-        self._nulls = nulls
-
-    def to_batches(self, *, filter: str, batch_size: int = 1000) -> Iterator[Any]:
-        if not self._rows:
-            return
-        rows = [dict(row) for row in self._rows]
-        for index in range(self._nulls):
-            rows[index]["vector"] = None
-        yield pa.RecordBatch.from_pylist(
-            rows,
-            schema=pa.schema(
-                [
-                    ("doc_id", pa.string()),
-                    ("chunk_id", pa.string()),
-                    ("user_id", pa.int64()),
-                    ("vector", pa.list_(pa.float32())),
-                ]
-            ),
-        )
-
-    def close(self) -> None:  # pragma: no cover
-        pass
+@pytest.fixture
+def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(scope_mod, "_legacy_table_name", lambda model_id: None)
+    return lancedb.connect(str(tmp_path / "db"))
 
 
-class _Conn:
-    def __init__(self, tables: Dict[str, _Table]) -> None:
-        self.tables = tables
-
-    def open_table(self, name: str) -> _Table:
-        return self.tables[name]
-
-    def list_tables(self) -> List[str]:
-        return list(self.tables)
+def _table(
+    conn: Any, name: str, rows: List[Dict[str, Any]], schema: Any = None
+) -> None:
+    if not rows:
+        conn.create_table(name, schema=schema or _SCHEMA)
+        return
+    full = [{"collection": "kb", "text": "t", "vector": GOOD, **row} for row in rows]
+    conn.create_table(name, data=pa.Table.from_pylist(full, schema=schema or _SCHEMA))
 
 
 def _rows(items: List[Row]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "doc_id": doc,
-            "chunk_id": chunk,
-            "user_id": owner,
-            "vector": [0.5, 0.5],
-        }
-        for doc, chunk, owner in items
-    ]
+    return [{"doc_id": d, "chunk_id": c, "user_id": u} for d, c, u in items]
 
 
-def _check(
-    monkeypatch: pytest.MonkeyPatch,
-    source: Optional[List[Row]],
-    target: Optional[List[Row]],
-    *,
-    skipped: Optional[Set[str]] = None,
-    nulls: int = 0,
-) -> mod.AcceptanceResult:
-    tables: Dict[str, _Table] = {}
-    if source is not None:
-        tables["embeddings_old"] = _Table(_rows(source))
-    if target is not None:
-        tables["embeddings_new"] = _Table(_rows(target), nulls=nulls)
-    monkeypatch.setattr(mod, "connection", lambda: _Conn(tables))
+def _check(conn: Any) -> mod.AcceptanceResult:
     return mod.check_collection(
-        "kb",
-        source_model_id="old",
-        target_model_id="new",
-        skipped=skipped,
+        "kb", source_model_id="old", target_model_id="new", conn=conn
     )
 
 
-def test_matching_chunks_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_matching_rows_pass(conn: Any) -> None:
     rows: List[Row] = [("a", "a1", 1), ("a", "a2", 1), ("b", "b1", 1)]
+    _table(conn, "embeddings_old", _rows(rows))
+    _table(conn, "embeddings_new", _rows(rows))
 
-    result = _check(monkeypatch, rows, list(rows))
-
-    assert result.ok is True
-    assert result.checks["documents"] == 2
-    assert result.checks["chunks"] == 3
-
-
-def test_an_empty_collection_switches_without_a_target_table(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = _check(monkeypatch, [], None)
+    result = _check(conn)
 
     assert result.ok is True
+    assert result.checks["source_rows"] == 3
+    assert result.checks["target_rows"] == 3
 
 
-def test_nothing_copied_for_a_non_empty_source_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = _check(monkeypatch, [("a", "a1", 1)], None)
+def test_other_collections_are_not_compared(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
+    _table(
+        conn,
+        "embeddings_new",
+        _rows([("a", "a1", 1)])
+        + [{"collection": "other", **_rows([("z", "z1", 1)])[0]}],
+    )
+
+    assert _check(conn).ok is True
+
+
+def test_an_empty_collection_switches_without_a_target_table(conn: Any) -> None:
+    _table(conn, "embeddings_old", [])
+
+    assert _check(conn).ok is True
+
+
+def test_nothing_copied_for_a_non_empty_source_fails(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
+
+    result = _check(conn)
 
     assert result.ok is False
-    assert result.checks["document_mismatch_count"] == 1
+    assert result.checks["row_mismatch_count"] == 1
 
 
-def test_a_missing_source_table_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _check(monkeypatch, None, [("a", "a1", 1)])
+def test_a_missing_source_table_fails(conn: Any) -> None:
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1)]))
+
+    result = _check(conn)
 
     assert result.ok is False
     assert "does not exist" in result.failures[0]
 
 
-def test_ownerless_documents_are_left_out_of_both_sides(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_source_is_read_from_the_legacy_table_search_uses(
+    conn: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source: List[Row] = [("a", "a1", 1), ("legacy", "l1", None), ("legacy", "l2", None)]
-
-    result = _check(monkeypatch, source, [("a", "a1", 1)])
-
-    assert result.ok is True
-    assert result.checks["ownerless_excluded"] == 1
-
-
-def test_a_skipped_document_is_left_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _check(
-        monkeypatch,
-        [("a", "a1", 1), ("broken", "x1", 1)],
-        [("a", "a1", 1)],
-        skipped={"broken"},
+    monkeypatch.setattr(
+        scope_mod, "_legacy_table_name", lambda model_id: "embeddings_legacy_name"
     )
+    _table(conn, "embeddings_legacy_name", _rows([("a", "a1", 1), ("a", "a2", 1)]))
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1)]))
+
+    result = _check(conn)
+
+    assert result.ok is False
+    assert result.checks["source_rows"] == 2
+
+
+def test_ownerless_rows_are_left_out_of_both_sides(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1), ("a", "l1", None)]))
+    # Rollback direction: the old table holds a legacy ownerless row too.
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1), ("b", "l2", None)]))
+
+    result = _check(conn)
 
     assert result.ok is True
+    assert result.checks["excluded_no-owner"] == 1
+    assert result.checks["target_excluded_no-owner"] == 1
 
 
-def test_a_chunk_missing_from_the_target_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = _check(monkeypatch, [("a", "a1", 1), ("a", "a2", 1)], [("a", "a1", 1)])
+def test_a_textless_row_excludes_only_itself(conn: Any) -> None:
+    source = _rows([("a", "a1", 1), ("a", "a2", 1), ("a", "a3", 1)])
+    source[2]["text"] = ""
+    _table(conn, "embeddings_old", source)
+    # a2 is missing from the target: the textless a3 must not hide that.
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1)]))
 
-    assert result.ok is False
-    assert result.checks["document_mismatches"] == ["a"]
-
-
-def test_an_extra_target_chunk_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _check(monkeypatch, [("a", "a1", 1)], [("a", "a1", 1), ("a", "a2", 1)])
-
-    assert result.ok is False
-
-
-def test_a_chunk_with_another_owner_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _check(monkeypatch, [("a", "a1", 1)], [("a", "a1", 2)])
+    result = _check(conn)
 
     assert result.ok is False
-    assert result.checks["document_mismatches"] == ["a"]
+    assert result.checks["row_mismatches"] == ["a:a2"]
+    assert result.checks["excluded_no-text"] == 1
 
 
-def test_a_null_vector_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _check(monkeypatch, [("a", "a1", 1)], [("a", "a1", 1)], nulls=1)
+def test_a_null_text_row_is_excluded(conn: Any) -> None:
+    source = _rows([("a", "a1", 1), ("a", "a2", 1)])
+    source[1]["text"] = None
+    _table(conn, "embeddings_old", source)
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1)]))
+
+    result = _check(conn)
+
+    assert result.ok is True
+    assert result.checks["excluded_no-text"] == 1
+
+
+def test_a_row_missing_from_the_target_fails(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1), ("a", "a2", 1)]))
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1)]))
+
+    result = _check(conn)
 
     assert result.ok is False
-    assert result.checks["null_vectors"] == 1
+    assert result.checks["row_mismatches"] == ["a:a2"]
+
+
+def test_an_extra_target_row_fails(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
+    _table(conn, "embeddings_new", _rows([("a", "a1", 1), ("a", "a2", 1)]))
+
+    assert _check(conn).ok is False
+
+
+def test_a_row_with_another_owner_fails(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
+    _table(conn, "embeddings_new", _rows([("a", "a1", 2)]))
+
+    result = _check(conn)
+
+    assert result.ok is False
+    assert result.checks["row_mismatches"] == ["a:a1"]
+
+
+# LanceDB itself rejects NaN and ragged vectors on write; these still land.
+@pytest.mark.parametrize("vector", [None, [0.0, 0.0], [float("inf"), 1.0]])
+def test_an_unusable_target_vector_fails(conn: Any, vector: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1), ("a", "a2", 1)]))
+    target = _rows([("a", "a1", 1), ("a", "a2", 1)])
+    target[1]["vector"] = vector
+    _table(conn, "embeddings_new", target)
+
+    result = _check(conn)
+
+    assert result.ok is False
+    assert result.checks["target_bad_vectors"] == 1
+
+
+def test_a_bad_vector_on_an_excluded_row_is_ignored(conn: Any) -> None:
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
+    target = _rows([("a", "a1", 1), ("legacy", "l1", None)])
+    target[1]["vector"] = None
+    _table(conn, "embeddings_new", target)
+
+    result = _check(conn)
+
+    assert result.ok is True
+    assert result.checks["target_bad_vectors"] == 0
 
 
 def test_a_failed_read_raises_instead_of_passing(
-    monkeypatch: pytest.MonkeyPatch,
+    conn: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class _Broken(_Table):
-        def to_batches(self, **kwargs: Any) -> Any:
-            raise RuntimeError("corrupt table")
+    _table(conn, "embeddings_old", _rows([("a", "a1", 1)]))
 
-    monkeypatch.setattr(
-        mod, "connection", lambda: _Conn({"embeddings_old": _Broken([])})
-    )
+    def _broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("corrupt table")
+
+    monkeypatch.setattr(mod, "iter_rows", _broken)
 
     with pytest.raises(RuntimeError, match="corrupt table"):
-        mod.check_collection("kb", source_model_id="old", target_model_id="new")
+        _check(conn)
 
 
-def test_a_null_vector_on_an_excluded_document_is_ignored(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source: List[Row] = [("a", "a1", 1), ("legacy", "l1", None)]
-    tables = {
-        "embeddings_old": _Table(_rows(source)),
-        "embeddings_new": _Table(
-            _rows([("a", "a1", 1), ("legacy", "l1", None)]), nulls=0
+def test_a_table_without_a_text_column_is_a_hard_failure(conn: Any) -> None:
+    schema = pa.schema([f for f in _SCHEMA if f.name != "text"])
+    conn.create_table(
+        "embeddings_old",
+        data=pa.Table.from_pylist(
+            [
+                {
+                    "collection": "kb",
+                    "doc_id": "a",
+                    "chunk_id": "a1",
+                    "user_id": 1,
+                    "vector": GOOD,
+                }
+            ],
+            schema=schema,
         ),
-    }
-    # Give the ownerless document a null vector under the target model.
-    tables["embeddings_new"]._rows[1]["vector"] = None
-    monkeypatch.setattr(mod, "connection", lambda: _Conn(tables))
+    )
 
-    result = mod.check_collection("kb", source_model_id="old", target_model_id="new")
-
-    assert result.ok is True
-    assert result.checks["null_vectors"] == 0
+    with pytest.raises(mod.MigrationCliError, match="no text column"):
+        _check(conn)
