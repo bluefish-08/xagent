@@ -31,6 +31,7 @@ from xagent.core.tools.core.RAG_tools.pipelines.document_ingestion import (
     embed_document_chunks,
     is_spreadsheet_source,
 )
+from xagent.core.tools.core.RAG_tools.storage.vector_backend import KBStorageBackend
 from xagent.core.tools.core.RAG_tools.utils.model_resolver import (
     resolve_embedding_adapter,
 )
@@ -43,6 +44,7 @@ from xagent.migrations.embedding.common import (
     MigrationCliError,
     PacedEmbedding,
     RateLimiter,
+    collection_backend,
     iter_documents,
     load_successful_parse_hashes,
     resolve_collection_names,
@@ -56,6 +58,7 @@ logger = logging.getLogger(__name__)
 SKIP_NO_OWNER = "no-owner"
 SKIP_NO_SUCCESSFUL_INGEST = "no-successful-ingest"
 SKIP_NO_PARSE_HASH = "no-parse-hash"
+SKIP_OTHER_ENGINE = "other-engine"
 
 # A broken provider or credential fails every document alike; stop instead of
 # walking the rest of the deployment.
@@ -71,6 +74,8 @@ class DocumentFailure:
 @dataclass
 class CollectionReport:
     name: str
+    engine: str = ""
+    collection_skip: Optional[str] = None
     documents_total: int = 0
     documents_embedded: int = 0
     documents_unchanged: int = 0
@@ -170,6 +175,14 @@ def _embed_collection(
     dry_run: bool,
 ) -> CollectionReport:
     report = CollectionReport(name=name)
+    report.engine = collection_backend(name)
+    if report.engine != KBStorageBackend.LANCEDB.value:
+        # Other engines are a later phase; skipping beats failing the whole run.
+        report.collection_skip = SKIP_OTHER_ENGINE
+        logger.warning(
+            "%s: %s engine is not covered by this command; skipped", name, report.engine
+        )
+        return report
     parse_hashes = load_successful_parse_hashes(name)
     # Chunks kept from an earlier parse of the same content are out of scope;
     # the switch's acceptance has to catch that difference.
@@ -268,6 +281,8 @@ def _skip(report: CollectionReport, reason: str, doc: DocumentScope) -> None:
 
 
 def _describe(report: CollectionReport, *, dry_run: bool) -> str:
+    if report.collection_skip == SKIP_OTHER_ENGINE:
+        return f"skipped ({report.engine} engine)"
     verb = "would embed" if dry_run else "embedded"
     parts = [
         f"{report.documents_total} documents",
@@ -340,7 +355,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=float,
         default=0.0,
         metavar="N",
-        help="Maximum embeddings per second across the run; 0 = unlimited",
+        help=(
+            "Maximum texts embedded per second across the run (one per chunk; "
+            "a batch request counts its items); 0 = unlimited"
+        ),
     )
     parser.add_argument(
         "--use-async",

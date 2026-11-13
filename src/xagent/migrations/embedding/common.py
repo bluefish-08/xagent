@@ -123,6 +123,22 @@ def resolve_collection_names(
     return _all_collection_names()
 
 
+def collection_backend(collection: str) -> str:
+    """The engine a collection is bound to; the deployment's when unbound."""
+    from xagent.core.tools.core.RAG_tools.kb.coordinator import (
+        resolve_collection_backend,
+    )
+    from xagent.core.tools.core.RAG_tools.management.collection_manager import (
+        get_collection_sync,
+    )
+
+    try:
+        info: object | None = get_collection_sync(collection)
+    except ValueError:
+        info = None
+    return str(resolve_collection_backend(info).value)
+
+
 def _all_collection_names() -> List[str]:
     from xagent.core.tools.core.RAG_tools.management.collections import (
         list_collections,
